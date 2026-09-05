@@ -59,7 +59,7 @@ jobs:
           UI_RESULTS: ${{ github.workspace }}/desktop/ui-test-results
           UI_RECORD: '1'
           UI_SLOW_MO: '100'
-        run: node desktop/e2e/terminal-workspace.mjs
+        run: npm test --prefix desktop/e2e
       - name: Prepare reviewable MP4 recordings
         if: always()
         run: |
