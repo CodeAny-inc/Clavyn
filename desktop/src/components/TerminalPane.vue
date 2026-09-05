@@ -60,18 +60,32 @@ const configuredEndpoint = computed(() => {
 });
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
 
-function fit(focus = false) {
-  if (disposed || !props.visible || !term || !fitAddon || !containerRef.value?.clientWidth || !containerRef.value.clientHeight) return;
-  try {
-    fitAddon.fit();
-    if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
-    if (focus && isActive.value && !showSearch.value) term.focus();
-  } catch { /* ResizeObserver can run during teardown. */ }
+function focusInput() {
+  if (disposed || !isActive.value) return;
+  // An open search belongs to this pane too. Never leave focus on another host.
+  if (showSearch.value) searchInputRef.value?.focus();
+  else term?.focus();
 }
+function fit(focus = false) {
+  if (disposed || !props.visible || !term || !fitAddon) return;
+  try {
+    if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
+      fitAddon.fit();
+      if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
+    }
+  } catch { /* ResizeObserver can run during teardown. */ }
+  // Focus restoration must not depend on the resize measurement being ready.
+  if (focus) focusInput();
+}
+// Exit before the destination pane's post-render watcher can focus its input.
+// This also covers same-tab shortcuts, not only changes to the active tab/tree.
+watch(isActive, active => {
+  if (!active && isFullscreen.value) ui.exitFullscreen();
+}, { flush: "sync" });
 watch([isActive, isFullscreen, () => props.visible], () => nextTick(() => fit(true)), { flush: "post" });
 function activatePane(focusTerminal = false) {
   tabs.setActivePane(props.pane.id);
-  if (focusTerminal && !showSearch.value) term?.focus();
+  if (focusTerminal) focusInput();
 }
 function focusPane() { activatePane(true); }
 function writeError(message: string) {
@@ -91,9 +105,17 @@ async function connectSession() {
   try {
     if (previous) await api.closeSession(previous).catch(() => {});
     if (disposed) return;
-    fit();
     const terminal = term;
     if (!terminal) return;
+    if (previous) {
+      // Old-session events are already filtered by currentSessionId. Drain any
+      // output queued in xterm before resetting, so it cannot re-enable old modes.
+      await new Promise<void>(resolve => terminal.write("", resolve));
+      if (disposed) return;
+      searchAddon?.clearDecorations();
+      terminal.reset();
+    }
+    fit();
     if (props.pane.terminalType === "local") {
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
     } else {
@@ -203,13 +225,17 @@ onBeforeUnmount(() => {
 function openSearch() {
   activatePane();
   showSearch.value = true;
-  nextTick(() => { searchInputRef.value?.focus(); searchInputRef.value?.select(); });
+  nextTick(() => {
+    if (disposed || !isActive.value) return;
+    focusInput();
+    searchInputRef.value?.select();
+  });
 }
 function closeSearch() {
   activatePane();
   showSearch.value = false;
   searchAddon?.clearDecorations();
-  term?.focus();
+  focusInput();
 }
 function toggleFullscreen() {
   activatePane();
