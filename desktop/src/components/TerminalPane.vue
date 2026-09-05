@@ -14,6 +14,7 @@ import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import type { Host } from "../types";
 
 const props = withDefaults(defineProps<{ pane: Pane; tabId: string; visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ "split-h": []; "split-v": []; close: [] }>();
@@ -32,6 +33,7 @@ const searchCaseSensitive = ref(false);
 const searchRegex = ref(false);
 const searchWholeWord = ref(false);
 const searchInputRef = ref<HTMLInputElement | null>(null);
+const connectedEndpoint = ref<string | null>(props.pane.terminalType === "local" ? "Local shell" : null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
@@ -48,6 +50,16 @@ const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
 const status = computed(() => connecting.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
 const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
 
+function formatHostEndpoint(host: Host) {
+  return `${host.username}@${host.hostname}:${host.port}`;
+}
+const configuredEndpoint = computed(() => {
+  if (props.pane.terminalType === "local") return "Local shell";
+  const host = hosts.hosts.find(item => item.id === props.pane.hostId);
+  return host ? formatHostEndpoint(host) : props.pane.title;
+});
+const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
+
 function fit(focus = false) {
   if (disposed || !props.visible || !term || !fitAddon || !containerRef.value?.clientWidth || !containerRef.value.clientHeight) return;
   try {
@@ -57,7 +69,11 @@ function fit(focus = false) {
   } catch { /* ResizeObserver can run during teardown. */ }
 }
 watch([isActive, isFullscreen, () => props.visible], () => nextTick(() => fit(true)), { flush: "post" });
-function focusPane() { tabs.setActivePane(props.pane.id); if (!showSearch.value) term?.focus(); }
+function activatePane(focusTerminal = false) {
+  tabs.setActivePane(props.pane.id);
+  if (focusTerminal && !showSearch.value) term?.focus();
+}
+function focusPane() { activatePane(true); }
 function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
@@ -71,6 +87,7 @@ async function connectSession() {
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
   sessionEnded = false;
+  let endpointForAttempt = "Local shell";
   try {
     if (previous) await api.closeSession(previous).catch(() => {});
     if (disposed) return;
@@ -82,6 +99,7 @@ async function connectSession() {
     } else {
       const host = hosts.hosts.find(h => h.id === props.pane.hostId);
       if (!host) throw new Error("Host not found. Check the saved host configuration.");
+      endpointForAttempt = formatHostEndpoint(host);
       const identity = identities.identities.find(i => i.id === host.identity_id);
       const auth = identity?.auth ?? host.auth;
       if (auth === "publickey" && !vault.unlocked) {
@@ -103,7 +121,12 @@ async function connectSession() {
       await api.closeSession(sessionId).catch(() => {});
       return;
     }
-    if (!sessionEnded) tabs.setPaneConnected(props.pane.id, sessionId);
+    if (!sessionEnded) {
+      // Keep the UI tied to the endpoint that actually owns this successful session.
+      // Editing/deleting the saved Host must not relabel a live shell.
+      connectedEndpoint.value = endpointForAttempt;
+      tabs.setPaneConnected(props.pane.id, sessionId);
+    }
     fit(true);
   } catch (cause) {
     if (!disposed) writeError(`Connection failed: ${String(cause)}`);
@@ -177,8 +200,21 @@ onBeforeUnmount(() => {
   if (currentSessionId && (!props.pane.closing || props.pane.sessionId !== currentSessionId))
     void api.closeSession(currentSessionId).catch(() => {});
 });
-function openSearch() { showSearch.value = true; nextTick(() => { searchInputRef.value?.focus(); searchInputRef.value?.select(); }); }
-function closeSearch() { showSearch.value = false; searchAddon?.clearDecorations(); term?.focus(); }
+function openSearch() {
+  activatePane();
+  showSearch.value = true;
+  nextTick(() => { searchInputRef.value?.focus(); searchInputRef.value?.select(); });
+}
+function closeSearch() {
+  activatePane();
+  showSearch.value = false;
+  searchAddon?.clearDecorations();
+  term?.focus();
+}
+function toggleFullscreen() {
+  activatePane();
+  ui.toggleFullscreen(props.pane.id);
+}
 function doSearch(previous = false) {
   if (!searchQuery.value) { searchAddon?.clearDecorations(); return; }
   const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
@@ -216,10 +252,6 @@ function drop(event: DragEvent) {
   event.preventDefault();
   tabs.dropPane(props.pane.id, dropPosition(event));
 }
-const hostAddress = computed(() => {
-  const host = hosts.hosts.find(item => item.id === props.pane.hostId);
-  return host ? `${host.username}@${host.hostname}` : "Local shell";
-});
 const actions = computed<MenuAction[]>(() => [
   { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
   { id: "split-v", label: "Split below…", icon: SplitSquareVertical },
@@ -230,10 +262,12 @@ const actions = computed<MenuAction[]>(() => [
   { id: "close", label: "Close session", icon: X, danger: true, separator: true },
 ]);
 function selectAction(id: string) {
+  // ActionMenu is teleported to <body>, so it cannot rely on the pane's bubbling click handler.
+  activatePane();
   if (id === "split-h") emit("split-h");
   else if (id === "split-v") emit("split-v");
   else if (id === "search") openSearch();
-  else if (id === "fullscreen") ui.toggleFullscreen(props.pane.id);
+  else if (id === "fullscreen") toggleFullscreen();
   else if (id === "reconnect") void connectSession();
   else if (id === "close") emit("close");
   else if (id.startsWith("move:")) tabs.movePaneToTab(props.pane.id, id.slice(5));
@@ -255,18 +289,19 @@ function selectAction(id: string) {
         <span class="truncate text-[12px]" :title="`${pane.title} · ${hostAddress} · ${status}`">{{ hostAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
       </div>
-      <div class="flex shrink-0 items-center gap-0.5 text-slate-400" @click.stop>
+      <div class="flex shrink-0 items-center gap-0.5 text-slate-400" @click.stop
+        @pointerdown.capture="activatePane()" @focusin="activatePane()">
         <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
-        <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="ui.toggleFullscreen(pane.id)"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
+        <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
         <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="visible" @select="selectAction" />
       </div>
     </header>
     <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
       <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
-      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="connectSession">Reconnect</button>
+      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="activatePane(); connectSession()">Reconnect</button>
     </div>
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" />
-    <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey">
+    <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>

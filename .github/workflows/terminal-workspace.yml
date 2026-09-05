@@ -22,12 +22,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: actions/checkout@v4
-        if: github.event.pull_request.base.sha == 'c532f3234ecc64050908edd42c8ffc5fc64ce53b'
-        with:
-          ref: c532f3234ecc64050908edd42c8ffc5fc64ce53b
-          path: baseline
-          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -48,18 +42,12 @@ jobs:
         run: |
           npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
           desktop/e2e/node_modules/.bin/playwright install --with-deps chromium
-      - name: Start application and optional historical baseline
+      - name: Start application
         run: |
           (cd desktop && npm run dev -- --host 127.0.0.1 > "$RUNNER_TEMP/terminal-vite.log" 2>&1) &
-          if [ -d baseline/desktop ]; then
-            ln -s ../../desktop/node_modules baseline/desktop/node_modules
-            (cd baseline/desktop && ../../desktop/node_modules/.bin/vite --host 127.0.0.1 --port 1421 > "$RUNNER_TEMP/terminal-baseline.log" 2>&1) &
-          fi
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:1420 > /dev/null; then
-              if [ ! -d baseline/desktop ] || curl --fail --silent http://127.0.0.1:1421 > /dev/null; then
-                exit 0
-              fi
+              exit 0
             fi
             sleep 1
           done
@@ -68,7 +56,6 @@ jobs:
       - name: Record and verify terminal interactions
         env:
           UI_URL: http://127.0.0.1:1420
-          BASELINE_URL: ${{ github.event.pull_request.base.sha == 'c532f3234ecc64050908edd42c8ffc5fc64ce53b' && 'http://127.0.0.1:1421' || '' }}
           UI_RESULTS: ${{ github.workspace }}/desktop/ui-test-results
           UI_RECORD: '1'
           UI_SLOW_MO: '100'
@@ -97,4 +84,3 @@ jobs:
             desktop/e2e/
             !desktop/e2e/node_modules/
             ${{ runner.temp }}/terminal-vite.log
-            ${{ runner.temp }}/terminal-baseline.log
