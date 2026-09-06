@@ -45,9 +45,9 @@ const host = (overrides: Partial<Host> = {}): Host => ({ id: "atlas", label: "At
   hostname: "atlas.example.test", port: 22, username: "deploy", auth: "agent", tags: [], ...overrides });
 let view: VueWrapper | undefined;
 const calls = (command: string) => getInvokeMock().mock.calls.filter(([name]) => name === command);
-function begin(saved: Host | undefined = host()) {
+function begin(saved: Host | null = host()) {
   useHostsStore().hosts = saved ? [saved] : [];
-  const tab = useTabsStore().newTab(saved);
+  const tab = useTabsStore().newTab(saved ?? undefined);
   const pane = collectPanes(tab.tree)[0];
   view = mount(TerminalWorkspace, { props: { visible: true }, attachTo: document.body });
   return pane;
@@ -87,9 +87,7 @@ afterEach(() => { view?.unmount(); view = undefined; vi.restoreAllMocks(); vi.un
 describe("write failure ownership", () => {
   for (const local of [false, true]) {
     it.each(["eof", "replacement", "closing", "disposed", "current"])(`isolates ${local ? "local" : "SSH"} rejection at %s`, async boundary => {
-      // Explicit undefined uses begin's default; create a local pane separately.
-      const pane = begin();
-      if (local) { pane.terminalType = "local"; pane.hostId = null; }
+      const pane = begin(local ? null : host());
       await vi.waitFor(() => expect(pane.connected).toBe(true));
       const terminal = terminals.items[0];
       const original = view!.get(".xterm").element;
@@ -108,7 +106,7 @@ describe("write failure ownership", () => {
       } else if (boundary === "closing") pane.closing = true;
       else if (boundary === "disposed") { view!.unmount(); view = undefined; }
       const before = [...terminal.output];
-      const alertBefore = view?.find('[role="alert"]').text();
+      const alertBefore = view?.findAll('[role="alert"]').map(alert => alert.text());
       reject(new Error("OLD_WRITE_FAILURE"));
       await flushPromises();
       if (boundary === "current") {
@@ -116,7 +114,7 @@ describe("write failure ownership", () => {
         expect(view!.get('[role="alert"]').text()).toContain("OLD_WRITE_FAILURE");
       } else {
         expect(terminal.output).toEqual(before);
-        expect(view?.find('[role="alert"]').text()).toBe(alertBefore);
+        expect(view?.findAll('[role="alert"]').map(alert => alert.text())).toEqual(alertBefore);
       }
       if (view) expect(view.get(".xterm").element).toBe(original);
       expect(terminals.items).toHaveLength(1);
