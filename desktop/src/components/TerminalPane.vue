@@ -149,23 +149,27 @@ async function connectSession() {
     if (props.pane.terminalType === "local") {
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
     } else {
-      // All creation paths, including HostList and restored workspaces, wait for
-      // a successful identity load. An empty initial cache is not a missing identity.
-      await identities.ensureLoaded();
-      if (disposed || props.pane.closing) return;
-      const host = hosts.hosts.find(h => h.id === props.pane.hostId);
-      if (!host) throw new Error("Host not found. Check the saved host configuration.");
+      // Direct hosts do not depend on the identity list. Linked hosts still fail
+      // closed, and every async boundary re-reads configuration before dispatch.
+      const resolveHost = async () => {
+        while (!disposed && !props.pane.closing) {
+          const host = hosts.hosts.find(h => h.id === props.pane.hostId);
+          if (!host) throw new Error("Host not found. Check the saved host configuration.");
+          if (!host.identity_id || identities.loaded) return host;
+          await identities.ensureLoaded();
+        }
+      };
+      const host = await resolveHost();
+      if (!host || disposed || props.pane.closing) return;
       const auth = effectiveSshIdentity(host, identities.identities).auth;
       if (auth === "publickey" && !vault.unlocked) {
         if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
         if (disposed) return;
       }
       const openSsh = async () => {
-        await identities.ensureLoaded();
-        if (disposed || props.pane.closing) return;
-        // Re-read after unlock: configuration may have been edited while waiting.
-        const host = hosts.hosts.find(h => h.id === props.pane.hostId);
-        if (!host) throw new Error("Host not found. Check the saved host configuration.");
+        // Re-read after unlock: an edited direct host may now link an identity.
+        const host = await resolveHost();
+        if (!host || disposed || props.pane.closing) return;
         const effective = effectiveSshIdentity(host, identities.identities);
         const key = sshConfigurationKey(host, identities.identities);
         endpointForAttempt = configuredSshEndpoint(host, identities.identities);
@@ -177,7 +181,7 @@ async function connectSession() {
             if (disposed || props.pane.closing) return;
             if (password === null) throw new Error("Connection cancelled.");
             const latest = hosts.hosts.find(h => h.id === props.pane.hostId);
-            if (!identities.loaded || !latest || sshConfigurationKey(latest, identities.identities) !== key)
+            if (!latest || (latest.identity_id && !identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
           const request = api.connectSsh(sessionId, host, password, terminal.cols, terminal.rows, effective.username);
@@ -250,9 +254,13 @@ onMounted(async () => {
   });
   term.open(containerRef.value);
   term.onData(data => {
-    if (!disposed && !sessionEnded && currentSessionId && props.pane.connected && !connecting.value)
-      void api.sessionWrite(currentSessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
-        if (!disposed) writeError(`Write failed: ${String(cause)}`);
+    const sessionId = currentSessionId;
+    if (!disposed && !props.pane.closing && !sessionEnded && sessionId && props.pane.connected && !connecting.value)
+      void api.sessionWrite(sessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
+        // An old write may settle after EOF or after xterm has a new session.
+        // Preserve that owner's transcript/status; only report a live owner's error.
+        if (!disposed && !props.pane.closing && !sessionEnded && currentSessionId === sessionId && props.pane.connected && !connecting.value)
+          writeError(`Write failed: ${String(cause)}`);
       });
   });
   observer = new ResizeObserver(() => fit());
