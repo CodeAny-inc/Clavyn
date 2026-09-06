@@ -84,7 +84,7 @@ function reviewFixture(mode) {
   };
   window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
     if (command === "is_vault_unlocked") return state.unlocked;
-    if (command === "unlock_vault") { state.unlocked = true; return; }
+    if (command === "secure_unlock_vault") { state.unlocked = true; return; }
     if (command === "list_hosts") {
       const hosts = await original(command, args);
       if (mode.startsWith("vault")) hosts.forEach(host => { host.auth = "publickey"; });
@@ -145,6 +145,7 @@ async function restoreProtectedPair(page) {
 async function unlock(page) {
   await page.getByLabel("Master passphrase", { exact: true }).fill("fixture-only passphrase");
   await page.getByRole("button", { name: "Unlock", exact: true }).click();
+  await page.getByLabel("Master passphrase", { exact: true }).waitFor({ state: "hidden" });
 }
 try {
   for (const type of ["ssh", "local"]) {

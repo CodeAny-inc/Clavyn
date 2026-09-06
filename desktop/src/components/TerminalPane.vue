@@ -256,8 +256,9 @@ onMounted(async () => {
   observer = new ResizeObserver(() => fit());
   observer.observe(containerRef.value);
   fit();
-  // Session creation is the focus intent; async connection completion is not.
-  focusInput();
+  // Wait for ancestor v-show updates; the mount hook can run while still hidden.
+  // This ticket belongs to creation, not to later network completion.
+  queueFocus();
   try {
     const dataListener = await api.onSessionData(event => {
       if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
