@@ -5,6 +5,7 @@ import { nextTick } from "vue";
 import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
+import { useUiStore } from "../stores/ui";
 import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
@@ -52,6 +53,9 @@ function render() {
 }
 function output(id: string, text: string) {
   emitTauriEvent("session-data", { session_id: id, data: Array.from(new TextEncoder().encode(text)) });
+}
+function closed(id: string) {
+  emitTauriEvent("session-closed", { session_id: id, reason: "fixture EOF" });
 }
 function writes() { return getInvokeMock().mock.calls.filter(([cmd]) => cmd === "session_write"); }
 function deferConnection(command: string) {
@@ -104,7 +108,7 @@ describe("connection output readiness", () => {
     expect(writes()[0][1]).toEqual({ sessionId: pending.id, data: Array.from(new TextEncoder().encode("\x1b[3;3R")) });
   });
 
-  it.each(["failure", "closed", "disposed"])("discards pending output on %s", async ending => {
+  it.each(["failure", "disposed"])("discards pending output on %s", async ending => {
     const pending = deferConnection("connect_ssh");
     const saved = host("atlas");
     useHostsStore().hosts = [saved];
@@ -115,8 +119,7 @@ describe("connection output readiness", () => {
     output(pending.id, "\x1b[6n");
     if (ending === "failure") pending.reject();
     else {
-      if (ending === "closed") emitTauriEvent("session-closed", { session_id: pending.id, reason: "fixture EOF" });
-      else { view!.unmount(); view = undefined; }
+      view!.unmount(); view = undefined;
       pending.resolve();
     }
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -124,6 +127,66 @@ describe("connection output readiness", () => {
     expect(pane.connected).toBe(false);
     expect(writes()).toHaveLength(0);
     expect(terminals.instances[0].output).not.toContain("\x1b[6n");
+  });
+
+  it.each([
+    ["connect_ssh", false], ["create_local_terminal", false],
+    ["connect_ssh", true], ["create_local_terminal", true],
+  ] as const)("preserves %s diagnostics on EOF (ready=%s) without writes after close", async (command, ready) => {
+    const pending = deferConnection(command);
+    const saved = host("atlas");
+    useHostsStore().hosts = [saved];
+    const tab = useTabsStore().newTab(command === "connect_ssh" ? saved : undefined);
+    const pane = collectPanes(tab.tree)[0];
+    const wrapper = render();
+    await vi.waitFor(() => expect(pending.id).not.toBe(""));
+    if (ready) {
+      pending.resolve();
+      await vi.waitFor(() => expect(pane.connected).toBe(true));
+    }
+    const chunks = ["FIRST_DIAGNOSTIC\r\n", "\x1b[6n", "LAST_DIAGNOSTIC\r\n"];
+    chunks.forEach(chunk => output(pending.id, chunk));
+    const beforeCloseWrites = writes().length;
+    expect(beforeCloseWrites).toBe(ready ? 1 : 0);
+    closed(pending.id);
+    if (!ready) pending.resolve();
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"] button').attributes("disabled")).toBeUndefined());
+    const expected = [...chunks, "\r\n\x1b[31mSession closed: fixture EOF\x1b[0m\r\n"];
+    expect(terminals.instances[0].output).toEqual(expected);
+    expect(pane.connected).toBe(false);
+    // Duplicate close, late output and input must neither write nor alter history.
+    closed(pending.id);
+    output(pending.id, "LATE_OUTPUT\x1b[6n");
+    terminals.instances[0].input("NO_WRITE_AFTER_EOF");
+    expect(terminals.instances[0].output).toEqual(expected);
+    expect(writes()).toHaveLength(beforeCloseWrites);
+  });
+
+  it.each(["connect_ssh", "create_local_terminal"])("isolates an early-closed %s attempt from its replacement", async command => {
+    const pending = deferConnection(command);
+    const saved = host("atlas");
+    useHostsStore().hosts = [saved];
+    useTabsStore().newTab(command === "connect_ssh" ? saved : undefined);
+    const wrapper = render();
+    await vi.waitFor(() => expect(pending.id).not.toBe(""));
+    const oldId = pending.id;
+    output(oldId, "OLD_DIAGNOSTIC\x1b[6n");
+    closed(oldId);
+    pending.resolve();
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"] button').attributes("disabled")).toBeUndefined());
+    expect(terminals.instances[0].output.join("")).toContain("OLD_DIAGNOSTIC");
+    expect(writes()).toHaveLength(0);
+    const replacement = deferConnection(command);
+    await wrapper.get('[role="alert"] button').trigger("click");
+    await vi.waitFor(() => expect(replacement.id).not.toBe(""));
+    output(oldId, "LATE_OLD\x1b[6n");
+    closed(oldId);
+    output(replacement.id, "REPLACEMENT\x1b[6n");
+    replacement.resolve();
+    await vi.waitFor(() => expect(writes()).toHaveLength(1));
+    expect(writes()[0][1].sessionId).toBe(replacement.id);
+    expect(terminals.instances[0].output.join("")).toBe("REPLACEMENT\x1b[6n");
+    expect(terminals.instances).toHaveLength(1);
   });
 
   it("does not carry a failed attempt's output into its replacement", async () => {
@@ -146,6 +209,61 @@ describe("connection output readiness", () => {
     await vi.waitFor(() => expect(writes()).toHaveLength(1));
     expect(writes()[0][1].sessionId).toBe(replacement.id);
     expect(terminals.instances[0].output.join("")).not.toContain("STALE");
+  });
+});
+
+describe("keyboard terminal ownership", () => {
+  it("activates xterm's owner synchronously on focus without a click", async () => {
+    const { tabs, first, second, wrapper } = await split();
+    const textarea = wrapper.get('[data-host-id="atlas"] textarea').element as HTMLTextAreaElement;
+    expect(tabs.activePaneId).toBe(second.id);
+    textarea.focus();
+    expect(tabs.activePaneId).toBe(first.id);
+    terminals.instances[0].input("KEYBOARD_OWNER_PROBE\r");
+    expect(writes()[0][1].sessionId).toBe(first.sessionId);
+    expect(document.activeElement).toBe(textarea);
+    expect(terminals.instances).toHaveLength(2);
+    expect(getInvokeMock().mock.calls.filter(([cmd]) => cmd === "close_session")).toHaveLength(0);
+  });
+
+  it("makes obscured panes inert and restores them without remounting on navigation", async () => {
+    const { tabs, first, second, wrapper } = await split();
+    const atlas = wrapper.get('[data-host-id="atlas"]');
+    const orion = wrapper.get('[data-host-id="orion"]');
+    const nodes = terminals.instances.map(terminal => terminal.textarea);
+    useUiStore().toggleFullscreen(second.id);
+    await nextTick();
+    expect(atlas.attributes("inert")).toBeDefined();
+    expect(orion.attributes("inert")).toBeUndefined();
+    tabs.navigatePane("left");
+    expect(useUiStore().fullscreenPaneId).toBeNull();
+    await nextTick(); await nextTick();
+    expect(atlas.attributes("inert")).toBeUndefined();
+    expect(orion.attributes("inert")).toBeUndefined();
+    expect(tabs.activePaneId).toBe(first.id);
+    expect(terminals.instances.map(terminal => terminal.textarea)).toEqual(nodes);
+    expect(getInvokeMock().mock.calls.filter(([cmd]) => cmd === "close_session")).toHaveLength(0);
+  });
+
+  it("continues answering background protocol queries while their pane is inert", async () => {
+    const { tabs, first, second, wrapper } = await split();
+    useUiStore().toggleFullscreen(second.id);
+    await nextTick();
+    expect(wrapper.get('[data-host-id="atlas"]').attributes("inert")).toBeDefined();
+    output(first.sessionId!, "\x1b[6n");
+    expect(writes()).toHaveLength(1);
+    expect(writes()[0][1].sessionId).toBe(first.sessionId);
+    expect(tabs.activePaneId).toBe(second.id);
+    expect(useUiStore().fullscreenPaneId).toBe(second.id);
+  });
+
+  it("removes hidden-view input from navigation and restores it when shown", async () => {
+    const { wrapper } = await split();
+    await wrapper.setProps({ visible: false });
+    expect(wrapper.findAll(".terminal-pane").every(pane => pane.attributes("inert") !== undefined)).toBe(true);
+    await wrapper.setProps({ visible: true });
+    expect(wrapper.findAll(".terminal-pane").every(pane => pane.attributes("inert") === undefined)).toBe(true);
+    expect(terminals.instances).toHaveLength(2);
   });
 });
 

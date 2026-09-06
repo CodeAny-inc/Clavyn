@@ -51,6 +51,8 @@ let pendingOutput: Uint8Array[] | null = null;
 const listenersReady = ref(false);
 const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
 const isFullscreen = computed(() => ui.fullscreenPaneId === props.pane.id);
+// Keep obscured terminal owners alive, but out of keyboard/pointer navigation.
+const inputObscured = computed(() => !props.visible || (!!ui.fullscreenPaneId && !isFullscreen.value));
 const isDragging = computed(() => tabs.draggedPaneId === props.pane.id);
 const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
 const status = computed(() => connecting.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
@@ -66,7 +68,7 @@ const configuredEndpoint = computed(() => {
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
 
 function focusInput() {
-  if (disposed || !isActive.value || terminalFocusBlocked()) return;
+  if (disposed || !isActive.value || inputObscured.value || terminalFocusBlocked()) return;
   if (passwordPrompt.value?.pending) passwordPrompt.value.focus();
   else if (showSearch.value) searchInputRef.value?.focus();
   else term?.focus();
@@ -248,7 +250,7 @@ onMounted(async () => {
   });
   term.open(containerRef.value);
   term.onData(data => {
-    if (currentSessionId && props.pane.connected && !connecting.value)
+    if (!disposed && !sessionEnded && currentSessionId && props.pane.connected && !connecting.value)
       void api.sessionWrite(currentSessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
         if (!disposed) writeError(`Write failed: ${String(cause)}`);
       });
@@ -269,10 +271,15 @@ onMounted(async () => {
     if (disposed) { dataListener(); return; }
     listeners.push(dataListener);
     const closeListener = await api.onSessionClosed(event => {
-      if (!disposed && event.session_id === currentSessionId) {
+      if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
         sessionEnded = true;
-        pendingOutput = null;
         tabs.setPaneDisconnected(props.pane.id);
+        // EOF does not invalidate diagnostics already received from this owner.
+        // Disable writes before parsing them: queries must not reply to a dead
+        // session. Reconnect still drains this queue before resetting xterm.
+        const output = pendingOutput;
+        pendingOutput = null;
+        for (const chunk of output ?? []) term?.write(chunk);
         writeError(`Session closed: ${event.reason}`);
       }
     });
@@ -374,7 +381,7 @@ function selectAction(id: string) {
 </script>
 
 <template>
-  <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col"
+  <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
     :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-blue-400/50' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
@@ -392,14 +399,16 @@ function selectAction(id: string) {
         @pointerdown.capture="activatePane()" @focusin="activatePane()">
         <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
         <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
-        <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="visible" @select="selectAction" />
+        <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
       </div>
     </header>
     <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
       <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
       <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="reconnect">Reconnect</button>
     </div>
-    <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" />
+    <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
+         any subsequent key is routed; do not gate background protocol replies. -->
+    <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
