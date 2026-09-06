@@ -29,7 +29,7 @@ describe("focus intent tickets", () => {
     expect(intent.blocked()).toBe(false);
   });
   it("blocks a shown update", () => {
-    useUpdateStore().available = true;
+    useUpdateStore().info = { available: true, version: "0.2.0", current_version: "0.1.0", date: null, body: null };
     useUpdateStore().showModal = true;
     expect(intent.blocked()).toBe(true);
   });

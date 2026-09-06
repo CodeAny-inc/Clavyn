@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { mount, type VueWrapper } from "@vue/test-utils";
+import { DOMWrapper, mount, type VueWrapper } from "@vue/test-utils";
 import { defineComponent, h, nextTick } from "vue";
 import TerminalWorkspace from "./TerminalWorkspace.vue";
 import CommandPalette from "./CommandPalette.vue";
@@ -56,7 +56,7 @@ function delay(command = "connect_ssh") {
 async function palette() {
   useUiStore().commandPaletteOpen = true;
   await nextTick(); await nextTick();
-  const input = view!.get('input[placeholder="Search commands..."]');
+  const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[placeholder="Search commands..."]')!);
   await input.setValue("Go to ");
   expect(document.activeElement).toBe(input.element);
   return input;
