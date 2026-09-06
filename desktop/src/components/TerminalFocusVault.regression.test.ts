@@ -130,12 +130,14 @@ describe("terminal focus ownership", () => {
     let resolve!: (items: unknown[]) => void;
     setInvokeHandler("list_identities", () => new Promise(done => { resolve = done; }));
     const saved = host("atlas", { password: { credential_key: "fixture-only" } });
+    // Only linked hosts wait for identities; retain the actual delayed-prompt scenario.
+    saved.identity_id = "delayed-password";
     useHostsStore().hosts = [saved];
     useTabsStore().newTab(saved);
     render();
     await vi.waitFor(() => expect(calls("list_identities")).toHaveLength(1));
     const input = await palette();
-    resolve([]);
+    resolve([{ id: "delayed-password", label: "Fixture password identity", username: "root", auth: saved.auth, tags: [] }]);
     await vi.waitFor(() => expect(view!.find('input[aria-label="SSH password"]').exists()).toBe(true));
     expect(document.activeElement).toBe(input.element);
     expect(calls("session_write")).toHaveLength(0);
