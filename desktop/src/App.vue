@@ -96,8 +96,8 @@ onUnmounted(() => {
       <KnownHostsView v-else-if="activeView === 'known-hosts'" />
       <WorkspaceView v-else-if="activeView === 'workspaces'" />
       <SettingsView v-else-if="activeView === 'settings'" />
-      <!-- Lazy mount once. Navigation must not cancel an SFTP session or transfer. -->
-      <SftpBrowser v-if="filesOpened" v-show="activeView === 'files'" />
+      <!-- Lazy mount once. Preserve live SFTP state, but let the browser purge transient credentials when hidden. -->
+      <SftpBrowser v-if="filesOpened" v-show="activeView === 'files'" :visible="activeView === 'files'" />
     </main>
     <CommandPalette :open="commandPaletteOpen" @close="commandPaletteOpen = false"
       @navigate="activeView = $event; commandPaletteOpen = false" />

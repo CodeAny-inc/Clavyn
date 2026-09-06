@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { basename } from "@tauri-apps/api/path";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
@@ -27,6 +27,7 @@ import type { AuthMethod } from "../types";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 
+const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true });
 const sftp = useSftpStore();
 const hosts = useHostsStore();
 const identities = useIdentitiesStore();
@@ -71,12 +72,20 @@ const pathSegments = computed(() =>
   sftp.currentPath.split("/").filter(Boolean),
 );
 
+// The Files view stays mounted so active SFTP sessions/transfers survive view
+// switches. Pending credentials are different: never retain an unsubmitted
+// password while this view is hidden.
+watch(() => props.visible, visible => {
+  if (!visible) password.value = "";
+}, { flush: "sync" });
+
 onMounted(async () => {
   await Promise.all([hosts.load(), identities.load()]);
   window.addEventListener("click", onGlobalClick);
 });
 
 onUnmounted(() => {
+  password.value = "";
   window.removeEventListener("click", onGlobalClick);
   void sftp.disconnect().catch(() => {});
 });

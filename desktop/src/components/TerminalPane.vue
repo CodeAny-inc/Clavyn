@@ -43,19 +43,22 @@ let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
 let observer: ResizeObserver | null = null;
 const listeners: UnlistenFn[] = [];
+let listenerSetup: Promise<boolean> | null = null;
 let currentSessionId: string | null = null;
 let disposed = false;
 let sessionEnded = false;
 // Buffer remote output, never user input, until this attempt can answer queries.
 let pendingOutput: Uint8Array[] | null = null;
 const listenersReady = ref(false);
+const listenerSetupPending = ref(false);
 const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
 const isFullscreen = computed(() => ui.fullscreenPaneId === props.pane.id);
 // Keep obscured terminal owners alive, but out of keyboard/pointer navigation.
 const inputObscured = computed(() => !props.visible || (!!ui.fullscreenPaneId && !isFullscreen.value));
 const isDragging = computed(() => tabs.draggedPaneId === props.pane.id);
 const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
-const status = computed(() => connecting.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
+const busy = computed(() => connecting.value || listenerSetupPending.value);
+const status = computed(() => busy.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
 const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
 
 const configuredEndpoint = computed(() => {
@@ -115,11 +118,60 @@ function activatePane(focusTerminal = false) {
 function focusPane() { activatePane(true); }
 function reconnect() {
   activatePane(true);
-  void connectSession();
+  void connectWhenReady();
 }
 function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
+}
+async function ensureListeners(): Promise<boolean> {
+  if (disposed) return false;
+  if (listenersReady.value) return true;
+  if (listenerSetup) return listenerSetup;
+  listenerSetupPending.value = true;
+  listenerSetup = (async () => {
+    const staged: UnlistenFn[] = [];
+    try {
+      const dataListener = await api.onSessionData(event => {
+        if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
+        const data = new Uint8Array(event.data);
+        if (pendingOutput) pendingOutput.push(data);
+        else if (props.pane.connected) term?.write(data);
+      });
+      staged.push(dataListener);
+      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
+      const closeListener = await api.onSessionClosed(event => {
+        if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
+          sessionEnded = true;
+          tabs.setPaneDisconnected(props.pane.id);
+          // EOF does not invalidate diagnostics already received from this owner.
+          // Disable writes before parsing them: queries must not reply to a dead
+          // session. Reconnect still drains this queue before resetting xterm.
+          const output = pendingOutput;
+          pendingOutput = null;
+          for (const chunk of output ?? []) term?.write(chunk);
+          writeError(`Session closed: ${event.reason}`);
+        }
+      });
+      staged.push(closeListener);
+      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
+      listeners.push(...staged);
+      listenersReady.value = true;
+      return true;
+    } catch (cause) {
+      staged.forEach(unlisten => unlisten());
+      if (!disposed) writeError(`Could not initialize terminal: ${String(cause)}`);
+      return false;
+    } finally {
+      listenerSetupPending.value = false;
+      listenerSetup = null;
+    }
+  })();
+  return listenerSetup;
+}
+async function connectWhenReady() {
+  if (disposed || connecting.value) return;
+  if (await ensureListeners()) await connectSession();
 }
 async function connectSession() {
   if (disposed || connecting.value || !term || !listenersReady.value) return;
@@ -269,35 +321,7 @@ onMounted(async () => {
   // Wait for ancestor v-show updates; the mount hook can run while still hidden.
   // This ticket belongs to creation, not to later network completion.
   queueFocus();
-  try {
-    const dataListener = await api.onSessionData(event => {
-      if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
-      const data = new Uint8Array(event.data);
-      if (pendingOutput) pendingOutput.push(data);
-      else if (props.pane.connected) term?.write(data);
-    });
-    if (disposed) { dataListener(); return; }
-    listeners.push(dataListener);
-    const closeListener = await api.onSessionClosed(event => {
-      if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
-        sessionEnded = true;
-        tabs.setPaneDisconnected(props.pane.id);
-        // EOF does not invalidate diagnostics already received from this owner.
-        // Disable writes before parsing them: queries must not reply to a dead
-        // session. Reconnect still drains this queue before resetting xterm.
-        const output = pendingOutput;
-        pendingOutput = null;
-        for (const chunk of output ?? []) term?.write(chunk);
-        writeError(`Session closed: ${event.reason}`);
-      }
-    });
-    if (disposed) { closeListener(); return; }
-    listeners.push(closeListener);
-    listenersReady.value = true;
-    await connectSession();
-  } catch (cause) {
-    if (!disposed) writeError(`Could not initialize terminal: ${String(cause)}`);
-  }
+  await connectWhenReady();
 });
 onBeforeUnmount(() => {
   disposed = true;
@@ -373,7 +397,7 @@ const actions = computed<MenuAction[]>(() => [
   { id: "search", label: "Find in terminal", icon: Search, shortcut: "⌘ / Ctrl F", separator: true },
   { id: "fullscreen", label: isFullscreen.value ? "Restore pane" : "Maximize pane", icon: isFullscreen.value ? Minimize2 : Maximize2 },
   ...otherTabs.value.map((tab, index) => ({ id: `move:${tab.id}`, label: `Move to ${tab.title}`, icon: ArrowUpRight, separator: index === 0 })),
-  ...(!props.pane.connected ? [{ id: "reconnect", label: "Reconnect", icon: RotateCw, disabled: connecting.value || !listenersReady.value, separator: true }] : []),
+  ...(!props.pane.connected ? [{ id: "reconnect", label: "Reconnect", icon: RotateCw, disabled: busy.value, separator: true }] : []),
   { id: "close", label: "Close session", icon: X, danger: true, separator: true },
 ]);
 function selectAction(id: string) {
@@ -382,7 +406,7 @@ function selectAction(id: string) {
   else if (id === "split-v") emit("split-v");
   else if (id === "search") openSearch();
   else if (id === "fullscreen") toggleFullscreen();
-  else if (id === "reconnect") { queueFocus(); void nextTick(() => connectSession()); }
+  else if (id === "reconnect") { queueFocus(); void nextTick(() => connectWhenReady()); }
   else if (id === "close") emit("close");
   else if (id.startsWith("move:")) tabs.movePaneToTab(props.pane.id, id.slice(5));
 }
@@ -398,7 +422,7 @@ function selectAction(id: string) {
       <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2" draggable="true"
         :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
         <GripVertical class="size-3 shrink-0 text-slate-500" />
-        <Loader2 v-if="connecting" class="size-3 shrink-0 animate-spin text-blue-300" aria-label="Connecting" />
+        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-blue-300" aria-label="Connecting" />
         <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-400' : 'bg-slate-500'" :title="status" />
         <span class="truncate text-[12px]" :title="`${pane.title} · ${hostAddress} · ${status}`">{{ hostAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
@@ -412,7 +436,7 @@ function selectAction(id: string) {
     </header>
     <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
       <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
-      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="reconnect">Reconnect</button>
+      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="busy" @click.stop="reconnect">Reconnect</button>
     </div>
     <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
          any subsequent key is routed; do not gate background protocol replies. -->
