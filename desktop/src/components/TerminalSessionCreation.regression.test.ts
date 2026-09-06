@@ -117,6 +117,28 @@ describe("session picker activation through the real pane menu", () => {
     expect(getInvokeMock().mock.calls.filter(([name]) => name === "close_session")).toHaveLength(0);
   });
 
+  it("preserves keyboard focus when an inactive pane's Actions control activates it", async () => {
+    const { view, tabs, pane } = await mountAtlas();
+    const orion = tabs.splitPane(pane.id, "horizontal", useHostsStore().hosts[1])!;
+    await vi.waitFor(() => {
+      expect(orion.connected).toBe(true);
+      expect(document.activeElement).toBe(view.get('[data-host-id="orion"] textarea').element);
+    });
+    const trigger = view.get<HTMLButtonElement>('[aria-label="Actions for atlas"]');
+    trigger.element.focus();
+    await nextTick();
+    await nextTick();
+    expect(tabs.activePaneId).toBe(pane.id);
+    expect(document.activeElement).toBe(trigger.element);
+    // Dispatch to the actual focused element, not a locator that repairs focus.
+    document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    await vi.waitFor(() => {
+      const firstAction = document.querySelector('[role="menuitem"]');
+      expect(firstAction).not.toBeNull();
+      expect(document.activeElement).toBe(firstAction);
+    });
+  });
+
   it("returns cancellation focus to the source without creating or closing sessions", async () => {
     const { view, tabs, pane } = await mountAtlas();
     const trigger = await openFromActions(view);

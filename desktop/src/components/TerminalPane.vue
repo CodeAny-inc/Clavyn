@@ -84,7 +84,18 @@ function fit(focus = false) {
 watch(isActive, active => {
   if (!active && isFullscreen.value) ui.exitFullscreen();
 }, { flush: "sync" });
-watch([isActive, isFullscreen, () => props.visible], () => nextTick(() => fit(true)), { flush: "post" });
+watch([isActive, () => props.visible], () => nextTick(() => {
+  // Focusing an inactive pane's controls activates it too. Do not steal focus
+  // back from that control or its teleported menu before the user can use it.
+  const focused = document.activeElement;
+  const controlHasFocus = focused instanceof Element &&
+    paneRef.value?.contains(focused) && !focused.closest(".xterm");
+  const menuId = paneRef.value?.querySelector('[aria-haspopup="menu"]')?.getAttribute("aria-controls");
+  const menuHasFocus = !!menuId && document.getElementById(menuId)?.contains(focused);
+  fit(!controlHasFocus && !menuHasFocus);
+}), { flush: "post" });
+// Explicit fullscreen changes still return input to this pane's terminal/search.
+watch(isFullscreen, () => nextTick(() => fit(true)), { flush: "post" });
 function activatePane(focusTerminal = false) {
   tabs.setActivePane(props.pane.id);
   if (focusTerminal) focusInput();
