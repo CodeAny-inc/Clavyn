@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, ref, useId } from "vue";
+import { useFocusIntent } from "../composables/useFocusIntent";
 
 const props = defineProps<{ active: boolean }>();
-const emit = defineEmits<{ activate: [] }>();
+const emit = defineEmits<{ activate: []; finished: [] }>();
+const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const pending = ref(false);
 const endpoint = ref("");
 const password = ref("");
@@ -10,8 +12,10 @@ const input = ref<HTMLInputElement | null>(null);
 const headingId = useId();
 let complete: ((value: string | null) => void) | undefined;
 
-function focus() { if (props.active && pending.value) input.value?.focus(); }
-function finish(value: string | null) {
+function focus() {
+  if (props.active && pending.value && !terminalFocusBlocked()) input.value?.focus();
+}
+function finish(value: string | null, restoreFocus = true) {
   const resolve = complete;
   complete = undefined;
   // Clear both reactive state and the live input before dispatch/cancellation.
@@ -19,18 +23,21 @@ function finish(value: string | null) {
   if (input.value) input.value.value = "";
   pending.value = false;
   endpoint.value = "";
+  // Restore on the user's submit/cancel, not on a later network completion.
+  if (resolve && restoreFocus) emit("finished");
   resolve?.(value);
 }
 function cancel() { finish(null); }
-function request(address: string): Promise<string | null> {
-  cancel();
+function request(address: string, mayAutofocus: () => boolean = () => true): Promise<string | null> {
+  finish(null, false);
   endpoint.value = address;
   pending.value = true;
+  const current = captureFocusIntent();
   const result = new Promise<string | null>(resolve => { complete = resolve; });
-  void nextTick(focus);
+  void nextTick(() => { if (current() && mayAutofocus()) focus(); });
   return result;
 }
-onBeforeUnmount(cancel);
+onBeforeUnmount(() => finish(null, false));
 defineExpose({ request, cancel, focus, pending });
 </script>
 

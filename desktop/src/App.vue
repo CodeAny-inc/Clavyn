@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, toRef, onMounted, onUnmounted, watch } from "vue";
 import { useVaultStore } from "./stores/vault";
 import { useHostsStore } from "./stores/hosts";
 import { useKeysStore } from "./stores/keys";
@@ -34,7 +34,7 @@ const ui = useUiStore();
 const update = useUpdateStore();
 useAutoLock();
 const activeView = ref("hosts");
-const commandPaletteOpen = ref(false);
+const commandPaletteOpen = toRef(ui, "commandPaletteOpen");
 const filesOpened = ref(false);
 watch(activeView, view => {
   if (view === "files") filesOpened.value = true;

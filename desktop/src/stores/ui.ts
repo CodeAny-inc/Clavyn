@@ -2,9 +2,14 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 
 export const useUiStore = defineStore("ui", () => {
-  // Vault unlock modal
+  // All concurrent SSH attempts share one modal and one settlement. Replacing a
+  // resolver strands earlier panes in their busy state, including on cancel.
   const showVaultUnlockModal = ref(false);
   let vaultUnlockResolve: ((success: boolean) => void) | null = null;
+  let vaultUnlockPending: Promise<boolean> | null = null;
+
+  // Global focus owner, shared with terminal autofocus guards.
+  const commandPaletteOpen = ref(false);
 
   // Fullscreen pane
   const fullscreenPaneId = ref<string | null>(null);
@@ -16,18 +21,19 @@ export const useUiStore = defineStore("ui", () => {
   const mobileSidebarOpen = ref(false);
 
   function requestVaultUnlock(): Promise<boolean> {
-    return new Promise((resolve) => {
-      vaultUnlockResolve = resolve;
-      showVaultUnlockModal.value = true;
-    });
+    if (vaultUnlockPending) return vaultUnlockPending;
+    vaultUnlockPending = new Promise(resolve => { vaultUnlockResolve = resolve; });
+    showVaultUnlockModal.value = true;
+    return vaultUnlockPending;
   }
 
   function resolveVaultUnlock(success: boolean) {
-    if (vaultUnlockResolve) {
-      vaultUnlockResolve(success);
-      vaultUnlockResolve = null;
-    }
+    const resolve = vaultUnlockResolve;
+    // Clear before settling: a continuation may immediately request a new cycle.
+    vaultUnlockResolve = null;
+    vaultUnlockPending = null;
     showVaultUnlockModal.value = false;
+    resolve?.(success);
   }
 
   function toggleFullscreen(paneId: string) {
@@ -56,6 +62,7 @@ export const useUiStore = defineStore("ui", () => {
 
   return {
     showVaultUnlockModal,
+    commandPaletteOpen,
     fullscreenPaneId,
     sidebarCollapsed,
     mobileSidebarOpen,

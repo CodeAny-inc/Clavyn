@@ -11,6 +11,7 @@ import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
+import { useFocusIntent } from "../composables/useFocusIntent";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey } from "../lib/sshIdentity";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
@@ -24,6 +25,7 @@ const hosts = useHostsStore();
 const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
+const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
 const passwordPrompt = ref<InstanceType<typeof SshPasswordPrompt> | null>(null);
@@ -64,12 +66,13 @@ const configuredEndpoint = computed(() => {
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
 
 function focusInput() {
-  if (disposed || !isActive.value) return;
+  if (disposed || !isActive.value || terminalFocusBlocked()) return;
   if (passwordPrompt.value?.pending) passwordPrompt.value.focus();
   else if (showSearch.value) searchInputRef.value?.focus();
   else term?.focus();
 }
-function fit(focus = false) {
+// Geometry updates are never permission to change the user's input destination.
+function fit() {
   if (disposed || !props.visible || !term || !fitAddon) return;
   try {
     if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
@@ -77,38 +80,48 @@ function fit(focus = false) {
       if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
     }
   } catch { /* ResizeObserver can run during teardown. */ }
-  if (focus) focusInput();
+}
+function controlHasFocus() {
+  const focused = document.activeElement;
+  return focused instanceof Element && !!paneRef.value?.contains(focused) && !focused.closest(".xterm");
+}
+function queueFocus(preserveControls = false, stillCurrent: () => boolean = () => true) {
+  const current = captureFocusIntent();
+  void nextTick(() => {
+    fit();
+    if (current() && stillCurrent() && (!preserveControls || !controlHasFocus())) focusInput();
+  });
 }
 watch(isActive, active => {
   if (!active && isFullscreen.value) ui.exitFullscreen();
 }, { flush: "sync" });
-watch([isActive, () => props.visible], () => nextTick(() => {
-  const focused = document.activeElement;
-  const controlHasFocus = focused instanceof Element &&
-    paneRef.value?.contains(focused) && !focused.closest(".xterm");
-  const menuId = paneRef.value?.querySelector('[aria-haspopup="menu"]')?.getAttribute("aria-controls");
-  const menuHasFocus = !!menuId && document.getElementById(menuId)?.contains(focused);
-  fit(!controlHasFocus && !menuHasFocus);
-}), { flush: "post" });
+watch([isActive, () => props.visible], () => queueFocus(true), { flush: "post" });
 // A successful move can preserve activePaneId while the DOM move loses focus.
 watch(() => tabs.paneFocusRequest, request => {
-  if (!request || request.paneId !== props.pane.id) return;
-  void nextTick(() => {
-    if (request === tabs.paneFocusRequest && !document.querySelector("dialog[open]")) fit(true);
-  });
+  if (request?.paneId === props.pane.id) queueFocus(false, () => request === tabs.paneFocusRequest);
 }, { flush: "post" });
-watch(isFullscreen, () => nextTick(() => fit(true)), { flush: "post" });
+watch(isFullscreen, () => queueFocus(), { flush: "post" });
+watch(() => ui.showVaultUnlockModal, (open, wasOpen) => {
+  // Closing the shared prompt returns input to the active waiter, not whichever
+  // network connection happens to complete last. Respect any newer overlay.
+  if (!open && wasOpen) queueFocus(false, () => document.activeElement === document.body);
+}, { flush: "post" });
 function activatePane(focusTerminal = false) {
   tabs.setActivePane(props.pane.id);
   if (focusTerminal) focusInput();
 }
 function focusPane() { activatePane(true); }
+function reconnect() {
+  activatePane(true);
+  void connectSession();
+}
 function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
 }
 async function connectSession() {
   if (disposed || connecting.value || !term || !listenersReady.value) return;
+  const mayAutofocusPassword = captureFocusIntent();
   connecting.value = true;
   error.value = "";
   tabs.setPaneDisconnected(props.pane.id);
@@ -158,7 +171,7 @@ async function connectSession() {
         try {
           if (passwordAuth(effective.auth)) {
             if (!passwordPrompt.value) throw new Error("Password prompt is not ready. Reconnect to retry.");
-            password = await passwordPrompt.value.request(endpointForAttempt);
+            password = await passwordPrompt.value.request(endpointForAttempt, mayAutofocusPassword);
             if (disposed || props.pane.closing) return;
             if (password === null) throw new Error("Connection cancelled.");
             const latest = hosts.hosts.find(h => h.id === props.pane.hostId);
@@ -200,7 +213,7 @@ async function connectSession() {
       pendingOutput = null;
       for (const chunk of output ?? []) terminal.write(chunk);
     }
-    fit(true);
+    fit();
   } catch (cause) {
     if (!disposed) writeError(`Connection failed: ${String(cause)}`);
   } finally {
@@ -243,6 +256,8 @@ onMounted(async () => {
   observer = new ResizeObserver(() => fit());
   observer.observe(containerRef.value);
   fit();
+  // Session creation is the focus intent; async connection completion is not.
+  focusInput();
   try {
     const dataListener = await api.onSessionData(event => {
       if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
@@ -282,10 +297,11 @@ onBeforeUnmount(() => {
 function openSearch() {
   activatePane();
   showSearch.value = true;
+  const current = captureFocusIntent();
   nextTick(() => {
-    if (disposed || !isActive.value) return;
+    if (!current()) return;
     focusInput();
-    searchInputRef.value?.select();
+    if (document.activeElement === searchInputRef.value) searchInputRef.value?.select();
   });
 }
 function closeSearch() {
@@ -350,7 +366,7 @@ function selectAction(id: string) {
   else if (id === "split-v") emit("split-v");
   else if (id === "search") openSearch();
   else if (id === "fullscreen") toggleFullscreen();
-  else if (id === "reconnect") void connectSession();
+  else if (id === "reconnect") { queueFocus(); void nextTick(() => connectSession()); }
   else if (id === "close") emit("close");
   else if (id.startsWith("move:")) tabs.movePaneToTab(props.pane.id, id.slice(5));
 }
@@ -380,10 +396,10 @@ function selectAction(id: string) {
     </header>
     <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
       <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
-      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="activatePane(); connectSession()">Reconnect</button>
+      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="reconnect">Reconnect</button>
     </div>
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" />
-    <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" />
+    <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
