@@ -88,11 +88,16 @@ function reviewFixture(mode) {
     if (command === "list_hosts") {
       const hosts = await original(command, args);
       if (mode.startsWith("vault")) hosts.forEach(host => { host.auth = "publickey"; });
-      if (mode === "password-delayed") hosts[0].auth = { password: { credential_key: "fixture-only" } };
+      // Direct hosts no longer wait on unrelated identity loading. Use a real link
+      // so this regression still exercises a prompt appearing after palette entry.
+      if (mode === "password-delayed") hosts[0].identity_id = "delayed-password";
       return hosts;
     }
-    if (command === "list_identities" && state.holdIdentities)
-      await new Promise(done => state.waiting.push(done));
+    if (command === "list_identities" && mode === "password-delayed") {
+      if (state.holdIdentities) await new Promise(done => state.waiting.push(done));
+      return [{ id: "delayed-password", label: "Fixture password identity", username: "root",
+        auth: { password: { credential_key: "fixture-only" } }, tags: [] }];
+    }
     if (command === "list_workspaces" && mode.startsWith("vault")) return [{
       id: "protected", name: "Protected pair", host_ids: [], auto_connect: false,
       tabs: [{ id: "protected-tab", title: "Protected pair", layout: {
@@ -194,6 +199,7 @@ try {
   await scenario("focus-delayed-password-palette", async page => {
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().dblclick();
     const input = await openPalette(page);
+    assert.equal(await page.locator('input[aria-label="SSH password"]').count(), 0, "Prompt is genuinely delayed until identity resolution");
     await page.evaluate(() => window.__reviewTest.releaseIdentities());
     await page.locator('input[aria-label="SSH password"]').waitFor();
     await paletteStillOwnsInput(page, input);
