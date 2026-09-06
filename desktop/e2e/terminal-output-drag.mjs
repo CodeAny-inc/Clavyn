@@ -230,7 +230,7 @@ try {
     await atlas(page);
     await action(page, "atlas", "Split right…");
     await page.getByRole("button", { name: "Connect Orion Staging", exact: true }).click();
-    const input = pane(page, "orion").getByLabel("SSH password", { exact: true });
+    const input = pane(page, "orion").locator('input[aria-label="SSH password"]');
     await input.waitFor();
     await remember(page);
     await drag(page, "left");
