@@ -18,10 +18,12 @@ const query = ref("");
 const placement = ref<SessionPlacement>("tab");
 const targetId = ref<string | null>(null);
 const target = computed(() => tabs.tabs.flatMap(tab => collectPanes(tab.tree)).find(pane => pane.id === targetId.value));
+// Only a linked account needs the identity cache; direct hosts are self-contained.
+function identityReady(host: Host) { return !host.identity_id || identities.loaded; }
 const results = computed(() => {
   const needle = query.value.trim().toLowerCase();
   return hosts.hosts.filter(host => {
-    const username = identities.loaded ? effectiveSshIdentity(host, identities.identities).username : "";
+    const username = identityReady(host) ? effectiveSshIdentity(host, identities.identities).username : "";
     return `${host.label} ${host.hostname} ${username} ${host.tags.join(" ")}`.toLowerCase().includes(needle);
   });
 });
@@ -39,7 +41,7 @@ async function show(where: SessionPlacement = "tab", paneId: string | null = tab
   await loadIdentities();
 }
 function connect(host?: Host) {
-  if (host && !identities.loaded) return;
+  if (host && !identityReady(host)) return;
   // Finish native focus restoration before selecting the new destination.
   dialog.value?.close();
   if (placement.value === "tab" || !target.value) tabs.newTab(host);
@@ -76,9 +78,9 @@ defineExpose({ show });
         <input ref="search" v-model="query" aria-label="Search sessions" placeholder="Search hosts, addresses or tags…"
           class="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none" @keydown="enterSearch" />
       </div>
-      <p v-if="identities.loading" class="text-xs text-muted-foreground" role="status">Loading SSH identities…</p>
+      <p v-if="identities.loading" class="text-xs text-muted-foreground" role="status">Loading linked SSH identities… Direct hosts and local shells remain available.</p>
       <div v-else-if="identities.loadError" class="text-xs text-destructive" role="alert">
-        {{ identities.loadError }}
+        {{ identities.loadError }} Direct hosts and local shells remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
     </div>
@@ -89,10 +91,10 @@ defineExpose({ show });
         <ArrowUpRight class="size-4 text-muted-foreground" />
       </button>
       <div v-if="results.length" class="px-3 pb-1 pt-3 text-[11px] font-medium text-muted-foreground">Saved hosts</div>
-      <button v-for="host in results" :key="host.id" class="session-choice disabled:opacity-50" :disabled="!identities.loaded" :aria-label="`Connect ${host.label}`" @click="connect(host)">
+      <button v-for="host in results" :key="host.id" class="session-choice disabled:opacity-50" :disabled="!identityReady(host)" :aria-label="`Connect ${host.label}`" @click="connect(host)">
         <span class="session-avatar bg-blue-500/10 text-blue-500"><Server class="size-4" /></span>
         <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium">{{ host.label }}</span>
-          <span class="block truncate text-xs text-muted-foreground">{{ identities.loaded ? configuredSshEndpoint(host, identities.identities) : 'SSH identity not yet resolved' }}</span></span>
+          <span class="block truncate text-xs text-muted-foreground">{{ identityReady(host) ? configuredSshEndpoint(host, identities.identities) : 'SSH identity not yet resolved' }}</span></span>
         <ArrowUpRight class="size-4 text-muted-foreground" />
       </button>
       <p v-if="!results.length && !localMatches" class="px-3 py-8 text-center text-sm text-muted-foreground">No matching sessions. Try another name or address.</p>
