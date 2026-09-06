@@ -10,11 +10,12 @@ import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
+import SshPasswordPrompt from "./SshPasswordPrompt.vue";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey } from "../lib/sshIdentity";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
 import type { UnlistenFn } from "@tauri-apps/api/event";
-import type { Host } from "../types";
 
 const props = withDefaults(defineProps<{ pane: Pane; tabId: string; visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ "split-h": []; "split-v": []; close: [] }>();
@@ -25,6 +26,7 @@ const vault = useVaultStore();
 const ui = useUiStore();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
+const passwordPrompt = ref<InstanceType<typeof SshPasswordPrompt> | null>(null);
 const connecting = ref(false);
 const error = ref("");
 const showSearch = ref(false);
@@ -50,22 +52,19 @@ const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
 const status = computed(() => connecting.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
 const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
 
-function formatHostEndpoint(host: Host) {
-  // Match the backend: a resolved identity overrides the saved host username.
-  const identity = identities.identities.find(item => item.id === host.identity_id);
-  return `${identity?.username ?? host.username}@${host.hostname}:${host.port}`;
-}
 const configuredEndpoint = computed(() => {
   if (props.pane.terminalType === "local") return "Local shell";
   const host = hosts.hosts.find(item => item.id === props.pane.hostId);
-  return host ? formatHostEndpoint(host) : props.pane.title;
+  if (!host) return props.pane.title;
+  if (host.identity_id && !identities.loaded) return `Resolving SSH identity · ${host.hostname}:${host.port}`;
+  return configuredSshEndpoint(host, identities.identities);
 });
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
 
 function focusInput() {
   if (disposed || !isActive.value) return;
-  // An open search belongs to this pane too. Never leave focus on another host.
-  if (showSearch.value) searchInputRef.value?.focus();
+  if (passwordPrompt.value?.pending) passwordPrompt.value.focus();
+  else if (showSearch.value) searchInputRef.value?.focus();
   else term?.focus();
 }
 function fit(focus = false) {
@@ -76,17 +75,12 @@ function fit(focus = false) {
       if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
     }
   } catch { /* ResizeObserver can run during teardown. */ }
-  // Focus restoration must not depend on the resize measurement being ready.
   if (focus) focusInput();
 }
-// Exit before the destination pane's post-render watcher can focus its input.
-// This also covers same-tab shortcuts, not only changes to the active tab/tree.
 watch(isActive, active => {
   if (!active && isFullscreen.value) ui.exitFullscreen();
 }, { flush: "sync" });
 watch([isActive, () => props.visible], () => nextTick(() => {
-  // Focusing an inactive pane's controls activates it too. Do not steal focus
-  // back from that control or its teleported menu before the user can use it.
   const focused = document.activeElement;
   const controlHasFocus = focused instanceof Element &&
     paneRef.value?.contains(focused) && !focused.closest(".xterm");
@@ -94,7 +88,6 @@ watch([isActive, () => props.visible], () => nextTick(() => {
   const menuHasFocus = !!menuId && document.getElementById(menuId)?.contains(focused);
   fit(!controlHasFocus && !menuHasFocus);
 }), { flush: "post" });
-// Explicit fullscreen changes still return input to this pane's terminal/search.
 watch(isFullscreen, () => nextTick(() => fit(true)), { flush: "post" });
 function activatePane(focusTerminal = false) {
   tabs.setActivePane(props.pane.id);
@@ -121,8 +114,7 @@ async function connectSession() {
     const terminal = term;
     if (!terminal) return;
     if (previous) {
-      // Old-session events are already filtered by currentSessionId. Drain any
-      // output queued in xterm before resetting, so it cannot re-enable old modes.
+      // Old-session events are filtered before draining/resetting the emulator.
       await new Promise<void>(resolve => terminal.write("", resolve));
       if (disposed) return;
       searchAddon?.clearDecorations();
@@ -132,18 +124,47 @@ async function connectSession() {
     if (props.pane.terminalType === "local") {
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
     } else {
+      // All creation paths, including HostList and restored workspaces, wait for
+      // a successful identity load. An empty initial cache is not a missing identity.
+      await identities.ensureLoaded();
+      if (disposed || props.pane.closing) return;
       const host = hosts.hosts.find(h => h.id === props.pane.hostId);
       if (!host) throw new Error("Host not found. Check the saved host configuration.");
-      const identity = identities.identities.find(i => i.id === host.identity_id);
-      const auth = identity?.auth ?? host.auth;
+      const auth = effectiveSshIdentity(host, identities.identities).auth;
       if (auth === "publickey" && !vault.unlocked) {
         if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
         if (disposed) return;
       }
-      const openSsh = () => {
-        // Resolve after any unlock wait, then freeze the endpoint for this attempt.
-        endpointForAttempt = formatHostEndpoint(host);
-        return api.connectSsh(sessionId, host, null, terminal.cols, terminal.rows);
+      const openSsh = async () => {
+        await identities.ensureLoaded();
+        if (disposed || props.pane.closing) return;
+        // Re-read after unlock: configuration may have been edited while waiting.
+        const host = hosts.hosts.find(h => h.id === props.pane.hostId);
+        if (!host) throw new Error("Host not found. Check the saved host configuration.");
+        const effective = effectiveSshIdentity(host, identities.identities);
+        const key = sshConfigurationKey(host, identities.identities);
+        endpointForAttempt = configuredSshEndpoint(host, identities.identities);
+        let password: string | null = null;
+        try {
+          if (passwordAuth(effective.auth)) {
+            if (!passwordPrompt.value) throw new Error("Password prompt is not ready. Reconnect to retry.");
+            password = await passwordPrompt.value.request(endpointForAttempt);
+            if (disposed || props.pane.closing) return;
+            if (password === null) throw new Error("Connection cancelled.");
+            const latest = hosts.hosts.find(h => h.id === props.pane.hostId);
+            if (!identities.loaded || !latest || sshConfigurationKey(latest, identities.identities) !== key)
+              throw new Error("Connection settings changed. Reconnect to review the updated account.");
+          }
+          const request = api.connectSsh(sessionId, host, password, terminal.cols, terminal.rows, effective.username);
+          // The IPC request owns its serialized argument; retain no reusable credential.
+          password = null;
+          const connected = await request;
+          // Rust returns metadata from the same identity snapshot it authenticated.
+          // The preflight endpoint also supports older bridges returning no metadata.
+          if (connected) endpointForAttempt = formatSshEndpoint(connected);
+        } finally {
+          password = null;
+        }
       };
       try {
         await openSsh();
@@ -155,14 +176,11 @@ async function connectSession() {
         await openSsh();
       }
     }
-    // Closing while connect is pending must not resurrect a session or leak it.
     if (disposed || props.pane.closing) {
       await api.closeSession(sessionId).catch(() => {});
       return;
     }
     if (!sessionEnded) {
-      // Keep the UI tied to the endpoint that actually owns this successful session.
-      // Editing/deleting the saved Host must not relabel a live shell.
       connectedEndpoint.value = endpointForAttempt;
       tabs.setPaneConnected(props.pane.id, sessionId);
     }
@@ -231,11 +249,11 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();
   term?.dispose();
   term = null;
-  // Explicit close in the store already owns an established session's teardown.
   if (currentSessionId && (!props.pane.closing || props.pane.sessionId !== currentSessionId))
     void api.closeSession(currentSessionId).catch(() => {});
 });
@@ -305,7 +323,6 @@ const actions = computed<MenuAction[]>(() => [
   { id: "close", label: "Close session", icon: X, danger: true, separator: true },
 ]);
 function selectAction(id: string) {
-  // ActionMenu is teleported to <body>, so it cannot rely on the pane's bubbling click handler.
   activatePane();
   if (id === "split-h") emit("split-h");
   else if (id === "split-v") emit("split-v");
@@ -344,6 +361,7 @@ function selectAction(id: string) {
       <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="connecting" @click.stop="activatePane(); connectSession()">Reconnect</button>
     </div>
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" />
+    <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>

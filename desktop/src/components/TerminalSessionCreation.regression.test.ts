@@ -45,6 +45,9 @@ let wrapper: VueWrapper | undefined;
 
 beforeEach(() => {
   setActivePinia(createPinia());
+  // These existing scenarios inject already-loaded identity snapshots directly.
+  // Delayed/failed initial loads are exercised in TerminalAuthentication.regression.
+  useIdentitiesStore().loaded = true;
   document.body.innerHTML = "";
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
   // jsdom does not implement native dialog focus restoration. Model that boundary
@@ -130,7 +133,6 @@ describe("session picker activation through the real pane menu", () => {
     await nextTick();
     expect(tabs.activePaneId).toBe(pane.id);
     expect(document.activeElement).toBe(trigger.element);
-    // Dispatch to the actual focused element, not a locator that repairs focus.
     document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
     await vi.waitFor(() => {
       const firstAction = document.querySelector('[role="menuitem"]');

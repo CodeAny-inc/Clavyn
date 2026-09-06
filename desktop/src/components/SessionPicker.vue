@@ -3,12 +3,15 @@ import { computed, nextTick, ref } from "vue";
 import { Server, TerminalSquare, X, Search, ArrowUpRight } from "lucide-vue-next";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
+import { useIdentitiesStore } from "../stores/identities";
+import { configuredSshEndpoint, effectiveSshIdentity } from "../lib/sshIdentity";
 import type { Host } from "../types";
 
 export type SessionPlacement = "tab" | "horizontal" | "vertical";
 const emit = defineEmits<{ opened: [] }>();
 const tabs = useTabsStore();
 const hosts = useHostsStore();
+const identities = useIdentitiesStore();
 const dialog = ref<HTMLDialogElement | null>(null);
 const search = ref<HTMLInputElement | null>(null);
 const query = ref("");
@@ -17,9 +20,15 @@ const targetId = ref<string | null>(null);
 const target = computed(() => tabs.tabs.flatMap(tab => collectPanes(tab.tree)).find(pane => pane.id === targetId.value));
 const results = computed(() => {
   const needle = query.value.trim().toLowerCase();
-  return hosts.hosts.filter(host => `${host.label} ${host.hostname} ${host.username} ${host.tags.join(" ")}`.toLowerCase().includes(needle));
+  return hosts.hosts.filter(host => {
+    const username = identities.loaded ? effectiveSshIdentity(host, identities.identities).username : "";
+    return `${host.label} ${host.hostname} ${username} ${host.tags.join(" ")}`.toLowerCase().includes(needle);
+  });
 });
 const localMatches = computed(() => !query.value || "local shell terminal".includes(query.value.trim().toLowerCase()));
+async function loadIdentities() {
+  try { await identities.ensureLoaded(); } catch { /* Store exposes a retryable error. */ }
+}
 async function show(where: SessionPlacement = "tab", paneId: string | null = tabs.activePaneId) {
   query.value = "";
   targetId.value = paneId;
@@ -27,12 +36,12 @@ async function show(where: SessionPlacement = "tab", paneId: string | null = tab
   dialog.value?.showModal();
   await nextTick();
   search.value?.focus();
+  await loadIdentities();
 }
 function connect(host?: Host) {
-  // Native close restores focus to the source control, whose focusin can activate
-  // its pane. Finish that restoration before selecting the new destination.
+  if (host && !identities.loaded) return;
+  // Finish native focus restoration before selecting the new destination.
   dialog.value?.close();
-  // The target may have been closed by another action while the dialog was open.
   if (placement.value === "tab" || !target.value) tabs.newTab(host);
   else tabs.splitPane(target.value.id, placement.value, host);
   emit("opened");
@@ -40,7 +49,6 @@ function connect(host?: Host) {
 function enterSearch(event: KeyboardEvent) {
   if (event.key !== "Enter" || event.isComposing) return;
   event.preventDefault();
-  // Enter selects an unambiguous match; it must never connect a random host.
   if (results.value.length === 1 && !localMatches.value) connect(results.value[0]);
   else if (results.value.length === 0 && localMatches.value) connect();
 }
@@ -68,6 +76,11 @@ defineExpose({ show });
         <input ref="search" v-model="query" aria-label="Search sessions" placeholder="Search hosts, addresses or tags…"
           class="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none" @keydown="enterSearch" />
       </div>
+      <p v-if="identities.loading" class="text-xs text-muted-foreground" role="status">Loading SSH identities…</p>
+      <div v-else-if="identities.loadError" class="text-xs text-destructive" role="alert">
+        {{ identities.loadError }}
+        <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
+      </div>
     </div>
     <div class="max-h-[min(380px,50dvh)] overflow-y-auto border-t border-border px-3 py-2">
       <button v-if="localMatches" class="session-choice" aria-label="Open local shell" @click="connect()">
@@ -76,10 +89,10 @@ defineExpose({ show });
         <ArrowUpRight class="size-4 text-muted-foreground" />
       </button>
       <div v-if="results.length" class="px-3 pb-1 pt-3 text-[11px] font-medium text-muted-foreground">Saved hosts</div>
-      <button v-for="host in results" :key="host.id" class="session-choice" :aria-label="`Connect ${host.label}`" @click="connect(host)">
+      <button v-for="host in results" :key="host.id" class="session-choice disabled:opacity-50" :disabled="!identities.loaded" :aria-label="`Connect ${host.label}`" @click="connect(host)">
         <span class="session-avatar bg-blue-500/10 text-blue-500"><Server class="size-4" /></span>
         <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium">{{ host.label }}</span>
-          <span class="block truncate text-xs text-muted-foreground">{{ host.username }}@{{ host.hostname }}:{{ host.port }}</span></span>
+          <span class="block truncate text-xs text-muted-foreground">{{ identities.loaded ? configuredSshEndpoint(host, identities.identities) : 'SSH identity not yet resolved' }}</span></span>
         <ArrowUpRight class="size-4 text-muted-foreground" />
       </button>
       <p v-if="!results.length && !localMatches" class="px-3 py-8 text-center text-sm text-muted-foreground">No matching sessions. Try another name or address.</p>
