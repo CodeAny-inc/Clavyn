@@ -44,6 +44,8 @@ const listeners: UnlistenFn[] = [];
 let currentSessionId: string | null = null;
 let disposed = false;
 let sessionEnded = false;
+// Buffer remote output, never user input, until this attempt can answer queries.
+let pendingOutput: Uint8Array[] | null = null;
 const listenersReady = ref(false);
 const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
 const isFullscreen = computed(() => ui.fullscreenPaneId === props.pane.id);
@@ -88,6 +90,13 @@ watch([isActive, () => props.visible], () => nextTick(() => {
   const menuHasFocus = !!menuId && document.getElementById(menuId)?.contains(focused);
   fit(!controlHasFocus && !menuHasFocus);
 }), { flush: "post" });
+// A successful move can preserve activePaneId while the DOM move loses focus.
+watch(() => tabs.paneFocusRequest, request => {
+  if (!request || request.paneId !== props.pane.id) return;
+  void nextTick(() => {
+    if (request === tabs.paneFocusRequest && !document.querySelector("dialog[open]")) fit(true);
+  });
+}, { flush: "post" });
 watch(isFullscreen, () => nextTick(() => fit(true)), { flush: "post" });
 function activatePane(focusTerminal = false) {
   tabs.setActivePane(props.pane.id);
@@ -107,6 +116,7 @@ async function connectSession() {
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
   sessionEnded = false;
+  pendingOutput = [];
   let endpointForAttempt = "Local shell";
   try {
     if (previous) await api.closeSession(previous).catch(() => {});
@@ -183,11 +193,18 @@ async function connectSession() {
     if (!sessionEnded) {
       connectedEndpoint.value = endpointForAttempt;
       tabs.setPaneConnected(props.pane.id, sessionId);
+      // Enable writes before xterm parses queued queries (including synchronous
+      // parser callbacks). Keep chunk order and the same session owner.
+      connecting.value = false;
+      const output = pendingOutput;
+      pendingOutput = null;
+      for (const chunk of output ?? []) terminal.write(chunk);
     }
     fit(true);
   } catch (cause) {
     if (!disposed) writeError(`Connection failed: ${String(cause)}`);
   } finally {
+    pendingOutput = null;
     connecting.value = false;
   }
 }
@@ -228,13 +245,17 @@ onMounted(async () => {
   fit();
   try {
     const dataListener = await api.onSessionData(event => {
-      if (!disposed && event.session_id === currentSessionId) term?.write(new Uint8Array(event.data));
+      if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
+      const data = new Uint8Array(event.data);
+      if (pendingOutput) pendingOutput.push(data);
+      else if (props.pane.connected) term?.write(data);
     });
     if (disposed) { dataListener(); return; }
     listeners.push(dataListener);
     const closeListener = await api.onSessionClosed(event => {
       if (!disposed && event.session_id === currentSessionId) {
         sessionEnded = true;
+        pendingOutput = null;
         tabs.setPaneDisconnected(props.pane.id);
         writeError(`Session closed: ${event.reason}`);
       }
@@ -249,6 +270,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  pendingOutput = null;
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();

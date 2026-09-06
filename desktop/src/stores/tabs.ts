@@ -34,6 +34,8 @@ export const useTabsStore = defineStore("tabs", () => {
   const tabs = ref<Tab[]>([]);
   const activeTabId = ref<string | null>(null);
   const activePaneId = ref<string | null>(null);
+  // A fresh request also notifies an already-active pane after a DOM move.
+  const paneFocusRequest = ref<{ paneId: string } | null>(null);
   const focusedPanes = new Map<string, string>();
   const draggedPaneId = ref<string | null>(null);
   const dragOverPaneId = ref<string | null>(null);
@@ -155,6 +157,7 @@ export const useTabsStore = defineStore("tabs", () => {
     }
     setActivePane(source.id);
     endDrag();
+    paneFocusRequest.value = { paneId: source.id };
   }
   function movePaneToTab(id: string, targetTabId: string) {
     const source = owningTab(id);
@@ -170,6 +173,7 @@ export const useTabsStore = defineStore("tabs", () => {
     }
     target.tree = { id: paneId(), direction: "horizontal", ratio: 0.5, first: target.tree, second: pane };
     setActivePane(id);
+    paneFocusRequest.value = { paneId: id };
   }
   function navigatePane(direction: "up" | "down" | "left" | "right") {
     if (!activeTab.value || !activePaneId.value) return;
@@ -183,7 +187,7 @@ export const useTabsStore = defineStore("tabs", () => {
     const [tab] = tabs.value.splice(from, 1);
     tabs.value.splice(to, 0, tab);
   }
-  return { tabs, activeTabId, activePaneId, activeTab, activePane,
+  return { tabs, activeTabId, activePaneId, activeTab, activePane, paneFocusRequest,
     draggedPaneId, dragOverPaneId, dragOverPosition,
     newTab, closeTab, setActiveTab, setActivePane, splitPane, closePane,
     setPaneConnected, setPaneDisconnected, setPaneTitle, setRatio, firstPane,
