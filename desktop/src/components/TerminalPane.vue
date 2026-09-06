@@ -51,7 +51,9 @@ const status = computed(() => connecting.value ? "Connecting" : props.pane.conne
 const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
 
 function formatHostEndpoint(host: Host) {
-  return `${host.username}@${host.hostname}:${host.port}`;
+  // Match the backend: a resolved identity overrides the saved host username.
+  const identity = identities.identities.find(item => item.id === host.identity_id);
+  return `${identity?.username ?? host.username}@${host.hostname}:${host.port}`;
 }
 const configuredEndpoint = computed(() => {
   if (props.pane.terminalType === "local") return "Local shell";
@@ -121,21 +123,25 @@ async function connectSession() {
     } else {
       const host = hosts.hosts.find(h => h.id === props.pane.hostId);
       if (!host) throw new Error("Host not found. Check the saved host configuration.");
-      endpointForAttempt = formatHostEndpoint(host);
       const identity = identities.identities.find(i => i.id === host.identity_id);
       const auth = identity?.auth ?? host.auth;
       if (auth === "publickey" && !vault.unlocked) {
         if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
         if (disposed) return;
       }
+      const openSsh = () => {
+        // Resolve after any unlock wait, then freeze the endpoint for this attempt.
+        endpointForAttempt = formatHostEndpoint(host);
+        return api.connectSsh(sessionId, host, null, terminal.cols, terminal.rows);
+      };
       try {
-        await api.connectSsh(sessionId, host, null, terminal.cols, terminal.rows);
+        await openSsh();
       } catch (cause) {
         const message = String(cause);
         if (!message.includes("vault passphrase required") && !message.includes("vault required")) throw cause;
         if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
         if (disposed) return;
-        await api.connectSsh(sessionId, host, null, terminal.cols, terminal.rows);
+        await openSsh();
       }
     }
     // Closing while connect is pending must not resurrect a session or leak it.

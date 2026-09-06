@@ -29,10 +29,12 @@ async function show(where: SessionPlacement = "tab", paneId: string | null = tab
   search.value?.focus();
 }
 function connect(host?: Host) {
+  // Native close restores focus to the source control, whose focusin can activate
+  // its pane. Finish that restoration before selecting the new destination.
+  dialog.value?.close();
   // The target may have been closed by another action while the dialog was open.
   if (placement.value === "tab" || !target.value) tabs.newTab(host);
   else tabs.splitPane(target.value.id, placement.value, host);
-  dialog.value?.close();
   emit("opened");
 }
 function enterSearch(event: KeyboardEvent) {
