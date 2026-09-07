@@ -15,8 +15,10 @@ export const useSftpStore = defineStore("sftp", () => {
 
   // Presentation controls disable Connect while loading, but keyboard submission
   // can still call connect() again. Keep the invariant in the store so every UI
-  // surface shares one in-flight establishment attempt.
+  // surface shares one in-flight establishment attempt for the SAME immutable
+  // connection configuration only.
   let connectPending: Promise<void> | null = null;
+  let connectPendingKey: string | null = null;
   let connectGeneration = 0;
 
   function clearPublishedConnection() {
@@ -27,12 +29,24 @@ export const useSftpStore = defineStore("sftp", () => {
     selectedEntry.value = null;
   }
 
+  function connectionRequestKey(host: Host, expectedUsername?: string) {
+    // The host passed here is already the frozen transport snapshot. Passwords
+    // are intentionally excluded so duplicate submit/click events share one task.
+    return JSON.stringify([host, expectedUsername ?? null]);
+  }
+
   function connect(
     host: Host,
     password: string | null = null,
     expectedUsername?: string,
   ): Promise<void> {
-    if (connectPending) return connectPending;
+    const requestKey = connectionRequestKey(host, expectedUsername);
+    if (connectPending) {
+      if (connectPendingKey === requestKey) return connectPending;
+      const message = "Another SFTP connection is still in progress. Wait for it to finish or disconnect before connecting a different host.";
+      error.value = message;
+      return Promise.reject(new Error(message));
+    }
 
     const generation = ++connectGeneration;
     const id = crypto.randomUUID();
@@ -92,9 +106,20 @@ export const useSftpStore = defineStore("sftp", () => {
     })();
 
     connectPending = task;
+    connectPendingKey = requestKey;
     task.then(
-      () => { if (connectPending === task) connectPending = null; },
-      () => { if (connectPending === task) connectPending = null; },
+      () => {
+        if (connectPending === task) {
+          connectPending = null;
+          connectPendingKey = null;
+        }
+      },
+      () => {
+        if (connectPending === task) {
+          connectPending = null;
+          connectPendingKey = null;
+        }
+      },
     );
     return task;
   }
@@ -205,6 +230,7 @@ export const useSftpStore = defineStore("sftp", () => {
     // observes the generation change and closes the late backend session itself.
     connectGeneration += 1;
     connectPending = null;
+    connectPendingKey = null;
     loading.value = false;
     const id = sessionId.value;
     try {
