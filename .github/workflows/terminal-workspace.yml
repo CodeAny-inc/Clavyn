@@ -15,10 +15,118 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  browser-ui:
-    # Keep trusted same-repository PRs on the self-hosted pool, but never run
-    # public fork-controlled code on a persistent runner.
-    runs-on: ${{ github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
+  browser-ui-github:
+    # GitHub-hosted is always the first attempt, including same-repository PRs.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    outputs:
+      failed: ${{ steps.result.outputs.failed }}
+    steps:
+      - id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: node
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - id: install
+        name: Install application dependencies
+        continue-on-error: true
+        working-directory: desktop
+        run: npm ci
+      - id: checks
+        name: Typecheck, unit tests and production build
+        continue-on-error: true
+        working-directory: desktop
+        run: |
+          set -o pipefail
+          mkdir -p ui-test-results
+          npx vue-tsc --noEmit 2>&1 | tee ui-test-results/typecheck.log
+          npm test 2>&1 | tee ui-test-results/unit-tests.log
+          npm run build 2>&1 | tee ui-test-results/build.log
+      - id: browser-tools
+        name: Install isolated, pinned browser tooling
+        continue-on-error: true
+        run: |
+          npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
+          desktop/e2e/node_modules/.bin/playwright install --with-deps chromium
+      - id: start
+        name: Start application
+        continue-on-error: true
+        run: |
+          (cd desktop && npm run dev -- --host 127.0.0.1 > "$RUNNER_TEMP/terminal-vite.log" 2>&1) &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:1420 > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/terminal-vite.log"
+          exit 1
+      - id: interactions
+        name: Record and verify terminal interactions
+        continue-on-error: true
+        env:
+          UI_URL: http://127.0.0.1:1420
+          UI_RESULTS: ${{ github.workspace }}/desktop/ui-test-results
+          UI_RECORD: '1'
+          UI_SLOW_MO: '100'
+        run: npm test --prefix desktop/e2e
+      - name: Prepare reviewable MP4 recordings
+        if: always()
+        continue-on-error: true
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          for video in desktop/ui-test-results/*.webm; do
+            [ -f "$video" ] || continue
+            ffmpeg -hide_banner -loglevel error -y -i "$video" -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -movflags +faststart "${video%.webm}.mp4"
+          done
+      - name: Upload screenshots, recordings, traces and test logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-workspace-ui-${{ github.run_id }}-github
+          retention-days: 14
+          path: |
+            desktop/ui-test-results/
+            !desktop/ui-test-results/raw-video/
+            desktop/dist/
+            desktop/e2e/
+            !desktop/e2e/node_modules/
+            ${{ runner.temp }}/terminal-vite.log
+      - id: result
+        if: always()
+        shell: bash
+        run: |
+          failed=false
+          for outcome in \
+            "${{ steps.checkout.outcome }}" \
+            "${{ steps.node.outcome }}" \
+            "${{ steps.install.outcome }}" \
+            "${{ steps.checks.outcome }}" \
+            "${{ steps.browser-tools.outcome }}" \
+            "${{ steps.start.outcome }}" \
+            "${{ steps.interactions.outcome }}"; do
+            if [ "$outcome" != "success" ]; then failed=true; fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+  browser-ui-self-hosted:
+    needs: browser-ui-github
+    # Persistent runners are fallback-only and never execute public fork code.
+    if: >-
+      ${{ always() && needs.browser-ui-github.outputs.failed == 'true' &&
+          github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, linux, x64]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
@@ -77,7 +185,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: terminal-workspace-ui-${{ github.run_id }}
+          name: terminal-workspace-ui-${{ github.run_id }}-self-hosted
           retention-days: 14
           path: |
             desktop/ui-test-results/
@@ -86,3 +194,21 @@ jobs:
             desktop/e2e/
             !desktop/e2e/node_modules/
             ${{ runner.temp }}/terminal-vite.log
+
+  browser-ui:
+    needs: [browser-ui-github, browser-ui-self-hosted]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require GitHub-hosted success or trusted fallback success
+        shell: bash
+        run: |
+          if [ "${{ needs.browser-ui-github.result }}" = "success" ] && [ "${{ needs.browser-ui-github.outputs.failed }}" != "true" ]; then
+            exit 0
+          fi
+          if [ "${{ needs.browser-ui-self-hosted.result }}" = "success" ]; then
+            echo "GitHub-hosted browser checks failed; trusted self-hosted fallback passed."
+            exit 0
+          fi
+          echo "Terminal workspace UI checks did not pass on GitHub-hosted or an eligible self-hosted fallback."
+          exit 1
