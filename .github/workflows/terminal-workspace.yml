@@ -124,7 +124,8 @@ jobs:
     needs: browser-ui-github
     # Persistent runners are fallback-only and never execute public fork code.
     if: >-
-      ${{ always() && needs.browser-ui-github.outputs.failed == 'true' &&
+      ${{ always() &&
+          (needs.browser-ui-github.result != 'success' || needs.browser-ui-github.outputs.failed == 'true') &&
           github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 20
