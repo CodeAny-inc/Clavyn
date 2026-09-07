@@ -71,6 +71,7 @@ describe("SFTP connection ownership", () => {
     await first;
     expect(sftp.connectedHost?.id).toBe("atlas");
     expect(sftp.sessionId).toBe(calls("sftp_connect")[0][1].sessionId);
+    expect(sftp.error).toBeNull();
   });
 
   it("closes an obsolete late attempt without clearing a newer connection", async () => {
