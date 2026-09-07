@@ -8,7 +8,10 @@ on:
 
 jobs:
   rust-check:
-    runs-on: ubuntu-22.04
+    # Default: GitHub-hosted (ubuntu-22.04). Fallback: self-hosted opentermius runner.
+    # To switch to self-hosted, set CI_RUNNER_LABELS repo variable to:
+    #   ["self-hosted","linux","opentermius"]
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -36,7 +39,8 @@ jobs:
         run: cargo test -p opentermius-desktop --features macos-biometric
 
   frontend-build:
-    runs-on: ubuntu-latest
+    # Default: GitHub-hosted (ubuntu-latest). Fallback: self-hosted opentermius runner.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
