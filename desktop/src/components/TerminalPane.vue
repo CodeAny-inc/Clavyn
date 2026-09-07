@@ -12,7 +12,7 @@ import { useUiStore } from "../stores/ui";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
-import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey } from "../lib/sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
@@ -65,7 +65,7 @@ const configuredEndpoint = computed(() => {
   if (props.pane.terminalType === "local") return "Local shell";
   const host = hosts.hosts.find(item => item.id === props.pane.hostId);
   if (!host) return props.pane.title;
-  if (host.identity_id && !identities.loaded) return `Resolving SSH identity · ${host.hostname}:${host.port}`;
+  if (!sshIdentityReady(host, identities.loaded)) return `Resolving SSH identity · ${host.hostname}:${host.port}`;
   return configuredSshEndpoint(host, identities.identities);
 });
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
@@ -207,7 +207,7 @@ async function connectSession() {
         while (!disposed && !props.pane.closing) {
           const host = hosts.hosts.find(h => h.id === props.pane.hostId);
           if (!host) throw new Error("Host not found. Check the saved host configuration.");
-          if (!host.identity_id || identities.loaded) return host;
+          if (sshIdentityReady(host, identities.loaded)) return host;
           await identities.ensureLoaded();
         }
       };
@@ -233,7 +233,7 @@ async function connectSession() {
             if (disposed || props.pane.closing) return;
             if (password === null) throw new Error("Connection cancelled.");
             const latest = hosts.hosts.find(h => h.id === props.pane.hostId);
-            if (!latest || (latest.identity_id && !identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
+            if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
           const request = api.connectSsh(sessionId, host, password, terminal.cols, terminal.rows, effective.username);
@@ -321,7 +321,9 @@ onMounted(async () => {
   // Wait for ancestor v-show updates; the mount hook can run while still hidden.
   // This ticket belongs to creation, not to later network completion.
   queueFocus();
-  await connectWhenReady();
+  // Directly created panes auto-connect. Workspace restore can explicitly opt an
+  // SSH pane out; Reconnect then initializes listeners and starts it on demand.
+  if (props.pane.autoConnect !== false) await connectWhenReady();
 });
 onBeforeUnmount(() => {
   disposed = true;
