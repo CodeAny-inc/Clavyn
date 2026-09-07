@@ -29,7 +29,7 @@ const form = ref({
   username: "",
   useIdentity: false,
   identityId: "",
-  authMode: "password" as "password" | "publickey" | "agent",
+  authMode: "password" as "password" | "publickey",
   credentialKey: "",
   keyId: "",
   groupId: "",
@@ -40,8 +40,10 @@ watch(
   () => props.host,
   (host) => {
     if (host) {
-      const authMode: "password" | "publickey" | "agent" =
-        typeof host.auth === "string" ? host.auth : "password";
+      // Agent auth is not implemented natively yet. Legacy Agent hosts open as
+      // Password so saving the form cannot keep advertising an unsupported mode.
+      const authMode: "password" | "publickey" =
+        host.auth === "publickey" ? "publickey" : "password";
       const credentialKey =
         typeof host.auth === "object" && "password" in host.auth
           ? host.auth.password.credential_key
@@ -102,12 +104,12 @@ const isValid = computed(() => {
 
 function buildAuth(): AuthMethod {
   if (form.value.useIdentity) {
-    // Auth comes from the identity, but we still store a fallback on the host
+    // Auth comes from the identity, but we still store a compatibility fallback
+    // on the host. A missing linked identity fails closed at connection time.
     const id = identities.identities.find((i) => i.id === form.value.identityId);
-    return id?.auth ?? "agent";
+    return id?.auth ?? { password: { credential_key: "default" } };
   }
   if (form.value.authMode === "publickey") return "publickey";
-  if (form.value.authMode === "agent") return "agent";
   return {
     password: { credential_key: form.value.credentialKey || "default" },
   };
@@ -228,8 +230,10 @@ async function save() {
           <Select v-model="form.authMode">
             <option value="password">Password</option>
             <option value="publickey">SSH Key</option>
-            <option value="agent">SSH Agent</option>
           </Select>
+          <p class="text-[11px] text-muted-foreground mt-1">
+            SSH Agent will return when native agent signing is implemented across supported platforms.
+          </p>
         </FormGroup>
 
         <FormGroup v-if="form.authMode === 'password'">
