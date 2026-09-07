@@ -28,7 +28,13 @@ cd "$ROOT"
 # --- config ---
 REPO="CodeAny-inc/Clavyn"
 PRODUCT_NAME="Clavyn"
-SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.config/clavyn/updater-private.key}"
+# Fall back to the previous signing-key location so existing release machines
+# keep working after the rename. The public key in tauri.conf.json is unchanged.
+_signing_key_default="$HOME/.config/clavyn/updater-private.key"
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" && ! -f "$_signing_key_default" && -f "$HOME/.config/opentermius/updater-private.key" ]]; then
+  _signing_key_default="$HOME/.config/opentermius/updater-private.key"
+fi
+SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$_signing_key_default}"
 BUNDLE_DIR="$ROOT/target/release/bundle/macos"
 PLATFORM="darwin-aarch64"
 ARCH="aarch64"

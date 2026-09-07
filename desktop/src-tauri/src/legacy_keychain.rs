@@ -9,7 +9,7 @@ fn delete_file_based_legacy_passphrase() -> Result<(), String> {
     use security_framework::passwords;
     use security_framework_sys::base::errSecItemNotFound;
 
-    const SERVICE: &str = "com.clavyn.vault";
+    const SERVICE: &str = "com.opentermius.vault";
     const ACCOUNT: &str = "master-passphrase";
 
     // Intentionally use the default PasswordOptions path here rather than
