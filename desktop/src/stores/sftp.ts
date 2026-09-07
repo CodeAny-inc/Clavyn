@@ -86,6 +86,10 @@ export const useSftpStore = defineStore("sftp", () => {
         currentPath.value = home;
         entries.value = initialEntries;
         selectedEntry.value = null;
+        // A rejected attempt to switch hosts while this task was pending may
+        // have surfaced a transient ownership error. Once the owning attempt
+        // succeeds, its published state is authoritative again.
+        error.value = null;
 
         // Defensive replacement support: UI normally connects only while
         // disconnected, but never leak an older published backend session.
