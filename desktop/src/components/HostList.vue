@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from "vue";
 import { useHostsStore } from "../stores/hosts";
 import { useTabsStore } from "../stores/tabs";
 import { useIdentitiesStore } from "../stores/identities";
+import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import HostForm from "./HostForm.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -46,14 +47,54 @@ const selectedHost = computed(() =>
   hosts.hosts.find((h) => h.id === selectedHostId.value) ?? null,
 );
 
+// Search must use the account that will really authenticate, not a stale host fallback.
+const filteredHosts = computed(() => {
+  let result = hosts.hosts;
+  if (hosts.selectedGroupId) result = result.filter((host) => host.group_id === hosts.selectedGroupId);
+  const query = hosts.searchQuery.trim().toLowerCase();
+  if (!query) return result;
+  return result.filter((host) => {
+    const username = identityReady(host)
+      ? effectiveSshIdentity(host, identities.identities).username
+      : "";
+    return host.label.toLowerCase().includes(query) ||
+      host.hostname.toLowerCase().includes(query) ||
+      username.toLowerCase().includes(query) ||
+      host.tags.some((tag) => tag.toLowerCase().includes(query));
+  });
+});
+
 // Connect confirmation dialog
 const showConnectDialog = ref(false);
 const connectTarget = ref<Host | null>(null);
 
 onMounted(() => {
-  hosts.load();
-  identities.load();
+  void hosts.load();
+  void identities.load();
 });
+
+function identityReady(host: Host) {
+  return sshIdentityReady(host, identities.loaded);
+}
+function hostEndpoint(host: Host) {
+  if (!identityReady(host)) {
+    const state = identities.loadError ? "SSH identity unavailable" : "Resolving SSH identity";
+    return `${state} · ${host.hostname}:${host.port}`;
+  }
+  return configuredSshEndpoint(host, identities.identities);
+}
+function hostUsername(host: Host) {
+  return identityReady(host)
+    ? effectiveSshIdentity(host, identities.identities).username
+    : "SSH identity unresolved";
+}
+async function loadIdentities() {
+  try {
+    await identities.ensureLoaded();
+  } catch {
+    // Store exposes the retryable failure below the search field.
+  }
+}
 
 function onHostClick(host: Host) {
   selectedHostId.value = host.id;
@@ -61,20 +102,17 @@ function onHostClick(host: Host) {
 
 function onHostDblClick(host: Host) {
   selectedHostId.value = host.id;
-  // Connect directly — no dialog needed
-  tabs.newTab(host);
-  emit("switch-view", "terminal");
+  connectDirectly(host);
 }
 
 function onHostKeydown(e: KeyboardEvent, host: Host) {
   if (e.key === "Enter") {
     e.preventDefault();
     selectedHostId.value = host.id;
-    tabs.newTab(host);
-    emit("switch-view", "terminal");
+    connectDirectly(host);
   } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
-    const list = hosts.filteredHosts;
+    const list = filteredHosts.value;
     const idx = list.findIndex((h) => h.id === host.id);
     const nextIdx = e.key === "ArrowDown"
       ? Math.min(list.length - 1, idx + 1)
@@ -85,12 +123,16 @@ function onHostKeydown(e: KeyboardEvent, host: Host) {
 
 function connectDirectly(host: Host) {
   selectedHostId.value = host.id;
+  if (!identityReady(host)) {
+    void loadIdentities();
+    return;
+  }
   tabs.newTab(host);
   emit("switch-view", "terminal");
 }
 
 function confirmConnect() {
-  if (!connectTarget.value) return;
+  if (!connectTarget.value || !identityReady(connectTarget.value)) return;
   const host = connectTarget.value;
   showConnectDialog.value = false;
   connectTarget.value = null;
@@ -145,7 +187,7 @@ async function deleteGroup(groupId: string, name: string) {
 
 // Helper: get identity label for a host
 function identityLabel(host: Host): string | null {
-  if (!host.identity_id) return null;
+  if (!host.identity_id || !identities.loaded) return null;
   const id = identities.identities.find((i) => i.id === host.identity_id);
   return id?.label ?? null;
 }
@@ -188,6 +230,13 @@ function authLabel(host: Host): string {
           placeholder="Search hosts..."
           class="pl-8"
         />
+      </div>
+      <p v-if="identities.loading" class="mt-2 text-[11px] text-muted-foreground" role="status">
+        Loading linked SSH identities… Direct hosts remain available.
+      </p>
+      <div v-else-if="identities.loadError" class="mt-2 text-[11px] text-destructive" role="alert">
+        {{ identities.loadError }} Direct hosts remain available.
+        <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
     </div>
 
@@ -234,12 +283,13 @@ function authLabel(host: Host): string {
       <div class="border-t border-border/50 mx-2 my-1"></div>
 
       <!-- Host list -->
-      <div v-if="hosts.filteredHosts.length" class="px-2 pt-1">
+      <div v-if="filteredHosts.length" class="px-2 pt-1">
         <div
-          v-for="host in hosts.filteredHosts"
+          v-for="host in filteredHosts"
           :key="host.id"
           class="group flex h-10 items-center gap-2 sm:gap-2.5 rounded-md px-2 cursor-pointer transition-colors duration-100"
           :class="selectedHostId === host.id ? 'bg-accent' : 'hover:bg-muted'"
+          :aria-disabled="!identityReady(host) || undefined"
           tabindex="0"
           @click="onHostClick(host)"
           @dblclick="onHostDblClick(host)"
@@ -253,7 +303,7 @@ function authLabel(host: Host): string {
           <div class="flex-1 min-w-0">
             <div class="text-[13px] font-medium truncate">{{ host.label }}</div>
             <div class="text-[11px] text-muted-foreground truncate font-mono">
-              {{ host.username }}@{{ host.hostname }}:{{ host.port }}
+              {{ hostEndpoint(host) }}
             </div>
           </div>
           <!-- Auth method badge -->
@@ -267,7 +317,8 @@ function authLabel(host: Host): string {
           <!-- Action buttons -->
           <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100">
             <button
-              class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100"
+              class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-40"
+              :disabled="!identityReady(host)"
               aria-label="Connect"
               title="Connect (Enter)"
               @click.stop="connectDirectly(host)"
@@ -317,9 +368,9 @@ function authLabel(host: Host): string {
       <Server class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
       <span class="text-[12px] text-muted-foreground truncate flex-1 min-w-0">
         <span class="text-foreground font-medium">{{ selectedHost.label }}</span>
-        <span class="ml-2 font-mono hidden sm:inline">{{ selectedHost.username }}@{{ selectedHost.hostname }}:{{ selectedHost.port }}</span>
+        <span class="ml-2 font-mono hidden sm:inline">{{ hostEndpoint(selectedHost) }}</span>
       </span>
-      <Button size="sm" class="shrink-0" @click="connectDirectly(selectedHost)">
+      <Button size="sm" class="shrink-0" :disabled="!identityReady(selectedHost)" @click="connectDirectly(selectedHost)">
         <Plug class="size-3.5" :stroke-width="1.75" />
         <span class="hidden sm:inline">Connect</span>
       </Button>
@@ -345,7 +396,7 @@ function authLabel(host: Host): string {
             <div class="flex-1 min-w-0">
               <div class="text-[14px] font-semibold truncate">{{ connectTarget.label }}</div>
               <div class="text-[12px] text-muted-foreground font-mono mt-0.5">
-                {{ connectTarget.username }}@{{ connectTarget.hostname }}:{{ connectTarget.port }}
+                {{ hostEndpoint(connectTarget) }}
               </div>
             </div>
           </div>
@@ -360,7 +411,7 @@ function authLabel(host: Host): string {
             <div class="flex items-center gap-2 text-[12px]">
               <UserCircle class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
               <span class="text-muted-foreground">User:</span>
-              <span class="font-mono text-foreground">{{ connectTarget.username }}</span>
+              <span class="font-mono text-foreground">{{ hostUsername(connectTarget) }}</span>
             </div>
             <div class="flex items-center gap-2 text-[12px]">
               <Lock class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
@@ -385,7 +436,7 @@ function authLabel(host: Host): string {
 
       <template #footer>
         <Button variant="ghost" @click="cancelConnect">Cancel</Button>
-        <Button @click="confirmConnect">
+        <Button :disabled="!!connectTarget && !identityReady(connectTarget)" @click="confirmConnect">
           <Plug class="size-3.5 mr-1" :stroke-width="1.75" />
           Connect
         </Button>
