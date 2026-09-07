@@ -88,7 +88,7 @@ try {
     await finish(context);
   }
   const context = await fresh();
-  check("Page identity", /OpenTermius/i.test(await page.title()));
+  check("Page identity", /Clavyn/i.test(await page.title()));
   check("Expected URL", page.url().startsWith(url));
   check("Meaningful initial content", await atlasLabel().isVisible());
   await atlasLabel().dblclick();

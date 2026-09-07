@@ -9,15 +9,22 @@ const record = process.env.UI_RECORD !== "0";
 const fixture = await readFile(new URL("./tauri-fixture.js", import.meta.url), "utf8");
 // Extend IPC only for these identity scenarios. The saved host deliberately keeps
 // its old username. Resolve the linked identity as core/src/connection.rs does.
+//
+// resolvedSshHost() deliberately clears identity_id when freezing the transport
+// host, so the fixture cannot match on args.host.identity_id at connect_ssh
+// time. Instead it tracks linked host IDs (and their original username) from
+// list_hosts and matches connect_ssh by host.id.
 const identityFixture = `(() => {
   let identity = { id: "fixture-identity", label: "Shared admin", username: "root", auth: "agent", tags: [] };
   const original = window.__TAURI_INTERNALS__.invoke;
   const state = window.__terminalTest;
   state.effectiveAttempts = [];
+  const linkedHosts = new Map();
   window.__TAURI_INTERNALS__.invoke = async (command, args = {}) => {
     if (command === "list_hosts") {
       const hosts = await original(command, args);
       hosts[0].identity_id = identity.id;
+      linkedHosts.set(hosts[0].id, hosts[0].username);
       return hosts;
     }
     if (command === "list_identities") return [structuredClone(identity)];
@@ -25,9 +32,9 @@ const identityFixture = `(() => {
       identity = structuredClone(args.identity);
       return structuredClone(identity);
     }
-    if (command === "connect_ssh" && args.host.identity_id === identity.id) {
+    if (command === "connect_ssh" && linkedHosts.has(args.host?.id)) {
       const username = identity.username;
-      state.effectiveAttempts.push({ id: args.sessionId, username, hostUsername: args.host.username });
+      state.effectiveAttempts.push({ id: args.sessionId, username, hostUsername: linkedHosts.get(args.host.id) });
       return original(command, { ...args, host: { ...args.host, username } });
     }
     return original(command, args);
@@ -77,7 +84,7 @@ async function scenario(name, exercise, identity = false) {
     // One init script guarantees the base transport is installed before its extension.
     await page.addInitScript({ content: fixture + (identity ? "\n" + identityFixture : "") });
     await page.goto(url);
-    assert.match(await page.title(), /OpenTermius/i, "Correct page identity");
+    assert.match(await page.title(), /Clavyn/i, "Correct page identity");
     assert.ok(page.url().startsWith(url), "Correct app URL");
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().waitFor();
     assert.equal(await page.locator("vite-error-overlay").count(), 0, "No framework overlay");

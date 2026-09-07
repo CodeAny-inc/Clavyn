@@ -1,15 +1,15 @@
 [package]
-name = "opentermius-desktop"
+name = "clavyn-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "OpenTermius desktop app (Tauri)"
+description = "Clavyn desktop app (Tauri)"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-opentermius-core = { path = "../../core" }
+clavyn-core = { path = "../../core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"

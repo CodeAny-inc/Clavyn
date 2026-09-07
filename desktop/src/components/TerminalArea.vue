@@ -86,14 +86,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
           <button class="session-tab-select" :aria-pressed="visible && tab.id === tabs.activeTabId" :data-tab-id="tab.id"
             :title="`Show ${tab.title} terminal · ${connected(tab.id)} connected`"
             @click="activate(tab.id)" @keydown="focusTab($event, index)">
-            <Columns2 v-if="collectPanes(tab.tree).length > 1" class="size-3.5 shrink-0 text-blue-300" />
-            <TerminalSquare v-else class="size-3.5 shrink-0 text-slate-300" />
+            <Columns2 v-if="collectPanes(tab.tree).length > 1" class="size-3.5 shrink-0 text-muted-foreground" />
+            <TerminalSquare v-else class="size-3.5 shrink-0 text-muted-foreground" />
             <span class="max-w-[220px] truncate">{{ tabLabel(tab.id) }}</span>
-            <span class="size-1.5 shrink-0 rounded-full" :class="connected(tab.id) ? 'bg-emerald-400' : 'bg-slate-500'" aria-hidden="true" />
+            <span class="size-1.5 shrink-0 rounded-full" :class="connected(tab.id) ? 'bg-emerald-500' : 'bg-muted-foreground'" aria-hidden="true" />
           </button>
           <button class="session-tab-close" :aria-label="`Close tab ${tab.title}`" @click="tabs.closeTab(tab.id)"><X class="size-3.5" /></button>
         </div>
-        <span v-if="!tabs.tabs.length" class="px-2 text-xs text-slate-400">No open sessions</span>
+        <span v-if="!tabs.tabs.length" class="px-2 text-xs text-muted-foreground">No open sessions</span>
       </nav>
       <button class="new-session" aria-label="New session" title="New session: host or local shell" @click="picker?.show()">
         <Plus class="size-4" :stroke-width="1.75" /><span class="hidden sm:inline">New session</span>
@@ -101,20 +101,21 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
     </div>
     <TerminalWorkspace v-show="visible && tabs.tabs.length > 0" :visible="visible" @request-session="requestSession" />
     <div v-if="visible && tabs.tabs.length === 0" class="terminal-empty">
-      <TerminalSquare class="size-12 text-slate-600" :stroke-width="1.25" />
-      <h1 class="text-lg font-medium text-slate-200">Your next session starts here.</h1>
-      <p class="max-w-sm text-sm leading-6 text-slate-400">Use New session to connect a host or open a local shell. Keep them in tabs or work side by side.</p>
+      <TerminalSquare class="size-12 text-muted-foreground/50" :stroke-width="1.25" />
+      <h1 class="text-lg font-medium text-foreground">Your next session starts here.</h1>
+      <p class="max-w-sm text-sm leading-6 text-muted-foreground">Use New session to connect a host or open a local shell. Keep them in tabs or work side by side.</p>
     </div>
     <SessionPicker ref="picker" @opened="emit('activate')" />
   </section>
 </template>
 
 <style scoped>
-.session-strip { @apply flex h-12 shrink-0 items-center gap-2 px-3 pl-12 md:pl-3; background: var(--workspace-chrome); color: #e3e8f1; }
-.session-tab { @apply flex h-9 shrink-0 items-center rounded-lg; background: #33394a; }
-.session-tab-active { background: #454e64; box-shadow: inset 0 -2px var(--workspace-accent); }
-.session-tab-select { @apply flex h-9 min-w-0 items-center gap-2 rounded-lg px-3 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400; }
-.session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white focus-visible:ring-2 focus-visible:ring-blue-400; }
-.new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-200 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400; }
+.session-strip { @apply flex h-12 shrink-0 items-center gap-2 px-3 pl-12 md:pl-3 border-b border-sidebar-border; background: var(--workspace-chrome); color: hsl(var(--sidebar-foreground)); }
+.session-tab { @apply flex h-9 shrink-0 items-center rounded-md; background: hsl(var(--muted)); }
+.session-tab-active { background: hsl(var(--accent)); box-shadow: inset 0 -2px var(--workspace-accent); }
+.session-tab-select { @apply flex h-9 min-w-0 items-center gap-2 rounded-md px-3 text-[12px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.session-tab-active .session-tab-select { @apply text-foreground; }
+.session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring; }
+.new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .terminal-empty { @apply flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center; background: var(--terminal-background); }
 </style>

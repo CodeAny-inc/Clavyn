@@ -21,7 +21,7 @@ const navItems = [
 <template>
   <aside class="sidebar">
     <div class="sidebar-header">
-      <h1>OpenTermius</h1>
+      <h1>Clavyn</h1>
     </div>
     <nav class="sidebar-nav">
       <button

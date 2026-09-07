@@ -3,17 +3,30 @@ import { ref, computed } from "vue";
 import * as api from "../api";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-const DISMISSED_VERSIONS_KEY = "opentermius.dismissedVersions";
+const DISMISSED_VERSIONS_KEY = "clavyn.dismissedVersions";
+const LEGACY_DISMISSED_VERSIONS_KEY = "opentermius.dismissedVersions";
 
 function loadDismissedVersions(): string[] {
   try {
     const raw = localStorage.getItem(DISMISSED_VERSIONS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+    // Migrate from the previous key so upgrading users keep their
+    // "skip this version" choices instead of being re-notified.
+    const legacy = localStorage.getItem(LEGACY_DISMISSED_VERSIONS_KEY);
+    if (legacy) {
+      const parsed = JSON.parse(legacy);
+      const versions = Array.isArray(parsed) ? parsed : [];
+      localStorage.setItem(DISMISSED_VERSIONS_KEY, JSON.stringify(versions));
+      localStorage.removeItem(LEGACY_DISMISSED_VERSIONS_KEY);
+      return versions;
+    }
   } catch {
-    return [];
+    // ignore
   }
+  return [];
 }
 
 function saveDismissedVersion(version: string) {

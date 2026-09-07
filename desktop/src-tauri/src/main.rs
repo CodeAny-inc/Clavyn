@@ -16,7 +16,7 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "opentermius_desktop=info,opentermius_core=info".into()),
+                .unwrap_or_else(|_| "clavyn_desktop=info,clavyn_core=info".into()),
         )
         .init();
 
@@ -106,7 +106,7 @@ fn main() {
             commands::install_update,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running OpenTermius");
+        .expect("error while running Clavyn");
 }
 
 #[cfg(not(debug_assertions))]

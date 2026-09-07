@@ -20,11 +20,11 @@ const progressPercent = computed(() => Math.round(update.progress));
 function openReleases() {
   import("@tauri-apps/plugin-shell")
     .then(({ open }) => {
-      open("https://github.com/CodeAny-inc/OpenTermius/releases");
+      open("https://github.com/CodeAny-inc/Clavyn/releases");
     })
     .catch(() => {
       window.open(
-        "https://github.com/CodeAny-inc/OpenTermius/releases",
+        "https://github.com/CodeAny-inc/Clavyn/releases",
         "_blank",
       );
     });
@@ -61,7 +61,7 @@ function openReleases() {
               <div>
                 <div class="text-[15px] font-semibold">Update Available</div>
                 <div class="text-[12px] text-muted-foreground mt-0.5">
-                  A new version of OpenTermius is ready
+                  A new version of Clavyn is ready
                 </div>
               </div>
             </div>

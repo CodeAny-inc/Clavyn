@@ -71,7 +71,7 @@ async function scenario(name, exercise, mode = "normal") {
     await page.addInitScript({ path: fixture });
     await page.addInitScript(reviewFixture, mode);
     await page.goto(url);
-    assert.match(await page.title(), /OpenTermius/i, "Correct page identity");
+    assert.match(await page.title(), /Clavyn/i, "Correct page identity");
     assert.ok(page.url().startsWith(url), "Correct app URL");
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().waitFor();
     assert.equal(await page.locator("vite-error-overlay").count(), 0, "No framework overlay");

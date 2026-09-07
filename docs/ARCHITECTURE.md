@@ -1,10 +1,10 @@
-# OpenTermius — Architecture
+# Clavyn — Architecture
 
 ## Principle: one core, many shells
 
 ```
                 ┌─────────────────────────────────────────┐
-                │           opentermius-core (Rust)        │
+                │           clavyn-core (Rust)        │
                 │  connection · keys · vault · known_hosts │
                 └──────────┬──────────────┬───────────────┘
                            │              │
@@ -24,7 +24,7 @@ shell.
 
 ## Layers
 
-### core (`opentermius-core`)
+### core (`clavyn-core`)
 
 - `host` — pure data model. No secrets in serialized form.
 - `keys` — parse / generate OpenSSH keys via `russh-keys`. In-memory private

@@ -100,7 +100,7 @@ onBeforeUnmount(() => close());
 </template>
 
 <style scoped>
-.action-menu-trigger { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.action-menu-trigger { @apply inline-flex size-8 shrink-0 items-center justify-center rounded-md hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .action-menu { @apply fixed z-[120] max-h-[calc(100dvh-16px)] w-64 max-w-[calc(100vw-16px)] overflow-y-auto rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-xl; }
 .action-menu-item { @apply flex min-h-9 w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-muted focus:bg-muted focus:outline-none disabled:opacity-40; }
 </style>

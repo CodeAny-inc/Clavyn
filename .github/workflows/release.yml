@@ -26,7 +26,7 @@ jobs:
   # Determine version and release type
   # ──────────────────────────────────────────────
   prepare:
-    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","opentermius"]' || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
@@ -73,7 +73,7 @@ jobs:
             rust_target: x86_64-apple-darwin
           - platform: ubuntu-22.04
             github_runner: '["ubuntu-22.04"]'
-            self_hosted_runner: '["self-hosted","linux","opentermius"]'
+            self_hosted_runner: '["self-hosted","linux","clavyn"]'
             target: x86_64-unknown-linux-gnu
             args: ""
             rust_target: ""
@@ -122,8 +122,8 @@ jobs:
         with:
           projectPath: desktop
           tagName: ${{ needs.prepare.outputs.tag }}
-          releaseName: "OpenTermius ${{ needs.prepare.outputs.tag }}"
-          releaseBody: "OpenTermius ${{ needs.prepare.outputs.version }} — see assets below."
+          releaseName: "Clavyn ${{ needs.prepare.outputs.tag }}"
+          releaseBody: "Clavyn ${{ needs.prepare.outputs.version }} — see assets below."
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
           args: ${{ matrix.args }}
@@ -160,7 +160,7 @@ jobs:
             local basename
             basename=$(basename "$sigfile")
             # macOS .app.tar.gz.sig → rename to include arch
-            if [ "$basename" = "OpenTermius.app.tar.gz.sig" ] && [ -n "$RUST_TARGET" ]; then
+            if [ "$basename" = "Clavyn.app.tar.gz.sig" ] && [ -n "$RUST_TARGET" ]; then
               local arch=""
               if [ "$RUST_TARGET" = "aarch64-apple-darwin" ]; then
                 arch="aarch64"
@@ -168,7 +168,7 @@ jobs:
                 arch="x64"
               fi
               if [ -n "$arch" ]; then
-                local newname="OpenTermius_${arch}.app.tar.gz.sig"
+                local newname="Clavyn_${arch}.app.tar.gz.sig"
                 echo "Uploading: $sigfile as $newname"
                 cp "$sigfile" "/tmp/$newname"
                 gh release upload "$TAG" "/tmp/$newname" --clobber
@@ -218,7 +218,7 @@ jobs:
   # ──────────────────────────────────────────────
   publish-manifest:
     needs: [prepare, build]
-    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","opentermius"]' || '["ubuntu-22.04"]') }}
+    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
     permissions:
       contents: write
     steps:
@@ -279,7 +279,7 @@ jobs:
           platforms = {}
 
           # macOS aarch64 — .app.tar.gz has NO version in filename
-          # e.g. OpenTermius_aarch64.app.tar.gz
+          # e.g. Clavyn_aarch64.app.tar.gz
           sig = find_sig("*aarch64.app.tar.gz.sig")
           url = find_asset_url("*aarch64.app.tar.gz")
           if sig and url:
@@ -289,7 +289,7 @@ jobs:
               print(f"WARNING: darwin-aarch64 missing (sig={bool(sig)}, url={url})")
 
           # macOS x86_64 — .app.tar.gz has NO version in filename
-          # e.g. OpenTermius_x64.app.tar.gz
+          # e.g. Clavyn_x64.app.tar.gz
           sig = find_sig("*x64.app.tar.gz.sig")
           url = find_asset_url("*x64.app.tar.gz")
           if sig and url:
@@ -299,7 +299,7 @@ jobs:
               print(f"WARNING: darwin-x86_64 missing (sig={bool(sig)}, url={url})")
 
           # Linux x86_64 — AppImage signed directly
-          # e.g. OpenTermius_0.1.1-alpha.23_amd64.AppImage
+          # e.g. Clavyn_0.1.1-alpha.23_amd64.AppImage
           sig = find_sig("*amd64.AppImage.sig")
           url = find_asset_url("*amd64.AppImage")
           if sig and url:
@@ -309,7 +309,7 @@ jobs:
               print(f"WARNING: linux-x86_64 missing (sig={bool(sig)}, url={url})")
 
           # Windows x86_64 — NSIS setup exe signed directly
-          # e.g. OpenTermius_0.1.1-alpha.23_x64-setup.exe
+          # e.g. Clavyn_0.1.1-alpha.23_x64-setup.exe
           sig = find_sig("*x64-setup.exe.sig")
           url = find_asset_url("*x64-setup.exe")
           if sig and url:
@@ -320,7 +320,7 @@ jobs:
 
           manifest = {
               "version": version,
-              "notes": f"OpenTermius {version}",
+              "notes": f"Clavyn {version}",
               "pub_date": __import__("datetime").datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
               "platforms": platforms
           }

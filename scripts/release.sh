@@ -26,9 +26,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # --- config ---
-REPO="CodeAny-inc/OpenTermius"
-PRODUCT_NAME="OpenTermius"
-SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.config/opentermius/updater-private.key}"
+REPO="CodeAny-inc/Clavyn"
+PRODUCT_NAME="Clavyn"
+# Fall back to the previous signing-key location so existing release machines
+# keep working after the rename. The public key in tauri.conf.json is unchanged.
+_signing_key_default="$HOME/.config/clavyn/updater-private.key"
+if [[ -z "${TAURI_SIGNING_PRIVATE_KEY_PATH:-}" && ! -f "$_signing_key_default" && -f "$HOME/.config/opentermius/updater-private.key" ]]; then
+  _signing_key_default="$HOME/.config/opentermius/updater-private.key"
+fi
+SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$_signing_key_default}"
 BUNDLE_DIR="$ROOT/target/release/bundle/macos"
 PLATFORM="darwin-aarch64"
 ARCH="aarch64"
@@ -57,7 +63,7 @@ Usage:
   ./scripts/release.sh --notes "..."      Custom release notes
 
 Environment:
-  TAURI_SIGNING_PRIVATE_KEY_PATH  Path to signing key (default: ~/.config/opentermius/updater-private.key)
+  TAURI_SIGNING_PRIVATE_KEY_PATH  Path to signing key (default: ~/.config/clavyn/updater-private.key)
   TAURI_SIGNING_PRIVATE_KEY       Base64 signing key (if set, overrides path)
 USAGE
       exit 0

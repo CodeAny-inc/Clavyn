@@ -35,7 +35,7 @@
       if (["list_groups", "list_identities", "list_keys", "list_workspaces", "list_known_hosts"].includes(command)) return [];
       if (["vault_is_initialized", "is_vault_unlocked"].includes(command)) return true;
       if (["biometric_available", "biometric_passphrase_stored"].includes(command)) return false;
-      if (command === "get_app_info") return { name: "OpenTermius", version: "0.1.1-ui-test", platform: "linux", arch: "x86_64" };
+      if (command === "get_app_info") return { name: "Clavyn", version: "0.1.1-ui-test", platform: "linux", arch: "x86_64" };
       if (command === "check_for_updates") return { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;

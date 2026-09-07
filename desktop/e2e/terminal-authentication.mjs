@@ -75,7 +75,7 @@ async function scenario(name, mode, exercise, narrow = false) {
   try {
     await page.addInitScript({ content: fixture + `\n(${authenticationFixture.toString()})(${JSON.stringify(mode)});` });
     await page.goto(url);
-    assert.match(await page.title(), /OpenTermius/i);
+    assert.match(await page.title(), /Clavyn/i);
     assert.ok(page.url().startsWith(url));
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().waitFor();
     assert.equal(await page.locator("vite-error-overlay").count(), 0);

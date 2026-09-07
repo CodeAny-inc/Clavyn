@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use opentermius_core::vault::Vault;
+use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
 

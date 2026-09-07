@@ -6,8 +6,8 @@ members = ["core", "desktop/src-tauri"]
 version = "0.1.1-alpha.24"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/your-org/opentermius"
-authors = ["OpenTermius Contributors"]
+repository = "https://github.com/your-org/clavyn"
+authors = ["Clavyn Contributors"]
 
 [workspace.dependencies]
 # Shared core deps

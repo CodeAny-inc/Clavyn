@@ -129,7 +129,7 @@ mod tests {
 
     fn known_hosts() -> Arc<Mutex<KnownHosts>> {
         let path = std::env::temp_dir().join(format!(
-            "opentermius-connection-test-{}.json",
+            "clavyn-connection-test-{}.json",
             uuid::Uuid::new_v4()
         ));
         Arc::new(Mutex::new(KnownHosts::load(path).unwrap()))

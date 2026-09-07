@@ -1,5 +1,5 @@
 use crate::state::{AppState, AuthGeneration};
-use opentermius_core::vault::Vault;
+use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
 
@@ -109,12 +109,12 @@ mod tests {
         commit_initialized_passphrase_if_current, ensure_vault_uninitialized,
     };
     use crate::state::AuthGeneration;
-    use opentermius_core::vault::Vault;
+    use clavyn_core::vault::Vault;
 
     #[test]
     fn rejects_initialization_when_a_vault_already_exists() {
         let path = std::env::temp_dir().join(format!(
-            "opentermius-vault-command-test-{}.json",
+            "clavyn-vault-command-test-{}.json",
             uuid::Uuid::new_v4()
         ));
         let mut vault = Vault::open(path.clone()).expect("open vault");
