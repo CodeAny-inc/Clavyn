@@ -115,7 +115,7 @@ try {
     assert.ok(await picker.getByRole("button", { name: "Open local shell", exact: true }).isEnabled());
     await picker.getByRole("button", { name: "Close session picker", exact: true }).click();
     await page.evaluate(() => window.__authTest.release());
-    await page.getByText("root@atlas.example.test:22", { exact: true }).waitFor();
+    await page.getByText("root@atlas.example.test:22", { exact: true }).filter({ visible: true }).first().waitFor();
     await connectAtlas(page);
     await connected(page);
     assert.match(await pane(page).locator("header").innerText(), /root@atlas\.example\.test:22/);
