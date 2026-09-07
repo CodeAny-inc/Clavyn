@@ -27,6 +27,7 @@ import {
   configuredSshEndpoint,
   effectiveSshIdentity,
   passwordAuth,
+  resolvedSshHost,
   sshConfigurationKey,
   sshIdentityReady,
 } from "../lib/sshIdentity";
@@ -146,9 +147,11 @@ async function connect() {
       sftp.error = "Connection settings changed. Re-enter credentials for the updated account.";
       return;
     }
-    // Pin the account selected by this exact frontend configuration. The native
-    // command re-resolves the linked identity and rejects a mismatch before auth.
-    const request = sftp.connect(latest, credential, effective.username);
+    // Freeze the exact effective identity into this attempt. Native SFTP then
+    // authenticates that reviewed username/auth/key snapshot instead of
+    // re-resolving a same-id identity that may have changed after preflight.
+    const transportHost = resolvedSshHost(latest, identities.identities);
+    const request = sftp.connect(transportHost, credential, effective.username);
     credential = null;
     await request;
     showConnectForm.value = false;
