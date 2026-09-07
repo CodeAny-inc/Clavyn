@@ -123,16 +123,14 @@ function onHostKeydown(e: KeyboardEvent, host: Host) {
 
 function connectDirectly(host: Host) {
   selectedHostId.value = host.id;
-  if (!identityReady(host)) {
-    void loadIdentities();
-    return;
-  }
+  // Opening a persistent terminal is safe before the linked identity resolves.
+  // TerminalPane owns the authentication boundary and waits/fails closed there.
   tabs.newTab(host);
   emit("switch-view", "terminal");
 }
 
 function confirmConnect() {
-  if (!connectTarget.value || !identityReady(connectTarget.value)) return;
+  if (!connectTarget.value) return;
   const host = connectTarget.value;
   showConnectDialog.value = false;
   connectTarget.value = null;
@@ -289,7 +287,6 @@ function authLabel(host: Host): string {
           :key="host.id"
           class="group flex h-10 items-center gap-2 sm:gap-2.5 rounded-md px-2 cursor-pointer transition-colors duration-100"
           :class="selectedHostId === host.id ? 'bg-accent' : 'hover:bg-muted'"
-          :aria-disabled="!identityReady(host) || undefined"
           tabindex="0"
           @click="onHostClick(host)"
           @dblclick="onHostDblClick(host)"
@@ -317,8 +314,7 @@ function authLabel(host: Host): string {
           <!-- Action buttons -->
           <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100">
             <button
-              class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100 disabled:cursor-not-allowed disabled:opacity-40"
-              :disabled="!identityReady(host)"
+              class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100"
               aria-label="Connect"
               title="Connect (Enter)"
               @click.stop="connectDirectly(host)"
@@ -370,7 +366,7 @@ function authLabel(host: Host): string {
         <span class="text-foreground font-medium">{{ selectedHost.label }}</span>
         <span class="ml-2 font-mono hidden sm:inline">{{ hostEndpoint(selectedHost) }}</span>
       </span>
-      <Button size="sm" class="shrink-0" :disabled="!identityReady(selectedHost)" @click="connectDirectly(selectedHost)">
+      <Button size="sm" class="shrink-0" @click="connectDirectly(selectedHost)">
         <Plug class="size-3.5" :stroke-width="1.75" />
         <span class="hidden sm:inline">Connect</span>
       </Button>
@@ -436,7 +432,7 @@ function authLabel(host: Host): string {
 
       <template #footer>
         <Button variant="ghost" @click="cancelConnect">Cancel</Button>
-        <Button :disabled="!!connectTarget && !identityReady(connectTarget)" @click="confirmConnect">
+        <Button @click="confirmConnect">
           <Plug class="size-3.5 mr-1" :stroke-width="1.75" />
           Connect
         </Button>
