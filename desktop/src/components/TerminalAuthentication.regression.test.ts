@@ -78,7 +78,11 @@ describe("SSH identity load and dispatch boundaries", () => {
     expect(view!.get('[data-testid="pane-header"]').text()).not.toContain("deploy@");
     release([identity()]);
     await vi.waitFor(() => expect(pane.connected).toBe(true));
-    expect(calls()[0][1].expectedUsername).toBe("root");
+    const args = calls()[0][1];
+    expect(args.expectedUsername).toBe("root");
+    expect(args.host.identity_id).toBeNull();
+    expect(args.host.username).toBe("root");
+    expect(args.host.auth).toBe("agent");
     expect(view!.text()).toContain("root@atlas.example.test:22");
   });
   it("blocks a failed identity load and retries it on reconnect", async () => {
