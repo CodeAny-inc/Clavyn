@@ -8,9 +8,13 @@ on:
 
 jobs:
   rust-check:
-    runs-on: [self-hosted, linux, x64]
+    # Persistent self-hosted runners are trusted-only. Public fork PRs execute
+    # arbitrary repository code, so isolate them on GitHub-hosted infrastructure.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux dependencies
         run: |
@@ -24,9 +28,12 @@ jobs:
         run: cargo test -p opentermius-desktop
 
   macos-rust-build:
-    runs-on: [self-hosted, macOS]
+    # Use the persistent macOS runner only for trusted branches/PRs.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'macos-14' || fromJSON('["self-hosted","macOS"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo build (macOS shipping defaults)
         run: cargo build --workspace
@@ -36,9 +43,12 @@ jobs:
         run: cargo test -p opentermius-desktop --features macos-biometric
 
   frontend-build:
-    runs-on: [self-hosted, linux, x64]
+    # Fork PRs never share the long-lived Linux runner used by trusted workflows.
+    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20
