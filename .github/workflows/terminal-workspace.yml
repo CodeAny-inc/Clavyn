@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   browser-ui:
-    runs-on: [self-hosted, linux, x64]
+    # Keep trusted same-repository PRs on the self-hosted pool, but never run
+    # public fork-controlled code on a persistent runner.
+    runs-on: ${{ github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
