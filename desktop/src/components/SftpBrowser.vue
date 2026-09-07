@@ -23,7 +23,13 @@ import type { SftpEntry } from "../api";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useSftpStore } from "../stores/sftp";
-import type { AuthMethod } from "../types";
+import {
+  configuredSshEndpoint,
+  effectiveSshIdentity,
+  passwordAuth,
+  sshConfigurationKey,
+  sshIdentityReady,
+} from "../lib/sshIdentity";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 
@@ -48,29 +54,51 @@ const contextMenuY = ref(0);
 const selectedHost = computed(() =>
   hosts.hosts.find((host) => host.id === selectedHostId.value) ?? null,
 );
-
-const selectedEffectiveAuth = computed<AuthMethod | null>(() => {
+const selectedIdentityReady = computed(() => {
   const host = selectedHost.value;
-  if (!host) return null;
-
-  if (host.identity_id) {
-    const identity = identities.identities.find(
-      (candidate) => candidate.id === host.identity_id,
-    );
-    if (identity) return identity.auth;
-  }
-
-  return host.auth;
+  return !host || sshIdentityReady(host, identities.loaded);
 });
-
+const selectedEffectiveIdentity = computed(() => {
+  const host = selectedHost.value;
+  if (!host || !selectedIdentityReady.value) return null;
+  return effectiveSshIdentity(host, identities.identities);
+});
+const selectedConfigurationKey = computed(() => {
+  const host = selectedHost.value;
+  if (!host || !selectedIdentityReady.value) return null;
+  return sshConfigurationKey(host, identities.identities);
+});
+const selectedEndpoint = computed(() => {
+  const host = selectedHost.value;
+  if (!host || !selectedIdentityReady.value) return null;
+  return configuredSshEndpoint(host, identities.identities);
+});
 const passwordRequired = computed(() => {
-  const auth = selectedEffectiveAuth.value;
-  return typeof auth === "object" && auth !== null && "password" in auth;
+  const effective = selectedEffectiveIdentity.value;
+  return !!effective && passwordAuth(effective.auth);
 });
 
 const pathSegments = computed(() =>
   sftp.currentPath.split("/").filter(Boolean),
 );
+
+async function loadIdentities() {
+  try {
+    await identities.ensureLoaded();
+  } catch {
+    // Store exposes the retryable error in the UI.
+  }
+}
+
+// A password belongs to one exact host/effective identity configuration. Never
+// carry it into another host, through a hidden auth field, or across identity edits.
+watch(selectedHostId, () => {
+  password.value = "";
+  sftp.error = null;
+}, { flush: "sync" });
+watch(selectedConfigurationKey, (next, previous) => {
+  if (next !== previous) password.value = "";
+}, { flush: "sync" });
 
 // The Files view stays mounted so active SFTP sessions/transfers survive view
 // switches. Pending credentials are different: never retain an unsubmitted
@@ -91,13 +119,42 @@ onUnmounted(() => {
 });
 
 async function connect() {
-  if (!selectedHost.value) return;
+  let host = selectedHost.value;
+  if (!host) return;
+
+  if (host.identity_id && !identities.loaded) {
+    try {
+      await identities.ensureLoaded();
+    } catch {
+      return;
+    }
+    host = hosts.hosts.find((candidate) => candidate.id === selectedHostId.value) ?? null;
+    if (!host) return;
+  }
+  if (!sshIdentityReady(host, identities.loaded)) return;
+
+  const configurationKey = sshConfigurationKey(host, identities.identities);
+  const effective = effectiveSshIdentity(host, identities.identities);
+  let credential: string | null = passwordAuth(effective.auth) ? password.value : null;
+  // Submission consumes the credential immediately, just like the terminal prompt.
+  password.value = "";
+
   try {
-    await sftp.connect(selectedHost.value, password.value || null);
+    const latest = hosts.hosts.find((candidate) => candidate.id === host!.id);
+    if (!latest || !sshIdentityReady(latest, identities.loaded) ||
+        sshConfigurationKey(latest, identities.identities) !== configurationKey) {
+      sftp.error = "Connection settings changed. Re-enter credentials for the updated account.";
+      return;
+    }
+    const request = sftp.connect(latest, credential);
+    credential = null;
+    await request;
     showConnectForm.value = false;
-    password.value = "";
   } catch {
     // Store exposes the actionable error in the UI.
+  } finally {
+    credential = null;
+    password.value = "";
   }
 }
 
@@ -314,6 +371,17 @@ async function upload() {
             </option>
           </select>
 
+          <p v-if="selectedHost?.identity_id && identities.loading" class="text-[12px] text-muted-foreground" role="status">
+            Loading linked SSH identity… Direct hosts remain available.
+          </p>
+          <div v-else-if="selectedHost?.identity_id && identities.loadError" class="text-[12px] text-destructive" role="alert">
+            {{ identities.loadError }}
+            <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
+          </div>
+          <p v-else-if="selectedEndpoint" class="text-[11px] font-mono text-muted-foreground">
+            {{ selectedEndpoint }}
+          </p>
+
           <template v-if="passwordRequired">
             <label class="text-[12px] font-medium text-muted-foreground">
               Password
@@ -322,6 +390,7 @@ async function upload() {
               v-model="password"
               type="password"
               placeholder="Enter SSH password"
+              autocomplete="off"
               @keydown.enter="connect"
             />
           </template>
@@ -334,7 +403,7 @@ async function upload() {
             {{ sftp.error }}
           </p>
 
-          <Button :disabled="!selectedHostId || sftp.loading" @click="connect">
+          <Button :disabled="!selectedHostId || sftp.loading || !selectedIdentityReady" @click="connect">
             <Loader2
               v-if="sftp.loading"
               class="mr-1 size-3.5 animate-spin"
