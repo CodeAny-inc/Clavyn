@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey } from "./sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey } from "./sshIdentity";
 import type { Host, Identity } from "../types";
 
 const host: Host = { id: "host", label: "Host", hostname: "server.example.test", port: 22,
@@ -12,6 +12,28 @@ describe("shared SSH identity presentation", () => {
     expect(effectiveSshIdentity(host, [identity])).toEqual({ username: "root", auth: identity.auth, keyId: undefined });
     expect(configuredSshEndpoint(host, [identity])).toBe("root@server.example.test:22");
     expect(host.username).toBe("deploy");
+  });
+  it("pins the complete effective identity into a transport-only host", () => {
+    const keyIdentity = { ...identity, auth: "publickey" as const, key_id: "effective-key" };
+    const transport = resolvedSshHost(host, [keyIdentity]);
+
+    expect(transport).toEqual({
+      ...host,
+      username: "root",
+      auth: "publickey",
+      key_id: "effective-key",
+      identity_id: null,
+    });
+    expect(host).toEqual({
+      id: "host", label: "Host", hostname: "server.example.test", port: 22,
+      username: "deploy", auth: "agent", identity_id: "identity", key_id: "old", tags: [],
+    });
+
+    // A later edit to the saved identity cannot mutate this attempt's snapshot.
+    keyIdentity.auth = "agent";
+    keyIdentity.key_id = "replacement-key";
+    expect(transport.auth).toBe("publickey");
+    expect(transport.key_id).toBe("effective-key");
   });
   it("falls back only when a loaded identity list has no matching entry", () => {
     expect(configuredSshEndpoint(host, [])).toBe("deploy@server.example.test:22");
