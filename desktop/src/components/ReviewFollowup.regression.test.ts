@@ -159,7 +159,9 @@ describe("linked identity presentation and readiness", () => {
     await linkedConnect!.trigger("click");
     await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
     const args = calls("sftp_connect")[0][1];
-    expect(args.host.identity_id).toBe("shared");
+    expect(args.host.identity_id).toBeNull();
+    expect(args.host.username).toBe("root");
+    expect(args.host.auth).toEqual(passwordMethod);
     expect(args.password).toBe("ROOT_SECRET");
     expect(args.expectedUsername).toBe("root");
   });
