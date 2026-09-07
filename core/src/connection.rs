@@ -155,18 +155,20 @@ mod tests {
             serde_json::json!({"password": {"credential_key": "metadata-only"}}),
             Some("00000000-0000-0000-0000-000000000002"),
         );
-        let error = connect(&host, None, known_hosts(), None, None, Some("SECRET"))
-            .await
-            .unwrap_err();
+        let error = match connect(&host, None, known_hosts(), None, None, Some("SECRET")).await {
+            Ok(_) => panic!("missing linked identity unexpectedly reached a successful SSH connection"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("linked SSH identity not found"));
     }
 
     #[tokio::test]
     async fn agent_auth_fails_explicitly_before_network_connection() {
         let host = host(serde_json::json!("agent"), None);
-        let error = connect(&host, None, known_hosts(), None, None, None)
-            .await
-            .unwrap_err();
+        let error = match connect(&host, None, known_hosts(), None, None, None).await {
+            Ok(_) => panic!("unsupported SSH Agent auth unexpectedly reached a successful connection"),
+            Err(error) => error,
+        };
         assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
     }
 }
