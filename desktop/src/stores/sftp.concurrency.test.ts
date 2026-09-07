@@ -40,12 +40,15 @@ describe("SFTP connection ownership", () => {
     const first = sftp.connect(host, "SECRET", "deploy");
     const second = sftp.connect(host, "SHOULD_NOT_DISPATCH", "deploy");
 
-    expect(second).toBe(first);
+    // Pinia wraps action return values, so callers do not necessarily observe
+    // Object.is-identical Promise instances even when the store shares the same
+    // underlying task. The ownership invariant is one backend dispatch and both
+    // callers settling from that single attempt.
     await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
     expect(calls("sftp_connect")[0][1].password).toBe("SECRET");
 
     release();
-    await first;
+    await Promise.all([first, second]);
 
     expect(calls("sftp_canonicalize")).toHaveLength(1);
     expect(calls("sftp_list_dir")).toHaveLength(1);
