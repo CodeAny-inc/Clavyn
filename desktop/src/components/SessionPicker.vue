@@ -4,7 +4,7 @@ import { Server, TerminalSquare, X, Search, ArrowUpRight } from "lucide-vue-next
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
-import { configuredSshEndpoint, effectiveSshIdentity } from "../lib/sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import type { Host } from "../types";
 
 export type SessionPlacement = "tab" | "horizontal" | "vertical";
@@ -18,8 +18,7 @@ const query = ref("");
 const placement = ref<SessionPlacement>("tab");
 const targetId = ref<string | null>(null);
 const target = computed(() => tabs.tabs.flatMap(tab => collectPanes(tab.tree)).find(pane => pane.id === targetId.value));
-// Only a linked account needs the identity cache; direct hosts are self-contained.
-function identityReady(host: Host) { return !host.identity_id || identities.loaded; }
+function identityReady(host: Host) { return sshIdentityReady(host, identities.loaded); }
 const results = computed(() => {
   const needle = query.value.trim().toLowerCase();
   return hosts.hosts.filter(host => {
