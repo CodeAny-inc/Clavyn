@@ -14,7 +14,7 @@ describe("shared SSH identity presentation", () => {
     expect(host.username).toBe("deploy");
   });
   it("pins the complete effective identity into a transport-only host", () => {
-    const keyIdentity = { ...identity, auth: "publickey" as const, key_id: "effective-key" };
+    let keyIdentity: Identity = { ...identity, auth: "publickey", key_id: "effective-key" };
     const transport = resolvedSshHost(host, [keyIdentity]);
 
     expect(transport).toEqual({
@@ -30,8 +30,7 @@ describe("shared SSH identity presentation", () => {
     });
 
     // A later edit to the saved identity cannot mutate this attempt's snapshot.
-    keyIdentity.auth = "agent";
-    keyIdentity.key_id = "replacement-key";
+    keyIdentity = { ...keyIdentity, auth: "agent", key_id: "replacement-key" };
     expect(transport.auth).toBe("publickey");
     expect(transport.key_id).toBe("effective-key");
   });
