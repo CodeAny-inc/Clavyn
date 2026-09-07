@@ -181,12 +181,13 @@ try {
   }
   await scenario("fault-linked-retry", { identities: "failed" }, async page => {
     await page.getByRole("button", { name: "New session", exact: true }).click();
-    const orion = page.getByRole("button", { name: "Connect Orion Staging", exact: true });
+    const picker = page.locator("dialog[open]");
+    const orion = picker.getByRole("button", { name: "Connect Orion Staging", exact: true });
     assert.equal(await orion.isDisabled(), true);
     assert.equal(await page.evaluate(() => window.__faultTest.attempts.length), 0);
     await page.evaluate(() => { window.__faultTest.failIdentities = false; });
-    await page.getByRole("button", { name: "Retry identities", exact: true }).click();
-    await page.waitForFunction(() => !document.querySelector('[aria-label="Connect Orion Staging"]').disabled);
+    await picker.getByRole("button", { name: "Retry identities", exact: true }).click();
+    await page.waitForFunction(() => !document.querySelector('dialog[open] [aria-label="Connect Orion Staging"]').disabled);
     await orion.click();
     await page.locator('[data-host-id="orion"] [role="status"]').filter({ hasText: /^Connected$/ }).waitFor();
     assert.deepEqual(await page.evaluate(() => window.__faultTest.attempts.map(attempt => attempt.username)), ["root"]);
