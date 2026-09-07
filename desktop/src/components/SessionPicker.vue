@@ -4,7 +4,7 @@ import { Server, TerminalSquare, X, Search, ArrowUpRight } from "lucide-vue-next
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
-import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, linkedSshIdentityMissing, sshIdentityReady } from "../lib/sshIdentity";
 import type { Host } from "../types";
 
 export type SessionPlacement = "tab" | "horizontal" | "vertical";
@@ -18,7 +18,10 @@ const query = ref("");
 const placement = ref<SessionPlacement>("tab");
 const targetId = ref<string | null>(null);
 const target = computed(() => tabs.tabs.flatMap(tab => collectPanes(tab.tree)).find(pane => pane.id === targetId.value));
-function identityReady(host: Host) { return sshIdentityReady(host, identities.loaded); }
+function identityReady(host: Host) {
+  return sshIdentityReady(host, identities.loaded) &&
+    !linkedSshIdentityMissing(host, identities.identities);
+}
 const results = computed(() => {
   const needle = query.value.trim().toLowerCase();
   return hosts.hosts.filter(host => {
@@ -93,7 +96,7 @@ defineExpose({ show });
       <button v-for="host in results" :key="host.id" class="session-choice disabled:opacity-50" :disabled="!identityReady(host)" :aria-label="`Connect ${host.label}`" @click="connect(host)">
         <span class="session-avatar bg-blue-500/10 text-blue-500"><Server class="size-4" /></span>
         <span class="min-w-0 flex-1"><span class="block truncate text-[13px] font-medium">{{ host.label }}</span>
-          <span class="block truncate text-xs text-muted-foreground">{{ identityReady(host) ? configuredSshEndpoint(host, identities.identities) : 'SSH identity not yet resolved' }}</span></span>
+          <span class="block truncate text-xs text-muted-foreground">{{ sshIdentityReady(host, identities.loaded) ? configuredSshEndpoint(host, identities.identities) : 'SSH identity not yet resolved' }}</span></span>
         <ArrowUpRight class="size-4 text-muted-foreground" />
       </button>
       <p v-if="!results.length && !localMatches" class="px-3 py-8 text-center text-sm text-muted-foreground">No matching sessions. Try another name or address.</p>
