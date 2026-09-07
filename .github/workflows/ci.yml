@@ -56,7 +56,8 @@ jobs:
   rust-check-self-hosted:
     needs: rust-check-github
     if: >-
-      ${{ always() && needs.rust-check-github.outputs.failed == 'true' &&
+      ${{ always() &&
+          (needs.rust-check-github.result != 'success' || needs.rust-check-github.outputs.failed == 'true') &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64]
     steps:
@@ -129,7 +130,8 @@ jobs:
   macos-rust-build-self-hosted:
     needs: macos-rust-build-github
     if: >-
-      ${{ always() && needs.macos-rust-build-github.outputs.failed == 'true' &&
+      ${{ always() &&
+          (needs.macos-rust-build-github.result != 'success' || needs.macos-rust-build-github.outputs.failed == 'true') &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, macOS]
     steps:
@@ -207,7 +209,8 @@ jobs:
   frontend-build-self-hosted:
     needs: frontend-build-github
     if: >-
-      ${{ always() && needs.frontend-build-github.outputs.failed == 'true' &&
+      ${{ always() &&
+          (needs.frontend-build-github.result != 'success' || needs.frontend-build-github.outputs.failed == 'true') &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, linux, x64]
     steps:
