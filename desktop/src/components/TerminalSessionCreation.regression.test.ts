@@ -179,9 +179,21 @@ describe("effective SSH identity snapshots", () => {
     expect(endpoint(view)).toContain("ops@atlas.example.test:22");
   });
 
-  it.each([undefined, "missing"])("falls back to the host username when identity %s does not resolve", async identityId => {
-    const { view } = await mountAtlas({ identity_id: identityId });
+  it("falls back to the host username for a direct host without an identity link", async () => {
+    const { view } = await mountAtlas({ identity_id: undefined });
     expect(endpoint(view)).toContain("deploy@atlas.example.test:22");
+  });
+
+  it("rejects a broken identity reference instead of silently using stale host credentials", async () => {
+    const hosts = useHostsStore();
+    hosts.hosts = [host("atlas", { identity_id: "missing" }), host("orion")];
+    const tabs = useTabsStore();
+    const tab = tabs.newTab(hosts.hosts[0]);
+    const pane = collectPanes(tab.tree)[0];
+    wrapper = mount(TerminalArea, { props: { visible: true }, attachTo: document.body });
+    await vi.waitFor(() => expect(wrapper!.text()).toContain("Linked SSH identity not found"));
+    expect(pane.connected).toBe(false);
+    expect(getInvokeMock().mock.calls.filter(([name]) => name === "connect_ssh")).toHaveLength(0);
   });
 
   it("captures the identity at dispatch rather than when the connection resolves", async () => {

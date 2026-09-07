@@ -123,14 +123,21 @@ describe("legacy Agent edit preservation", () => {
     setInvokeHandler("update_host", ({ host: saved }) => saved);
 
     wrapper = mount(HostForm, { props: { host }, attachTo: document.body });
-    const authSelect = wrapper.findAll<HTMLSelectElement>("select").find(select => select.element.value === "agent");
+    // HostForm renders inside a Dialog that teleports to document.body, so the
+    // selects/buttons are not reachable through the component wrapper.
+    const authSelect = Array.from(document.querySelectorAll<HTMLSelectElement>("select"))
+      .find(select => select.value === "agent");
     expect(authSelect).toBeDefined();
-    expect(authSelect!.text()).toContain("SSH Agent (unsupported)");
+    expect(authSelect!.textContent).toContain("SSH Agent (unsupported)");
 
-    await wrapper.get('#host-label').setValue("Renamed Agent Host");
-    const save = wrapper.findAll("button").find(button => button.text().includes("Save changes"));
+    const labelInput = document.querySelector<HTMLInputElement>("#host-label")!;
+    labelInput.value = "Renamed Agent Host";
+    labelInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    const save = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find(button => button.textContent?.includes("Save changes"));
     expect(save).toBeDefined();
-    await save!.trigger("click");
+    save!.click();
     await vi.waitFor(() => expect(calls("update_host")).toHaveLength(1));
 
     expect(calls("update_host")[0][1].host.auth).toBe("agent");
@@ -144,16 +151,24 @@ describe("legacy Agent edit preservation", () => {
 
     wrapper = mount(IdentityManager, { attachTo: document.body });
     await flushPromises();
+    // The edit button lives in the main list (not teleported); the edit dialog
+    // teleports to document.body, so its selects/buttons need document queries.
     await wrapper.get('[aria-label="Edit identity"]').trigger("click");
+    await flushPromises();
 
-    const authSelect = wrapper.findAll<HTMLSelectElement>("select").find(select => select.element.value === "agent");
+    const authSelect = Array.from(document.querySelectorAll<HTMLSelectElement>("select"))
+      .find(select => select.value === "agent");
     expect(authSelect).toBeDefined();
-    expect(authSelect!.text()).toContain("SSH Agent (unsupported)");
+    expect(authSelect!.textContent).toContain("SSH Agent (unsupported)");
 
-    await wrapper.get('#id-label').setValue("Renamed Agent Identity");
-    const save = wrapper.findAll("button").find(button => button.text().includes("Save changes"));
+    const labelInput = document.querySelector<HTMLInputElement>("#id-label")!;
+    labelInput.value = "Renamed Agent Identity";
+    labelInput.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushPromises();
+    const save = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+      .find(button => button.textContent?.includes("Save changes"));
     expect(save).toBeDefined();
-    await save!.trigger("click");
+    save!.click();
     await vi.waitFor(() => expect(calls("update_identity")).toHaveLength(1));
 
     expect(calls("update_identity")[0][1].identity.auth).toBe("agent");
