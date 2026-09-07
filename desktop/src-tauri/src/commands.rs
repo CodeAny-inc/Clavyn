@@ -1,9 +1,9 @@
 use crate::state::{AppState, LocalTerminal};
-use opentermius_core::host::{AuthMethod, Host, HostGroup};
-use opentermius_core::identity::Identity;
-use opentermius_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
-use opentermius_core::sftp::SftpEntry;
-use opentermius_core::workspace::Workspace;
+use clavyn_core::host::{AuthMethod, Host, HostGroup};
+use clavyn_core::identity::Identity;
+use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
+use clavyn_core::sftp::SftpEntry;
+use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
@@ -787,7 +787,7 @@ struct GithubAsset {
 /// The GitHub repo to check for releases. Hardcoded for now; could be
 /// made configurable later.
 const GITHUB_API_RELEASES_URL: &str =
-    "https://api.github.com/repos/CodeAny-inc/OpenTermius/releases?per_page=30";
+    "https://api.github.com/repos/CodeAny-inc/Clavyn/releases?per_page=30";
 
 /// Find the URL of the `latest.json` asset from the newest release
 /// (including prereleases). Returns `None` if no releases have one.
@@ -797,7 +797,7 @@ const GITHUB_API_RELEASES_URL: &str =
 /// semver version that has a `latest.json` asset.
 async fn find_latest_json_url() -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
-        .user_agent("OpenTermius-Updater")
+        .user_agent("Clavyn-Updater")
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {e}"))?;

@@ -26,9 +26,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 # --- config ---
-REPO="CodeAny-inc/OpenTermius"
-PRODUCT_NAME="OpenTermius"
-SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.config/opentermius/updater-private.key}"
+REPO="CodeAny-inc/Clavyn"
+PRODUCT_NAME="Clavyn"
+SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.config/clavyn/updater-private.key}"
 BUNDLE_DIR="$ROOT/target/release/bundle/macos"
 PLATFORM="darwin-aarch64"
 ARCH="aarch64"
@@ -57,7 +57,7 @@ Usage:
   ./scripts/release.sh --notes "..."      Custom release notes
 
 Environment:
-  TAURI_SIGNING_PRIVATE_KEY_PATH  Path to signing key (default: ~/.config/opentermius/updater-private.key)
+  TAURI_SIGNING_PRIVATE_KEY_PATH  Path to signing key (default: ~/.config/clavyn/updater-private.key)
   TAURI_SIGNING_PRIVATE_KEY       Base64 signing key (if set, overrides path)
 USAGE
       exit 0

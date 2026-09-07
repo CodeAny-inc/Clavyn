@@ -1,9 +1,9 @@
-use opentermius_core::host::{AuthMethod, Host, HostGroup};
-use opentermius_core::identity::Identity;
-use opentermius_core::keys::{generate_ed25519, parse_openssh_private};
-use opentermius_core::store::Store;
-use opentermius_core::vault::Vault;
-use opentermius_core::workspace::Workspace;
+use clavyn_core::host::{AuthMethod, Host, HostGroup};
+use clavyn_core::identity::Identity;
+use clavyn_core::keys::{generate_ed25519, parse_openssh_private};
+use clavyn_core::store::Store;
+use clavyn_core::vault::Vault;
+use clavyn_core::workspace::Workspace;
 use tempfile::TempDir;
 
 fn temp_dir() -> TempDir {
@@ -77,7 +77,7 @@ fn test_generate_ed25519() {
 fn test_parse_generated_key() {
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (meta, _pair) = parse_openssh_private(&private_pem, None).expect("parse key");
-    assert_eq!(meta.key_type, opentermius_core::keys::KeyType::Ed25519);
+    assert_eq!(meta.key_type, clavyn_core::keys::KeyType::Ed25519);
     assert!(!meta.fingerprint.is_empty());
     assert!(!meta.public_key_base64.is_empty());
 }

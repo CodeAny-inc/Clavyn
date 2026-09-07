@@ -1,4 +1,4 @@
-# OpenTermius
+# Clavyn
 
 Open-source, cross-platform manager for SSH connections, keys, and known hosts.
 A community-driven alternative to Termius.
@@ -21,9 +21,9 @@ A community-driven alternative to Termius.
 ## Repository layout
 
 ```
-OpenTermius/
+Clavyn/
   Cargo.toml              # workspace root
-  core/                   # opentermius-core: shared Rust library
+  core/                   # clavyn-core: shared Rust library
     src/
       connection.rs       # SSH transport (russh)
       host.rs             # host / auth models

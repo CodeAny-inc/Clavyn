@@ -77,7 +77,7 @@ async function scenario(name, exercise, identity = false) {
     // One init script guarantees the base transport is installed before its extension.
     await page.addInitScript({ content: fixture + (identity ? "\n" + identityFixture : "") });
     await page.goto(url);
-    assert.match(await page.title(), /OpenTermius/i, "Correct page identity");
+    assert.match(await page.title(), /Clavyn/i, "Correct page identity");
     assert.ok(page.url().startsWith(url), "Correct app URL");
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().waitFor();
     assert.equal(await page.locator("vite-error-overlay").count(), 0, "No framework overlay");

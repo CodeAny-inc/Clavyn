@@ -18,7 +18,7 @@ jobs:
   # GitHub-hosted runners are the default.
   # To switch to self-hosted fallback (e.g. during GitHub infrastructure
   # issues), set the CI_RUNNER_LABELS repo variable to:
-  #   ["self-hosted","linux","opentermius"]
+  #   ["self-hosted","linux","clavyn"]
   browser-ui:
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
     timeout-minutes: 20

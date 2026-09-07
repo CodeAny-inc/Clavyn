@@ -1,12 +1,12 @@
 [package]
-name = "opentermius-core"
+name = "clavyn-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared core for OpenTermius: SSH connections, key management, secure storage"
+description = "Shared core for Clavyn: SSH connections, key management, secure storage"
 
 [lib]
-name = "opentermius_core"
+name = "clavyn_core"
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]

@@ -59,17 +59,17 @@ onMounted(async () => {
 
 function openGitHub() {
   import("@tauri-apps/plugin-shell").then(({ open }) => {
-    open("https://github.com/CodeAny-inc/OpenTermius");
+    open("https://github.com/CodeAny-inc/Clavyn");
   }).catch(() => {
-    window.open("https://github.com/CodeAny-inc/OpenTermius", "_blank");
+    window.open("https://github.com/CodeAny-inc/Clavyn", "_blank");
   });
 }
 
 function openReleases() {
   import("@tauri-apps/plugin-shell").then(({ open }) => {
-    open("https://github.com/CodeAny-inc/OpenTermius/releases");
+    open("https://github.com/CodeAny-inc/Clavyn/releases");
   }).catch(() => {
-    window.open("https://github.com/CodeAny-inc/OpenTermius/releases", "_blank");
+    window.open("https://github.com/CodeAny-inc/Clavyn/releases", "_blank");
   });
 }
 </script>
@@ -93,7 +93,7 @@ function openReleases() {
               <SettingsIcon class="size-6 sm:size-7 text-primary" :stroke-width="1.5" />
             </div>
             <div class="flex-1 min-w-0">
-              <div class="text-[15px] sm:text-[16px] font-semibold truncate">{{ appInfo?.name ?? 'OpenTermius' }}</div>
+              <div class="text-[15px] sm:text-[16px] font-semibold truncate">{{ appInfo?.name ?? 'Clavyn' }}</div>
               <div class="text-[12px] text-muted-foreground mt-0.5">
                 Version <span class="font-mono font-medium text-foreground">v{{ appInfo?.version ?? '—' }}</span>
               </div>
@@ -276,7 +276,7 @@ function openReleases() {
             <div class="text-[12px] text-muted-foreground leading-relaxed">
               <p class="font-medium text-foreground mb-1">Automatic Updates</p>
               <p>
-                OpenTermius automatically checks for updates on startup.
+                Clavyn automatically checks for updates on startup.
                 When a new version is available, the update dialog can notify you.
                 You can also manually check for updates here at any time.
               </p>

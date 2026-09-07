@@ -1,7 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, watch } from "vue";
 
-const STORAGE_KEY = "opentermius-settings";
+const STORAGE_KEY = "clavyn-settings";
 
 export interface AppSettings {
   /** Auto-lock timeout in minutes. 0 = never. */

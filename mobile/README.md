@@ -4,7 +4,7 @@ Status: **planned, not yet implemented.** Tracked for after the desktop MVP.
 
 ## Strategy
 
-The shared `opentermius-core` Rust crate compiles to each mobile target via
+The shared `clavyn-core` Rust crate compiles to each mobile target via
 FFI. The UI is native (or React Native / Flutter — to be decided) and calls
 into the core through a generated binding layer.
 

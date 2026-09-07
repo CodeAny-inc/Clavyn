@@ -1,8 +1,8 @@
-use opentermius_core::known_hosts::KnownHosts;
-use opentermius_core::session::SessionManager;
-use opentermius_core::sftp::SftpManager;
-use opentermius_core::store::Store;
-use opentermius_core::vault::Vault;
+use clavyn_core::known_hosts::KnownHosts;
+use clavyn_core::session::SessionManager;
+use clavyn_core::sftp::SftpManager;
+use clavyn_core::store::Store;
+use clavyn_core::vault::Vault;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

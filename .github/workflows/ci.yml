@@ -13,7 +13,7 @@ jobs:
   # GitHub-hosted runners are the default.
   # To switch to self-hosted fallback (e.g. during GitHub infrastructure
   # issues), set the CI_RUNNER_LABELS repo variable to:
-  #   ["self-hosted","linux","opentermius"]
+  #   ["self-hosted","linux","clavyn"]
   # and the Linux jobs below will use the self-hosted runner instead.
   # macOS jobs always use GitHub-hosted (no macOS self-hosted runner).
   rust-check:
@@ -30,9 +30,9 @@ jobs:
       - name: Cargo check
         run: cargo check --workspace
       - name: Cargo test (core)
-        run: cargo test -p opentermius-core
+        run: cargo test -p clavyn-core
       - name: Cargo test (desktop backend)
-        run: cargo test -p opentermius-desktop
+        run: cargo test -p clavyn-desktop
 
   macos-rust-build:
     runs-on: macos-14
@@ -44,9 +44,9 @@ jobs:
       - name: Cargo build (macOS shipping defaults)
         run: cargo build --workspace
       - name: Cargo build (macOS biometric implementation)
-        run: cargo build -p opentermius-desktop --features macos-biometric
+        run: cargo build -p clavyn-desktop --features macos-biometric
       - name: Cargo test (macOS biometric implementation)
-        run: cargo test -p opentermius-desktop --features macos-biometric
+        run: cargo test -p clavyn-desktop --features macos-biometric
 
   frontend-build:
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-latest"') }}

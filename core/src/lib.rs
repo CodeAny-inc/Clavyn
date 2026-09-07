@@ -1,4 +1,4 @@
-//! OpenTermius shared core.
+//! Clavyn shared core.
 //!
 //! Platform-agnostic logic shared by the Tauri desktop app and future mobile
 //! frontends via FFI. Contains:

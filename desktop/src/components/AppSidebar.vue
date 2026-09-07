@@ -30,14 +30,14 @@ function navigate(view: string) { emit("navigate", view); ui.closeMobileSidebar(
   <div v-if="ui.mobileSidebarOpen" class="fixed inset-0 z-40 bg-black/50 md:hidden" @click="ui.closeMobileSidebar()" />
   <aside class="app-sidebar" :class="[compact ? 'sidebar-collapsed' : '', ui.mobileSidebarOpen ? 'sidebar-open' : '']" aria-label="Application navigation">
     <div class="sidebar-brand">
-      <span v-if="!compact" class="flex min-w-0 flex-1 items-center gap-2 text-[13px] font-semibold tracking-tight">
-        <span class="flex size-6 items-center justify-center rounded-lg bg-blue-400/15 text-blue-300"><Terminal class="size-3.5" /></span>OpenTermius
+      <span v-if="!compact" class="flex min-w-0 flex-1 items-center gap-2 text-[13px] font-semibold tracking-tight text-sidebar-foreground">
+        <span class="flex size-6 items-center justify-center rounded-md bg-primary/10 text-foreground"><Terminal class="size-3.5" :stroke-width="1.75" /></span>Clavyn
       </span>
-      <button class="hidden size-8 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white md:flex"
+      <button class="hidden size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground md:flex"
         :aria-label="ui.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" :title="ui.sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'" @click="ui.toggleSidebar()">
-        <PanelLeftOpen v-if="ui.sidebarCollapsed" class="size-4" /><PanelLeftClose v-else class="size-4" />
+        <PanelLeftOpen v-if="ui.sidebarCollapsed" class="size-4" :stroke-width="1.75" /><PanelLeftClose v-else class="size-4" :stroke-width="1.75" />
       </button>
-      <button class="ml-auto flex size-8 items-center justify-center rounded-md hover:bg-white/10 md:hidden" aria-label="Close navigation" @click="ui.closeMobileSidebar()"><X class="size-4" /></button>
+      <button class="ml-auto flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent md:hidden" aria-label="Close navigation" @click="ui.closeMobileSidebar()"><X class="size-4" :stroke-width="1.75" /></button>
     </div>
     <div class="px-3 pb-3 pt-5">
       <button class="sidebar-search" aria-label="Search commands" title="Search commands (Cmd/Ctrl+K)" @click="emit('open-command-palette')">
@@ -80,12 +80,12 @@ function navigate(view: string) { emit("navigate", view); ui.closeMobileSidebar(
 </template>
 
 <style scoped>
-.app-sidebar { @apply fixed inset-y-0 left-0 z-50 flex w-[216px] shrink-0 -translate-x-full flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:relative md:translate-x-0; }
+.app-sidebar { @apply fixed inset-y-0 left-0 z-50 flex w-[252px] shrink-0 -translate-x-full flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground md:relative md:translate-x-0; }
 .sidebar-open { @apply translate-x-0; }
 .sidebar-collapsed { @apply md:w-[60px]; }
-.sidebar-brand { @apply flex h-12 shrink-0 items-center gap-2 px-3 text-slate-100; background: var(--workspace-chrome); }
-.sidebar-search { @apply flex h-9 w-full items-center gap-2 rounded-lg border border-sidebar-border px-2.5 text-xs text-muted-foreground hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
-.sidebar-link { @apply mb-1 flex h-10 w-full items-center gap-3 rounded-lg px-2.5 text-[13px] text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.sidebar-brand { @apply flex h-11 shrink-0 items-center gap-2 px-3; }
+.sidebar-search { @apply flex h-9 w-full items-center gap-2 rounded-md border border-sidebar-border px-2.5 text-xs text-muted-foreground hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.sidebar-link { @apply mb-0.5 flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-[13px] text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .sidebar-link-active { @apply bg-sidebar-accent text-sidebar-accent-foreground font-medium; }
 @media (min-width: 768px) { .sidebar-collapsed .sidebar-link, .sidebar-collapsed .sidebar-search { justify-content: center; padding-left: 0; padding-right: 0; } }
 </style>

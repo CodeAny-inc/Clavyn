@@ -135,7 +135,7 @@ case "${1:-get}" in
   stable) cmd_stable ;;
   -h|--help)
     cat <<'USAGE'
-version.sh — manage OpenTermius version
+version.sh — manage Clavyn version
 
 Usage:
   ./scripts/version.sh              Print current version

@@ -1,4 +1,4 @@
-# AGENTS.md — project notes for AI assistants working on OpenTermius
+# AGENTS.md — project notes for AI assistants working on Clavyn
 
 ## Build & run
 - Desktop: `cd desktop && npm install && npm run tauri dev`
@@ -7,7 +7,7 @@
 
 ## Verification
 - `cargo check --workspace` after core changes.
-- `cargo test -p opentermius-core` once tests are added.
+- `cargo test -p clavyn-core` once tests are added.
 - Tauri build: `cd desktop && npm run tauri build`.
 - Frontend typecheck: `cd desktop && npx vue-tsc --noEmit`.
 
@@ -76,7 +76,7 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
   prereleases**. GitHub's `releases/latest` redirect excludes prereleases, so
   the default Tauri updater endpoint doesn't work for alpha/beta releases.
 - The custom check (`check_with_prerelease_endpoint`):
-  1. Calls `https://api.github.com/repos/CodeAny-inc/OpenTermius/releases`
+  1. Calls `https://api.github.com/repos/CodeAny-inc/Clavyn/releases`
   2. Parses all release tags as semver versions
   3. Picks the highest version that has a `latest.json` asset
   4. Builds a Tauri updater with that release's `latest.json` URL as the endpoint
@@ -94,7 +94,7 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
 ## macOS code signing
 - The app is currently ad-hoc signed (`signingIdentity: "-"` in tauri.conf.json).
 - Without an Apple Developer ID certificate, macOS shows "damaged app" when
-  downloaded from the internet. Users fix with: `xattr -cr /Applications/OpenTermius.app`
+  downloaded from the internet. Users fix with: `xattr -cr /Applications/Clavyn.app`
 - To enable proper signing + notarization, set these env vars before building:
   - `APPLE_SIGNING_IDENTITY` — Developer ID Application certificate name
   - `APPLE_ID` — Apple ID email

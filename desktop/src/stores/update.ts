@@ -3,7 +3,7 @@ import { ref, computed } from "vue";
 import * as api from "../api";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-const DISMISSED_VERSIONS_KEY = "opentermius.dismissedVersions";
+const DISMISSED_VERSIONS_KEY = "clavyn.dismissedVersions";
 
 function loadDismissedVersions(): string[] {
   try {

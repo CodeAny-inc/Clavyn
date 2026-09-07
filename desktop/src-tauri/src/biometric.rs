@@ -1,5 +1,5 @@
 use crate::state::AppState;
-use opentermius_core::vault::Vault;
+use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
 
@@ -19,7 +19,7 @@ where
 /// additionally bound to the current vault generation so an orphaned Keychain
 /// item can never become authoritative for a newly initialized vault.
 #[cfg(all(target_os = "macos", feature = "macos-biometric"))]
-const SERVICE: &str = "com.opentermius.vault";
+const SERVICE: &str = "com.clavyn.vault";
 #[cfg(all(target_os = "macos", feature = "macos-biometric"))]
 const ACCOUNT_PREFIX: &str = "master-passphrase";
 

@@ -58,10 +58,13 @@ export default {
         },
       },
       borderRadius: {
+        "2xl": "14px",
+        xl: "12px",
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
         xs: "4px",
+        pill: "999px",
       },
       fontFamily: {
         sans: [
