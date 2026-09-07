@@ -146,7 +146,9 @@ async function connect() {
       sftp.error = "Connection settings changed. Re-enter credentials for the updated account.";
       return;
     }
-    const request = sftp.connect(latest, credential);
+    // Pin the account selected by this exact frontend configuration. The native
+    // command re-resolves the linked identity and rejects a mismatch before auth.
+    const request = sftp.connect(latest, credential, effective.username);
     credential = null;
     await request;
     showConnectForm.value = false;

@@ -13,14 +13,18 @@ export const useSftpStore = defineStore("sftp", () => {
   const error = ref<string | null>(null);
   const selectedEntry = ref<SftpEntry | null>(null);
 
-  async function connect(host: Host, password: string | null = null) {
+  async function connect(
+    host: Host,
+    password: string | null = null,
+    expectedUsername?: string,
+  ) {
     error.value = null;
     loading.value = true;
     const id = crypto.randomUUID();
     let connected = false;
 
     try {
-      await api.sftpConnect(id, host, password);
+      await api.sftpConnect(id, host, password, expectedUsername);
       connected = true;
 
       // Complete initial navigation before publishing the session into store

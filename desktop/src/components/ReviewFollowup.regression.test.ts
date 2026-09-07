@@ -114,6 +114,7 @@ describe("credential ownership across persistent views", () => {
     const args = calls("sftp_connect")[0][1];
     expect(args.host.id).toBe("gamma");
     expect(args.password).toBe("GAMMA_SECRET");
+    expect(args.expectedUsername).toBe("deploy");
     expect(JSON.stringify(args)).not.toContain("ALPHA_SECRET");
   });
 });
@@ -124,6 +125,8 @@ describe("linked identity presentation and readiness", () => {
     const direct = agentHost("direct", "Direct");
     setInvokeHandler("list_hosts", () => [linked, direct]);
     setInvokeHandler("list_identities", () => { throw new Error("fixture identity outage"); });
+    setInvokeHandler("sftp_canonicalize", () => "/home/root");
+    setInvokeHandler("sftp_list_dir", () => []);
     wrapper = mount(SftpBrowser, { props: { visible: true }, attachTo: document.body });
     await flushPromises();
 
@@ -147,6 +150,18 @@ describe("linked identity presentation and readiness", () => {
     await wrapper.get("select").setValue(direct.id);
     const directConnect = wrapper.findAll<HTMLButtonElement>("button").find(button => button.text().includes("Connect"));
     expect(directConnect?.element.disabled).toBe(false);
+
+    await wrapper.get("select").setValue(linked.id);
+    const linkedInput = wrapper.get<HTMLInputElement>('input[type="password"]');
+    await linkedInput.setValue("ROOT_SECRET");
+    const linkedConnect = wrapper.findAll<HTMLButtonElement>("button").find(button => button.text().includes("Connect"));
+    expect(linkedConnect).toBeDefined();
+    await linkedConnect!.trigger("click");
+    await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
+    const args = calls("sftp_connect")[0][1];
+    expect(args.host.identity_id).toBe("shared");
+    expect(args.password).toBe("ROOT_SECRET");
+    expect(args.expectedUsername).toBe("root");
   });
 
   it("HostList displays and searches the resolved identity username instead of the host fallback", async () => {

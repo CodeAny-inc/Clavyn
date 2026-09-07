@@ -568,7 +568,10 @@ pub async fn sftp_connect(
     session_id: String,
     host: Host,
     password: Option<String>,
+    expected_username: Option<String>,
 ) -> ApiResult<()> {
+    // Match terminal SSH: do not retain the owned password after this command exits.
+    let password = password.map(zeroize::Zeroizing::new);
     let passphrase = {
         let pw = state.passphrase.lock().await;
         pw.as_ref().map(|p| p.to_string())
@@ -585,6 +588,10 @@ pub async fn sftp_connect(
     } else {
         None
     };
+
+    // Re-resolve the linked identity from the native store and reject an account
+    // change before any network/authentication work can consume this credential.
+    ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
 
     let needs_vault = match identity.as_ref() {
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
@@ -603,7 +610,7 @@ pub async fn sftp_connect(
             known_hosts,
             vault_ref,
             passphrase.as_deref(),
-            password.as_deref(),
+            password.as_ref().map(|value| value.as_str()),
         )
         .await
         .map_err(err)

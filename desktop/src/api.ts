@@ -81,7 +81,8 @@ export const sftpConnect = (
   sessionId: string,
   host: Host,
   password: string | null,
-) => invoke<void>("sftp_connect", { sessionId, host, password });
+  expectedUsername?: string,
+) => invoke<void>("sftp_connect", { sessionId, host, password, expectedUsername });
 export const sftpListDir = (sessionId: string, path: string) =>
   invoke<SftpEntry[]>("sftp_list_dir", { sessionId, path });
 export const sftpCanonicalize = (sessionId: string, path: string) =>
