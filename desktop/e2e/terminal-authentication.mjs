@@ -102,12 +102,14 @@ async function scenario(name, mode, exercise, narrow = false) {
 }
 try {
   await scenario("auth-delayed-identities", "delayed", async page => {
-    // HostList must never dispatch with the stale saved-host account while the
-    // linked identity is unresolved. The picker remains usable for local/direct hosts.
+    // Opening the terminal is allowed immediately, but authentication must wait
+    // for the linked identity and never advertise/dispatch the host fallback.
     await connectAtlas(page);
     await page.waitForFunction(() => window.__authTest.pending.length > 0);
     assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 0);
-    assert.equal(await pane(page).count(), 0);
+    assert.equal(await pane(page).count(), 1);
+    assert.equal(await pane(page).getAttribute("data-connected"), "false");
+    assert.match(await pane(page).locator("header").innerText(), /Resolving SSH identity/);
     assert.equal(await page.getByText("deploy@atlas.example.test:22", { exact: true }).count(), 0);
     await page.getByRole("button", { name: "New session", exact: true }).click();
     const picker = page.locator("dialog[open]");
@@ -115,10 +117,9 @@ try {
     assert.ok(await picker.getByRole("button", { name: "Open local shell", exact: true }).isEnabled());
     await picker.getByRole("button", { name: "Close session picker", exact: true }).click();
     await page.evaluate(() => window.__authTest.release());
-    await page.getByText("root@atlas.example.test:22", { exact: true }).filter({ visible: true }).first().waitFor();
-    await connectAtlas(page);
     await connected(page);
     assert.match(await pane(page).locator("header").innerText(), /root@atlas\.example\.test:22/);
+    assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 1);
   });
   await scenario("auth-identity-load-retry", "failed", async page => {
     await page.getByRole("button", { name: "New session", exact: true }).click();
