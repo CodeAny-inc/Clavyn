@@ -207,7 +207,13 @@ async function connectSession() {
         while (!disposed && !props.pane.closing) {
           const host = hosts.hosts.find(h => h.id === props.pane.hostId);
           if (!host) throw new Error("Host not found. Check the saved host configuration.");
-          if (sshIdentityReady(host, identities.loaded)) return host;
+          if (sshIdentityReady(host, identities.loaded)) {
+            const effective = effectiveSshIdentity(host, identities.identities);
+            if (effective.missing) {
+              throw new Error("Linked SSH identity not found. Repair the host configuration before reconnecting.");
+            }
+            return host;
+          }
           await identities.ensureLoaded();
         }
       };
