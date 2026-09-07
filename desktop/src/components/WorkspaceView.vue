@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
 import { useWorkspacesStore } from "../stores/workspaces";
-import { useTabsStore, isPane, isSplit, type PaneTree } from "../stores/tabs";
+import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
+import { useIdentitiesStore } from "../stores/identities";
+import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -21,9 +23,7 @@ import {
   LayoutGrid,
   Server,
   Link2,
-  Unlink,
   Zap,
-  ZapOff,
   Search,
 } from "lucide-vue-next";
 import type { Workspace, TabLayout, PaneLayout, Host } from "../types";
@@ -31,6 +31,7 @@ import type { Workspace, TabLayout, PaneLayout, Host } from "../types";
 const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
 const hosts = useHostsStore();
+const identities = useIdentitiesStore();
 
 const showForm = ref(false);
 const editing = ref<Workspace | null>(null);
@@ -49,20 +50,30 @@ const showHostPicker = ref(false);
 const pickerWorkspace = ref<Workspace | null>(null);
 const hostSearchQuery = ref("");
 
+function identityReady(host: Host) {
+  return sshIdentityReady(host, identities.loaded);
+}
+function hostEndpoint(host: Host) {
+  if (!identityReady(host)) return `Resolving SSH identity · ${host.hostname}:${host.port}`;
+  return configuredSshEndpoint(host, identities.identities);
+}
 const filteredHostsForPicker = computed(() => {
   if (!hostSearchQuery.value.trim()) return hosts.hosts;
   const q = hostSearchQuery.value.toLowerCase();
-  return hosts.hosts.filter(
-    (h) =>
-      h.label.toLowerCase().includes(q) ||
-      h.hostname.toLowerCase().includes(q) ||
-      h.username.toLowerCase().includes(q),
-  );
+  return hosts.hosts.filter((host) => {
+    const username = identityReady(host)
+      ? effectiveSshIdentity(host, identities.identities).username
+      : "";
+    return host.label.toLowerCase().includes(q) ||
+      host.hostname.toLowerCase().includes(q) ||
+      username.toLowerCase().includes(q);
+  });
 });
 
 onMounted(() => {
-  workspaces.load();
-  hosts.load();
+  void workspaces.load();
+  void hosts.load();
+  void identities.load();
 });
 
 // --- workspace form ---
@@ -155,27 +166,30 @@ async function saveCurrentLayout(ws: Workspace) {
 }
 
 // --- restore a workspace layout into tabs ---
-function layoutToPaneTree(layout: PaneLayout): PaneTree {
+function layoutToPaneTree(layout: PaneLayout, autoConnect: boolean): PaneTree {
   if (layout.type === "pane") {
     const host: Host | undefined = layout.host_id
       ? hosts.hosts.find((h) => h.id === layout.host_id)
       : undefined;
+    const terminalType = (layout.terminal_type as "ssh" | "local") ?? (host ? "ssh" : "local");
     return {
       id: crypto.randomUUID(),
       sessionId: null,
       hostId: layout.host_id ?? null,
-      terminalType: (layout.terminal_type as "ssh" | "local") ?? (host ? "ssh" : "local"),
+      terminalType,
       title: host?.label ?? "Local Terminal",
       connected: false,
       closing: false,
+      // Workspace policy governs SSH. Local shell panes remain useful immediately.
+      autoConnect: terminalType === "local" ? true : autoConnect,
     };
   }
   return {
     id: crypto.randomUUID(),
     direction: layout.direction,
     ratio: layout.ratio,
-    first: layoutToPaneTree(layout.first),
-    second: layoutToPaneTree(layout.second),
+    first: layoutToPaneTree(layout.first, autoConnect),
+    second: layoutToPaneTree(layout.second, autoConnect),
   };
 }
 
@@ -189,9 +203,10 @@ function restoreWorkspace(ws: Workspace) {
   const existingIds = tabs.tabs.map((t) => t.id);
   existingIds.forEach((id) => tabs.closeTab(id));
 
-  // Recreate tabs from the workspace
+  // Recreate tabs from the workspace. auto_connect=false now means exactly that:
+  // SSH xterms mount persistently but do not authenticate until the user reconnects.
   for (const tabLayout of ws.tabs) {
-    const tree = layoutToPaneTree(tabLayout.layout);
+    const tree = layoutToPaneTree(tabLayout.layout, ws.auto_connect ?? false);
     tabs.tabs.push({
       id: tabLayout.id,
       title: tabLayout.title,
@@ -385,7 +400,7 @@ const colorOptions = [
               >
                 <Server class="size-3 text-muted-foreground" :stroke-width="1.75" />
                 <span class="font-medium">{{ h.label }}</span>
-                <span class="text-muted-foreground font-mono">{{ h.username }}@{{ h.hostname }}</span>
+                <span class="text-muted-foreground font-mono">{{ hostEndpoint(h) }}</span>
               </div>
             </div>
           </div>
@@ -534,7 +549,7 @@ const colorOptions = [
             <Server class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
             <div class="flex-1 min-w-0">
               <span class="text-[12px] font-medium">{{ h.label }}</span>
-              <span class="text-[11px] text-muted-foreground font-mono ml-2">{{ h.username }}@{{ h.hostname }}:{{ h.port }}</span>
+              <span class="text-[11px] text-muted-foreground font-mono ml-2">{{ hostEndpoint(h) }}</span>
             </div>
           </div>
           <div v-if="!filteredHostsForPicker.length" class="px-3 py-6 text-center text-[12px] text-muted-foreground">

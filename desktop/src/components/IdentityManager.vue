@@ -49,7 +49,7 @@ const browsingFile = ref(false);
 const form = ref({
   label: "",
   username: "",
-  authMode: "agent" as "password" | "publickey" | "agent",
+  authMode: "password" as "password" | "publickey" | "agent",
   credentialKey: "",
   keyId: "",
   groupId: "",
@@ -94,7 +94,7 @@ function addIdentity() {
   form.value = {
     label: "",
     username: "",
-    authMode: "agent",
+    authMode: "password",
     credentialKey: "",
     keyId: "",
     groupId: identities.selectedGroupId ?? "",
@@ -109,6 +109,8 @@ function addIdentity() {
 
 function editIdentity(id: Identity) {
   editing.value = id;
+  // Preserve legacy Agent auth on unrelated edits. It remains visibly
+  // unsupported and cannot be chosen for a new identity.
   const authMode: "password" | "publickey" | "agent" =
     typeof id.auth === "string" ? id.auth : "password";
   const credentialKey =
@@ -187,7 +189,7 @@ async function ensureKey(): Promise<string | null> {
 
 async function save() {
   if (!canSave.value) return;
-  let keyId: string | null = null;
+  let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
     keyId = await ensureKey();
     if (!keyId) return;
@@ -247,7 +249,7 @@ async function browseForKeyFile() {
 
 function authLabel(auth: AuthMethod): string {
   if (auth === "publickey") return "SSH Key";
-  if (auth === "agent") return "Agent";
+  if (auth === "agent") return "Agent (unsupported)";
   return "Password";
 }
 
@@ -415,10 +417,18 @@ function hostsUsingIdentity(identityId: string): number {
         <FormGroup>
           <Label>Authentication method</Label>
           <Select v-model="form.authMode">
-            <option value="agent">SSH Agent</option>
+            <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="publickey">SSH Key</option>
             <option value="password">Password</option>
           </Select>
+          <p class="text-[11px] text-muted-foreground mt-1">
+            <template v-if="form.authMode === 'agent'">
+              This legacy identity remains unchanged until you deliberately choose Password or SSH Key. Linked hosts cannot use Agent yet.
+            </template>
+            <template v-else>
+              SSH Agent is temporarily unavailable until native agent signing is implemented across supported platforms.
+            </template>
+          </p>
         </FormGroup>
 
         <FormGroup v-if="form.authMode === 'password'">

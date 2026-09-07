@@ -299,6 +299,31 @@ pub async fn set_active_workspace(
 // Sessions (SSH + Local Terminal)
 // ============================================================
 
+/// Non-secret metadata from the same immutable identity used to authenticate.
+#[derive(Debug, serde::Serialize)]
+pub struct SshConnectionInfo {
+    pub username: String,
+    pub hostname: String,
+    pub port: u16,
+}
+
+fn ssh_connection_info(
+    host: &Host,
+    identity: Option<&Identity>,
+    expected_username: Option<&str>,
+) -> ApiResult<SshConnectionInfo> {
+    let username = identity.map(|item| item.username.as_str()).unwrap_or(&host.username);
+    // Reject changed accounts before submitting credentials or opening a network connection.
+    if expected_username.is_some_and(|expected| expected != username) {
+        return Err("SSH identity changed. Reload identities and reconnect to review the account.".into());
+    }
+    Ok(SshConnectionInfo {
+        username: username.to_owned(),
+        hostname: host.hostname.clone(),
+        port: host.port,
+    })
+}
+
 #[tauri::command]
 pub async fn connect_ssh(
     state: State<'_, Arc<AppState>>,
@@ -308,7 +333,10 @@ pub async fn connect_ssh(
     password: Option<String>,
     cols: Option<u32>,
     rows: Option<u32>,
-) -> ApiResult<()> {
+    expected_username: Option<String>,
+) -> ApiResult<SshConnectionInfo> {
+    // The owned input is transient and wiped on every exit; never persist or log it.
+    let password = password.map(zeroize::Zeroizing::new);
     let passphrase = {
         let pw = state.passphrase.lock().await;
         pw.as_ref().map(|p| p.to_string())
@@ -326,6 +354,7 @@ pub async fn connect_ssh(
     } else {
         None
     };
+    let info = ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
 
     // Determine if we need the vault (publickey auth from host or identity)
     let needs_vault = match identity.as_ref() {
@@ -347,12 +376,13 @@ pub async fn connect_ssh(
             known_hosts,
             vault_ref,
             passphrase.as_deref(),
-            password.as_deref(),
+            password.as_ref().map(|value| value.as_str()),
             cols,
             rows,
         )
         .await
-        .map_err(err)
+        .map_err(err)?;
+    Ok(info)
 }
 
 #[tauri::command]
@@ -538,7 +568,10 @@ pub async fn sftp_connect(
     session_id: String,
     host: Host,
     password: Option<String>,
+    expected_username: Option<String>,
 ) -> ApiResult<()> {
+    // Match terminal SSH: do not retain the owned password after this command exits.
+    let password = password.map(zeroize::Zeroizing::new);
     let passphrase = {
         let pw = state.passphrase.lock().await;
         pw.as_ref().map(|p| p.to_string())
@@ -555,6 +588,10 @@ pub async fn sftp_connect(
     } else {
         None
     };
+
+    // Re-resolve the linked identity from the native store and reject an account
+    // change before any network/authentication work can consume this credential.
+    ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
 
     let needs_vault = match identity.as_ref() {
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
@@ -573,7 +610,7 @@ pub async fn sftp_connect(
             known_hosts,
             vault_ref,
             passphrase.as_deref(),
-            password.as_deref(),
+            password.as_ref().map(|value| value.as_str()),
         )
         .await
         .map_err(err)
@@ -933,4 +970,46 @@ pub async fn install_update(
     app.request_restart();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod ssh_connection_info_tests {
+    use super::*;
+
+    fn host() -> Host {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "label": "Fixture", "hostname": "server.example.test",
+            "port": 22, "username": "deploy", "auth": "agent", "tags": []
+        })).unwrap()
+    }
+    fn identity() -> Identity {
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "label": "Fixture identity", "username": "root",
+            "auth": "agent", "tags": []
+        })).unwrap()
+    }
+
+    #[test]
+    fn snapshots_the_resolved_identity_not_the_host_fallback() {
+        let host = host();
+        let mut identity = identity();
+        let info = ssh_connection_info(&host, Some(&identity), Some("root")).unwrap();
+        identity.username = "ops".into();
+        assert_eq!(info.username, "root");
+        assert_eq!(info.hostname, "server.example.test");
+        assert_eq!(info.port, 22);
+        assert_eq!(host.username, "deploy");
+    }
+
+    #[test]
+    fn supports_missing_identity_fallback_and_legacy_callers() {
+        assert_eq!(ssh_connection_info(&host(), None, Some("deploy")).unwrap().username, "deploy");
+        assert_eq!(ssh_connection_info(&host(), Some(&identity()), None).unwrap().username, "root");
+    }
+
+    #[test]
+    fn rejects_changed_identity_before_a_network_connection_can_start() {
+        let result = ssh_connection_info(&host(), Some(&identity()), Some("deploy"));
+        assert!(result.unwrap_err().contains("SSH identity changed"));
+    }
 }

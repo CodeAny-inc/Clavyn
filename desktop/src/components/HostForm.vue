@@ -40,6 +40,8 @@ watch(
   () => props.host,
   (host) => {
     if (host) {
+      // Preserve legacy Agent auth on unrelated edits. It remains visibly
+      // unsupported and cannot be selected for a new host.
       const authMode: "password" | "publickey" | "agent" =
         typeof host.auth === "string" ? host.auth : "password";
       const credentialKey =
@@ -102,9 +104,10 @@ const isValid = computed(() => {
 
 function buildAuth(): AuthMethod {
   if (form.value.useIdentity) {
-    // Auth comes from the identity, but we still store a fallback on the host
+    // Auth comes from the identity, but we still store a compatibility fallback
+    // on the host. A missing linked identity fails closed at connection time.
     const id = identities.identities.find((i) => i.id === form.value.identityId);
-    return id?.auth ?? "agent";
+    return id?.auth ?? { password: { credential_key: "default" } };
   }
   if (form.value.authMode === "publickey") return "publickey";
   if (form.value.authMode === "agent") return "agent";
@@ -226,10 +229,18 @@ async function save() {
         <FormGroup>
           <Label>Authentication method</Label>
           <Select v-model="form.authMode">
+            <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="password">Password</option>
             <option value="publickey">SSH Key</option>
-            <option value="agent">SSH Agent</option>
           </Select>
+          <p class="text-[11px] text-muted-foreground mt-1">
+            <template v-if="form.authMode === 'agent'">
+              This legacy host remains unchanged until you deliberately choose Password or SSH Key. SSH Agent cannot connect yet.
+            </template>
+            <template v-else>
+              SSH Agent will return when native agent signing is implemented across supported platforms.
+            </template>
+          </p>
         </FormGroup>
 
         <FormGroup v-if="form.authMode === 'password'">

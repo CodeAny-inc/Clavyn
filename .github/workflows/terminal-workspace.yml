@@ -1,0 +1,92 @@
+name: Terminal workspace UI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'desktop/**'
+      - '.github/workflows/terminal-workspace.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terminal-workspace-ui-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # GitHub-hosted runners are the default.
+  # To switch to self-hosted fallback (e.g. during GitHub infrastructure
+  # issues), set the CI_RUNNER_LABELS repo variable to:
+  #   ["self-hosted","linux","opentermius"]
+  browser-ui:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - name: Install application dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Typecheck, unit tests and production build
+        working-directory: desktop
+        run: |
+          set -o pipefail
+          mkdir -p ui-test-results
+          npx vue-tsc --noEmit 2>&1 | tee ui-test-results/typecheck.log
+          npm test 2>&1 | tee ui-test-results/unit-tests.log
+          npm run build 2>&1 | tee ui-test-results/build.log
+      - name: Install isolated, pinned browser tooling
+        run: |
+          npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
+          desktop/e2e/node_modules/.bin/playwright install --with-deps chromium
+      - name: Start application
+        run: |
+          (cd desktop && npm run dev -- --host 127.0.0.1 > "$RUNNER_TEMP/terminal-vite.log" 2>&1) &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:1420 > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/terminal-vite.log"
+          exit 1
+      - name: Record and verify terminal interactions
+        env:
+          UI_URL: http://127.0.0.1:1420
+          UI_RESULTS: ${{ github.workspace }}/desktop/ui-test-results
+          UI_RECORD: '1'
+          UI_SLOW_MO: '100'
+        run: npm test --prefix desktop/e2e
+      - name: Prepare reviewable MP4 recordings
+        if: always()
+        continue-on-error: true
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg
+          fi
+          for video in desktop/ui-test-results/*.webm; do
+            [ -f "$video" ] || continue
+            ffmpeg -hide_banner -loglevel error -y -i "$video" -c:v libx264 -preset fast -crf 22 -pix_fmt yuv420p -movflags +faststart "${video%.webm}.mp4"
+          done
+      - name: Upload screenshots, recordings, traces and test logs
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: terminal-workspace-ui-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            desktop/ui-test-results/
+            !desktop/ui-test-results/raw-video/
+            desktop/dist/
+            desktop/e2e/
+            !desktop/e2e/node_modules/
+            ${{ runner.temp }}/terminal-vite.log

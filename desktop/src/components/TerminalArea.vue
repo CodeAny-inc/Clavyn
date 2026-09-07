@@ -2,197 +2,119 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { useTabsStore, collectPanes } from "../stores/tabs";
 import { useUiStore } from "../stores/ui";
-import { Plus, X, GripHorizontal, Circle, CircleDot, TerminalSquare } from "lucide-vue-next";
-import { cn } from "../lib/cn";
-import SplitView from "./SplitView.vue";
+import { Plus, X, TerminalSquare, Columns2 } from "lucide-vue-next";
+import TerminalWorkspace from "./TerminalWorkspace.vue";
+import SessionPicker, { type SessionPlacement } from "./SessionPicker.vue";
 
+const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true });
+const emit = defineEmits<{ activate: [] }>();
 const tabs = useTabsStore();
 const ui = useUiStore();
-
-// Tab drag state
+const picker = ref<InstanceType<typeof SessionPicker> | null>(null);
 const draggedTabId = ref<string | null>(null);
-const dragOverTabId = ref<string | null>(null);
-
-function newTab() {
-  tabs.newTab();
+function activate(id: string) { tabs.setActiveTab(id); emit("activate"); }
+function requestSession(paneId: string, direction: SessionPlacement) {
+  ui.exitFullscreen();
+  tabs.setActivePane(paneId);
+  emit("activate");
+  picker.value?.show(direction, paneId);
 }
-
-function switchTab(id: string) {
-  tabs.setActiveTab(id);
+function connected(id: string) {
+  const tab = tabs.tabs.find(t => t.id === id);
+  return tab ? collectPanes(tab.tree).filter(pane => pane.connected).length : 0;
 }
-
-function closeTab(id: string) {
-  tabs.closeTab(id);
+function tabLabel(id: string) {
+  const tab = tabs.tabs.find(t => t.id === id);
+  if (!tab) return "Terminal";
+  const panes = collectPanes(tab.tree);
+  return panes.length === 1 ? panes[0].title : panes.map(pane => pane.title).join(" + ");
 }
-
-// Check if any pane in a tab is connected
-function tabHasConnection(tabId: string): boolean {
-  const tab = tabs.tabs.find((t) => t.id === tabId);
-  if (!tab) return false;
-  return collectPanes(tab.tree).some((p) => p.connected);
-}
-
-// Count connected panes in a tab
-function tabConnectedCount(tabId: string): number {
-  const tab = tabs.tabs.find((t) => t.id === tabId);
-  if (!tab) return 0;
-  return collectPanes(tab.tree).filter((p) => p.connected).length;
-}
-
-// --- Tab drag and drop (reordering) ---
-function onTabDragStart(e: DragEvent, tabId: string) {
-  draggedTabId.value = tabId;
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", tabId);
+function tabDrag(event: DragEvent, id: string) {
+  draggedTabId.value = id;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
   }
 }
-
-function onTabDragEnd() {
+function tabDrop(event: DragEvent, target: string) {
+  event.preventDefault();
+  if (tabs.draggedPaneId) {
+    tabs.movePaneToTab(tabs.draggedPaneId, target);
+    tabs.endDrag();
+    emit("activate");
+  } else if (draggedTabId.value) {
+    tabs.reorderTab(tabs.tabs.findIndex(t => t.id === draggedTabId.value), tabs.tabs.findIndex(t => t.id === target));
+  }
   draggedTabId.value = null;
-  dragOverTabId.value = null;
 }
-
-function onTabDragOver(e: DragEvent, tabId: string) {
-  if (!draggedTabId.value || draggedTabId.value === tabId) return;
-  e.preventDefault();
-  if (e.dataTransfer) {
-    e.dataTransfer.dropEffect = "move";
-  }
-  dragOverTabId.value = tabId;
+function focusTab(event: KeyboardEvent, index: number) {
+  let target: number;
+  if (event.key === "ArrowRight") target = (index + 1) % tabs.tabs.length;
+  else if (event.key === "ArrowLeft") target = (index - 1 + tabs.tabs.length) % tabs.tabs.length;
+  else if (event.key === "Home") target = 0;
+  else if (event.key === "End") target = tabs.tabs.length - 1;
+  else return;
+  event.preventDefault();
+  event.stopPropagation();
+  const group = (event.currentTarget as HTMLElement).closest("nav");
+  group?.querySelectorAll<HTMLButtonElement>("[data-tab-id]")[target]?.focus();
 }
-
-function onTabDrop(e: DragEvent, targetTabId: string) {
-  e.preventDefault();
-  if (!draggedTabId.value || draggedTabId.value === targetTabId) {
-    onTabDragEnd();
-    return;
-  }
-
-  const fromIndex = tabs.tabs.findIndex((t) => t.id === draggedTabId.value);
-  const toIndex = tabs.tabs.findIndex((t) => t.id === targetTabId);
-  if (fromIndex >= 0 && toIndex >= 0) {
-    tabs.reorderTab(fromIndex, toIndex);
-  }
-  onTabDragEnd();
-}
-
-// Middle-click to close tab
-function onTabMiddleClick(e: MouseEvent, tabId: string) {
-  if (e.button === 1) {
-    e.preventDefault();
-    closeTab(tabId);
+function onKeyDown(event: KeyboardEvent) {
+  if (!props.visible || document.querySelector("dialog[open]") || event.defaultPrevented) return;
+  // Do not steal editing shortcuts from Files, search fields, menus or forms.
+  const target = event.target;
+  if (target instanceof Element && (target.closest('[role="menu"]') || (target.matches("input, textarea, select") && !target.closest(".xterm")))) return;
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+    const directions = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as const;
+    const direction = directions[event.key as keyof typeof directions];
+    if (direction) { event.preventDefault(); tabs.navigatePane(direction); }
   }
 }
-
-// --- Keyboard navigation ---
-function onKeyDown(e: KeyboardEvent) {
-  // Cmd/Ctrl + Arrow keys to navigate between panes
-  if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey) {
-    if (e.key === "ArrowUp") {
-      e.preventDefault();
-      tabs.navigatePane("up");
-    } else if (e.key === "ArrowDown") {
-      e.preventDefault();
-      tabs.navigatePane("down");
-    } else if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      tabs.navigatePane("left");
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      tabs.navigatePane("right");
-    }
-  }
-}
-
-onMounted(() => {
-  window.addEventListener("keydown", onKeyDown);
-});
-
-onUnmounted(() => {
-  window.removeEventListener("keydown", onKeyDown);
-});
+onMounted(() => window.addEventListener("keydown", onKeyDown));
+onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 </script>
 
 <template>
-  <!-- Tab bar (hidden when a pane is fullscreen) -->
-  <div v-show="!ui.fullscreenPaneId" class="flex h-10 items-center gap-0.5 border-b border-border bg-sidebar px-1.5 pl-11 md:pl-1.5 overflow-x-auto scrollbar-thin">
-    <div
-      v-for="tab in tabs.tabs"
-      :key="tab.id"
-      class="group flex h-7 items-center gap-1.5 rounded-md px-2 sm:px-2.5 text-[12px] cursor-pointer transition-all duration-100 relative shrink-0"
-      :class="cn(
-        tab.id === tabs.activeTabId
-          ? 'bg-background text-foreground shadow-sm'
-          : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground',
-        dragOverTabId === tab.id && draggedTabId !== tab.id && 'ring-2 ring-primary ring-inset',
-        draggedTabId === tab.id && 'opacity-50',
-      )"
-      draggable="true"
-      @click="switchTab(tab.id)"
-      @mousedown="onTabMiddleClick($event, tab.id)"
-      @dragstart="onTabDragStart($event, tab.id)"
-      @dragend="onTabDragEnd"
-      @dragover="onTabDragOver($event, tab.id)"
-      @drop="onTabDrop($event, tab.id)"
-    >
-      <GripHorizontal class="size-3 text-muted-foreground/40 opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block shrink-0" :stroke-width="1.75" />
-      <!-- Connection status dot -->
-      <CircleDot
-        v-if="tabHasConnection(tab.id)"
-        class="size-2.5 text-green-500 shrink-0"
-        :stroke-width="0"
-        fill="currentColor"
-      />
-      <Circle
-        v-else
-        class="size-2.5 text-muted-foreground/50 shrink-0"
-        :stroke-width="1.75"
-      />
-      <span class="truncate max-w-[80px] sm:max-w-[120px]">{{ tab.title }}</span>
-      <span v-if="tabConnectedCount(tab.id) > 1" class="text-[10px] text-muted-foreground/60 shrink-0">{{ tabConnectedCount(tab.id) }}</span>
-      <button
-        class="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 hover:bg-muted shrink-0"
-        @click.stop="closeTab(tab.id)"
-        aria-label="Close tab"
-      >
-        <X class="size-3" :stroke-width="1.75" />
+  <section class="flex min-h-0 min-w-0 flex-col" :class="visible ? 'flex-1' : 'shrink-0'" aria-label="Terminal sessions">
+    <!-- One navigation row. Session creation lives here; pane actions live in each pane's menu. -->
+    <div v-show="!ui.fullscreenPaneId" class="session-strip" data-testid="session-strip">
+      <nav class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="Open terminal tabs">
+        <div v-for="(tab, index) in tabs.tabs" :key="tab.id" class="session-tab"
+          :class="{ 'session-tab-active': visible && tab.id === tabs.activeTabId }"
+          draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="draggedTabId = null"
+          @dragover.prevent @drop="tabDrop($event, tab.id)" @auxclick.middle.prevent="tabs.closeTab(tab.id)">
+          <button class="session-tab-select" :aria-pressed="visible && tab.id === tabs.activeTabId" :data-tab-id="tab.id"
+            :title="`Show ${tab.title} terminal · ${connected(tab.id)} connected`"
+            @click="activate(tab.id)" @keydown="focusTab($event, index)">
+            <Columns2 v-if="collectPanes(tab.tree).length > 1" class="size-3.5 shrink-0 text-blue-300" />
+            <TerminalSquare v-else class="size-3.5 shrink-0 text-slate-300" />
+            <span class="max-w-[220px] truncate">{{ tabLabel(tab.id) }}</span>
+            <span class="size-1.5 shrink-0 rounded-full" :class="connected(tab.id) ? 'bg-emerald-400' : 'bg-slate-500'" aria-hidden="true" />
+          </button>
+          <button class="session-tab-close" :aria-label="`Close tab ${tab.title}`" @click="tabs.closeTab(tab.id)"><X class="size-3.5" /></button>
+        </div>
+        <span v-if="!tabs.tabs.length" class="px-2 text-xs text-slate-400">No open sessions</span>
+      </nav>
+      <button class="new-session" aria-label="New session" title="New session: host or local shell" @click="picker?.show()">
+        <Plus class="size-4" :stroke-width="1.75" /><span class="hidden sm:inline">New session</span>
       </button>
     </div>
-    <div class="ml-auto px-1 shrink-0">
-      <button
-        class="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors duration-100"
-        @click="newTab"
-        aria-label="New tab"
-        title="New tab (Ctrl+N)"
-      >
-        <Plus class="size-3.5" :stroke-width="1.75" />
-      </button>
+    <TerminalWorkspace v-show="visible && tabs.tabs.length > 0" :visible="visible" @request-session="requestSession" />
+    <div v-if="visible && tabs.tabs.length === 0" class="terminal-empty">
+      <TerminalSquare class="size-12 text-slate-600" :stroke-width="1.25" />
+      <h1 class="text-lg font-medium text-slate-200">Your next session starts here.</h1>
+      <p class="max-w-sm text-sm leading-6 text-slate-400">Use New session to connect a host or open a local shell. Keep them in tabs or work side by side.</p>
     </div>
-  </div>
-
-  <!-- Terminal area — render ALL tabs with v-show to keep sessions alive -->
-  <div class="flex-1 relative overflow-hidden bg-black">
-    <div
-      v-for="tab in tabs.tabs"
-      :key="tab.id"
-      v-show="tab.id === tabs.activeTabId"
-      class="absolute inset-0"
-    >
-      <SplitView :node="tab.tree" :tab-id="tab.id" />
-    </div>
-    <div v-if="tabs.tabs.length === 0" class="flex flex-col items-center justify-center h-full gap-4 text-muted-foreground">
-      <div class="flex flex-col items-center gap-3">
-        <TerminalSquare class="size-12 text-muted-foreground/30" :stroke-width="1.5" />
-        <p class="text-[14px]">No active terminal</p>
-      </div>
-      <button
-        class="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-4 text-[13px] font-medium text-primary-foreground hover:bg-primary/90 transition-colors duration-100"
-        @click="newTab"
-      >
-        <Plus class="size-3.5" :stroke-width="1.75" />
-        Open Local Terminal
-      </button>
-    </div>
-  </div>
+    <SessionPicker ref="picker" @opened="emit('activate')" />
+  </section>
 </template>
+
+<style scoped>
+.session-strip { @apply flex h-12 shrink-0 items-center gap-2 px-3 pl-12 md:pl-3; background: var(--workspace-chrome); color: #e3e8f1; }
+.session-tab { @apply flex h-9 shrink-0 items-center rounded-lg; background: #33394a; }
+.session-tab-active { background: #454e64; box-shadow: inset 0 -2px var(--workspace-accent); }
+.session-tab-select { @apply flex h-9 min-w-0 items-center gap-2 rounded-lg px-3 text-[12px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400; }
+.session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-slate-400 hover:bg-white/10 hover:text-white focus-visible:ring-2 focus-visible:ring-blue-400; }
+.new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-200 hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400; }
+.terminal-empty { @apply flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center; background: var(--terminal-background); }
+</style>

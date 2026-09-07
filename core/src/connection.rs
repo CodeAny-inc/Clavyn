@@ -41,9 +41,10 @@ impl client::Handler for SshHandler {
 /// Open an authenticated SSH session and return the handle.
 /// The caller is responsible for opening a channel and starting the shell.
 ///
-/// If the host has an `identity_id`, the identity (if provided) is used to
+/// If the host has an `identity_id`, the identity must resolve and is used to
 /// resolve the username, auth method, and key — overriding the host's own
-/// fields. This allows reusable identities like Termius.
+/// fields. A broken linked-identity reference fails closed instead of silently
+/// falling back to stale host credentials.
 pub async fn connect(
     host: &Host,
     identity: Option<&Identity>,
@@ -52,11 +53,27 @@ pub async fn connect(
     passphrase: Option<&str>,
     password: Option<&str>,
 ) -> Result<Handle<SshHandler>> {
-    // Resolve effective username, auth, and key from identity if present
+    if host.identity_id.is_some() && identity.is_none() {
+        return Err(CoreError::InvalidInput(
+            "linked SSH identity not found; repair the host configuration before reconnecting".into(),
+        ));
+    }
+
+    // Resolve effective username, auth, and key from identity if present.
     let (username, auth, key_id) = match identity {
         Some(id) => (&id.username, &id.auth, id.key_id),
         None => (&host.username, &host.auth, host.key_id),
     };
+
+    // Agent used to masquerade as empty-password auth here, which could make
+    // mocked UI tests look successful while native SSH always behaved differently.
+    // Until a real agent transport/signer is implemented for every supported OS,
+    // reject it explicitly before opening a network connection.
+    if matches!(auth, AuthMethod::Agent) {
+        return Err(CoreError::InvalidInput(
+            "SSH agent authentication is not supported yet; choose Password or SSH Key".into(),
+        ));
+    }
 
     let config = Arc::new(Config::default());
     let handler = SshHandler {
@@ -71,11 +88,7 @@ pub async fn connect(
         .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
 
     let auth_ok = match auth {
-        AuthMethod::Agent => {
-            // Agent auth: try with the agent. For now, fall back to none.
-            // Full agent support requires connecting to the SSH agent socket.
-            session.authenticate_password(username, "").await
-        }
+        AuthMethod::Agent => unreachable!("agent auth is rejected before network connection"),
         AuthMethod::Password { .. } => {
             let pw = password.ok_or_else(|| {
                 CoreError::InvalidInput("password required but not provided".into())
@@ -108,4 +121,54 @@ pub async fn connect(
         return Err(CoreError::Ssh("authentication rejected by server".into()));
     }
     Ok(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known_hosts() -> Arc<Mutex<KnownHosts>> {
+        let path = std::env::temp_dir().join(format!(
+            "opentermius-connection-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        Arc::new(Mutex::new(KnownHosts::load(path).unwrap()))
+    }
+
+    fn host(auth: serde_json::Value, identity_id: Option<&str>) -> Host {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "label": "Fixture",
+            "hostname": "must-not-connect.example.test",
+            "port": 22,
+            "username": "deploy",
+            "auth": auth,
+            "identity_id": identity_id,
+            "tags": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_linked_identity_fails_before_network_fallback() {
+        let host = host(
+            serde_json::json!({"password": {"credential_key": "metadata-only"}}),
+            Some("00000000-0000-0000-0000-000000000002"),
+        );
+        let error = match connect(&host, None, known_hosts(), None, None, Some("SECRET")).await {
+            Ok(_) => panic!("missing linked identity unexpectedly reached a successful SSH connection"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("linked SSH identity not found"));
+    }
+
+    #[tokio::test]
+    async fn agent_auth_fails_explicitly_before_network_connection() {
+        let host = host(serde_json::json!("agent"), None);
+        let error = match connect(&host, None, known_hosts(), None, None, None).await {
+            Ok(_) => panic!("unsupported SSH Agent auth unexpectedly reached a successful connection"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
+    }
 }

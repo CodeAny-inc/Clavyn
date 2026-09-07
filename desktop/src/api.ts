@@ -50,8 +50,9 @@ export const deleteWorkspace = (id: string) => invoke<void>("delete_workspace", 
 export const setActiveWorkspace = (id: string) => invoke<void>("set_active_workspace", { id });
 export const readKeyFile = (path: string) => invoke<string>("read_key_file", { path });
 
-export const connectSsh = (sessionId: string, host: Host, password: string | null, cols: number, rows: number) =>
-  invoke<void>("connect_ssh", { sessionId, host, password, cols, rows });
+export interface SshConnectionInfo { username: string; hostname: string; port: number }
+export const connectSsh = (sessionId: string, host: Host, password: string | null, cols: number, rows: number, expectedUsername?: string) =>
+  invoke<SshConnectionInfo>("connect_ssh", { sessionId, host, password, cols, rows, expectedUsername });
 export const createLocalTerminal = (sessionId: string, cols: number, rows: number) =>
   invoke<void>("create_local_terminal", { sessionId, cols, rows });
 export const sessionWrite = (sessionId: string, data: number[]) => invoke<void>("session_write", { sessionId, data });
@@ -80,7 +81,8 @@ export const sftpConnect = (
   sessionId: string,
   host: Host,
   password: string | null,
-) => invoke<void>("sftp_connect", { sessionId, host, password });
+  expectedUsername?: string,
+) => invoke<void>("sftp_connect", { sessionId, host, password, expectedUsername });
 export const sftpListDir = (sessionId: string, path: string) =>
   invoke<SftpEntry[]>("sftp_list_dir", { sessionId, path });
 export const sftpCanonicalize = (sessionId: string, path: string) =>

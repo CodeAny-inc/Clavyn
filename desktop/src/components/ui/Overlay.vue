@@ -11,6 +11,7 @@ withDefaults(
 
 <template>
   <div
+    data-terminal-focus-blocker
     :class="cn(
       'fixed inset-0 z-50 bg-black/50',
       'animate-fade-in',

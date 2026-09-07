@@ -6,14 +6,22 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
+  # GitHub-hosted runners are the default.
+  # To switch to self-hosted fallback (e.g. during GitHub infrastructure
+  # issues), set the CI_RUNNER_LABELS repo variable to:
+  #   ["self-hosted","linux","opentermius"]
+  # and the Linux jobs below will use the self-hosted runner instead.
+  # macOS jobs always use GitHub-hosted (no macOS self-hosted runner).
   rust-check:
-    # Default: GitHub-hosted (ubuntu-22.04). Fallback: self-hosted opentermius runner.
-    # To switch to self-hosted, set CI_RUNNER_LABELS repo variable to:
-    #   ["self-hosted","linux","opentermius"]
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux dependencies
         run: |
@@ -30,6 +38,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Cargo build (macOS shipping defaults)
         run: cargo build --workspace
@@ -39,10 +49,11 @@ jobs:
         run: cargo test -p opentermius-desktop --features macos-biometric
 
   frontend-build:
-    # Default: GitHub-hosted (ubuntu-latest). Fallback: self-hosted opentermius runner.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20

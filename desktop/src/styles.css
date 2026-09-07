@@ -4,72 +4,59 @@
 
 @layer base {
   :root {
+    /* Workspace chrome remains dark around light and dark app surfaces. */
+    --workspace-chrome: #252938;
+    --workspace-accent: #72a9ff;
+    --terminal-background: #10151e;
+    --terminal-border: #293343;
+    --terminal-toolbar: #181e2a;
+    --terminal-toolbar-active: #1f2838;
     --background: 0 0% 99%;
     --foreground: 0 0% 10%;
-
     --card: 0 0% 100%;
     --card-foreground: 0 0% 10%;
-
     --popover: 0 0% 100%;
     --popover-foreground: 0 0% 10%;
-
     --primary: 0 0% 12%;
     --primary-foreground: 0 0% 98%;
-
     --secondary: 0 0% 95%;
     --secondary-foreground: 0 0% 18%;
-
     --muted: 0 0% 95.5%;
     --muted-foreground: 0 0% 43%;
-
     --accent: 0 0% 93%;
     --accent-foreground: 0 0% 12%;
-
     --destructive: 0 72% 51%;
     --destructive-foreground: 0 0% 98%;
-
     --border: 0 0% 88%;
     --input: 0 0% 86%;
     --ring: 215 90% 56%;
-
-    --sidebar: 0 0% 96.5%;
+    --sidebar: 216 22% 97%;
     --sidebar-foreground: 0 0% 15%;
-    --sidebar-accent: 0 0% 92.5%;
+    --sidebar-accent: 215 26% 92%;
     --sidebar-accent-foreground: 0 0% 10%;
-    --sidebar-border: 0 0% 87%;
-
+    --sidebar-border: 216 20% 89%;
     --radius: 0.5rem;
   }
-
   .dark {
     --background: 0 0% 9%;
     --foreground: 0 0% 92%;
-
     --card: 0 0% 12%;
     --card-foreground: 0 0% 92%;
-
     --popover: 0 0% 13%;
     --popover-foreground: 0 0% 93%;
-
     --primary: 0 0% 94%;
     --primary-foreground: 0 0% 10%;
-
     --secondary: 0 0% 16%;
     --secondary-foreground: 0 0% 91%;
-
     --muted: 0 0% 15%;
     --muted-foreground: 0 0% 61%;
-
     --accent: 0 0% 18%;
     --accent-foreground: 0 0% 94%;
-
     --destructive: 0 63% 48%;
     --destructive-foreground: 0 0% 98%;
-
     --border: 0 0% 22%;
     --input: 0 0% 24%;
     --ring: 213 88% 64%;
-
     --sidebar: 0 0% 11%;
     --sidebar-foreground: 0 0% 89%;
     --sidebar-accent: 0 0% 16%;
@@ -79,10 +66,7 @@
 }
 
 @layer base {
-  * {
-    @apply border-border;
-  }
-
+  * { @apply border-border; }
   body {
     @apply bg-background text-foreground;
     font-feature-settings: "rlig" 1, "calt" 1;
@@ -91,68 +75,20 @@
     overflow: hidden;
     user-select: none;
   }
-
-  /* Terminal areas allow text selection */
-  .xterm,
-  .xterm * {
-    user-select: text;
-  }
+  .xterm, .xterm * { user-select: text; }
 }
 
-/* Scrollbar — thin and quiet */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
-
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-::-webkit-scrollbar-thumb {
-  background: hsl(var(--border));
-  border-radius: 3px;
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.4);
-}
-
-/* xterm.js overrides for dark terminal */
-.xterm-viewport {
-  background-color: #000 !important;
-}
-
-.xterm .xterm-screen {
-  padding: 4px;
-}
-
-/* Focus ring helper */
-.focus-ring {
-  @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background;
-}
-
-/* Hairline border for high-DPI */
-@media (min-resolution: 2dppx) {
-  .hairline {
-    border-width: 0.5px;
-  }
-}
-
-/* Responsive: prevent horizontal overflow on small screens */
-@media (max-width: 640px) {
-  .xterm .xterm-screen {
-    padding: 2px;
-  }
-}
-
-/* Smooth scrolling for overflow areas */
-.overflow-y-auto {
-  scroll-behavior: smooth;
-  -webkit-overflow-scrolling: touch;
-}
-
-/* Prevent text selection on UI chrome but allow in inputs */
-input, textarea, select, [contenteditable] {
-  user-select: text;
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: hsl(var(--muted-foreground) / 0.4); }
+.xterm-viewport { background-color: var(--terminal-background) !important; }
+.xterm .xterm-screen { padding: 4px; }
+.focus-ring { @apply outline-none ring-2 ring-ring ring-offset-2 ring-offset-background; }
+@media (min-resolution: 2dppx) { .hairline { border-width: 0.5px; } }
+@media (max-width: 640px) { .xterm .xterm-screen { padding: 2px; } }
+.overflow-y-auto { scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
+input, textarea, select, [contenteditable] { user-select: text; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }

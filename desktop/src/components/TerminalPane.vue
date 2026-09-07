@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -9,677 +9,467 @@ import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
+import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
+import SshPasswordPrompt from "./SshPasswordPrompt.vue";
+import { useFocusIntent } from "../composables/useFocusIntent";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import * as api from "../api";
-import {
-  SplitSquareHorizontal,
-  SplitSquareVertical,
-  X,
-  Circle,
-  CircleDot,
-  GripVertical,
-  Maximize2,
-  Minimize2,
-  RotateCw,
-  Search,
-  ChevronUp,
-  ChevronDown,
-  CaseSensitive,
-  Regex,
-  WholeWord,
-} from "lucide-vue-next";
+import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
+  RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
-const props = defineProps<{
-  pane: Pane;
-  tabId: string;
-}>();
-
-const emit = defineEmits<{
-  "split-h": [];
-  "split-v": [];
-  close: [];
-}>();
-
+const props = withDefaults(defineProps<{ pane: Pane; tabId: string; visible?: boolean }>(), { visible: true });
+const emit = defineEmits<{ "split-h": []; "split-v": []; close: [] }>();
 const tabs = useTabsStore();
 const hosts = useHostsStore();
 const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
-
+const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
-let term: Terminal | null = null;
-let fitAddon: FitAddon | null = null;
-let searchAddon: SearchAddon | null = null;
-let unlistenData: UnlistenFn | null = null;
-let unlistenClosed: UnlistenFn | null = null;
-let resizeObserver: ResizeObserver | null = null;
-let currentSessionId: string | null = null;
-let connectionAttempted = false;
-
+const passwordPrompt = ref<InstanceType<typeof SshPasswordPrompt> | null>(null);
+const connecting = ref(false);
+const error = ref("");
 const showSearch = ref(false);
 const searchQuery = ref("");
 const searchCaseSensitive = ref(false);
 const searchRegex = ref(false);
 const searchWholeWord = ref(false);
 const searchInputRef = ref<HTMLInputElement | null>(null);
-
-const isActive = computed(() => tabs.activePaneId === props.pane.id);
+const connectedEndpoint = ref<string | null>(props.pane.terminalType === "local" ? "Local shell" : null);
+let term: Terminal | null = null;
+let fitAddon: FitAddon | null = null;
+let searchAddon: SearchAddon | null = null;
+let observer: ResizeObserver | null = null;
+const listeners: UnlistenFn[] = [];
+let listenerSetup: Promise<boolean> | null = null;
+let currentSessionId: string | null = null;
+let disposed = false;
+let sessionEnded = false;
+// Buffer remote output, never user input, until this attempt can answer queries.
+let pendingOutput: Uint8Array[] | null = null;
+const listenersReady = ref(false);
+const listenerSetupPending = ref(false);
+const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
+const isFullscreen = computed(() => ui.fullscreenPaneId === props.pane.id);
+// Keep obscured terminal owners alive, but out of keyboard/pointer navigation.
+const inputObscured = computed(() => !props.visible || (!!ui.fullscreenPaneId && !isFullscreen.value));
 const isDragging = computed(() => tabs.draggedPaneId === props.pane.id);
 const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
-const dragPosition = computed(() => tabs.dragOverPosition);
-const someoneDragging = computed(() => tabs.draggedPaneId !== null);
-const isFullscreen = computed(() => ui.fullscreenPaneId === props.pane.id);
+const busy = computed(() => connecting.value || listenerSetupPending.value);
+const status = computed(() => busy.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
+const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
 
-watch(
-  () => vault.unlocked,
-  async (unlocked) => {
-    if (unlocked && currentSessionId && !props.pane.connected && connectionAttempted) {
-      await connectSession(currentSessionId);
-    }
-  },
-);
-
-watch(isFullscreen, () => {
-  nextTick(() => {
-    if (fitAddon && term) {
-      try {
-        fitAddon.fit();
-        if (currentSessionId) {
-          api.sessionResize(currentSessionId, term.cols, term.rows);
-        }
-      } catch {
-        // ignore
-      }
-    }
-  });
+const configuredEndpoint = computed(() => {
+  if (props.pane.terminalType === "local") return "Local shell";
+  const host = hosts.hosts.find(item => item.id === props.pane.hostId);
+  if (!host) return props.pane.title;
+  if (!sshIdentityReady(host, identities.loaded)) return `Resolving SSH identity · ${host.hostname}:${host.port}`;
+  return configuredSshEndpoint(host, identities.identities);
 });
+const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
 
-watch(
-  () => tabs.activeTabId,
-  (newActiveTabId) => {
-    if (newActiveTabId === props.tabId) {
-      nextTick(() => {
-        if (fitAddon && term) {
-          try {
-            fitAddon.fit();
-            if (currentSessionId) {
-              api.sessionResize(currentSessionId, term.cols, term.rows);
-            }
-            term.focus();
-          } catch {
-            // ignore
-          }
+function focusInput() {
+  if (disposed || !isActive.value || inputObscured.value || terminalFocusBlocked()) return;
+  if (passwordPrompt.value?.pending) passwordPrompt.value.focus();
+  else if (showSearch.value) searchInputRef.value?.focus();
+  else term?.focus();
+}
+// Geometry updates are never permission to change the user's input destination.
+function fit() {
+  if (disposed || !props.visible || !term || !fitAddon) return;
+  try {
+    if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
+      fitAddon.fit();
+      if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
+    }
+  } catch { /* ResizeObserver can run during teardown. */ }
+}
+function controlHasFocus() {
+  const focused = document.activeElement;
+  return focused instanceof Element && !!paneRef.value?.contains(focused) && !focused.closest(".xterm");
+}
+function queueFocus(preserveControls = false, stillCurrent: () => boolean = () => true) {
+  const current = captureFocusIntent();
+  void nextTick(() => {
+    fit();
+    if (current() && stillCurrent() && (!preserveControls || !controlHasFocus())) focusInput();
+  });
+}
+watch(isActive, active => {
+  if (!active && isFullscreen.value) ui.exitFullscreen();
+}, { flush: "sync" });
+watch([isActive, () => props.visible], () => queueFocus(true), { flush: "post" });
+// A successful move can preserve activePaneId while the DOM move loses focus.
+watch(() => tabs.paneFocusRequest, request => {
+  if (request?.paneId === props.pane.id) queueFocus(false, () => request === tabs.paneFocusRequest);
+}, { flush: "post" });
+watch(isFullscreen, () => queueFocus(), { flush: "post" });
+watch(() => ui.showVaultUnlockModal, (open, wasOpen) => {
+  // Closing the shared prompt returns input to the active waiter, not whichever
+  // network connection happens to complete last. Respect any newer overlay.
+  if (!open && wasOpen) queueFocus(false, () => document.activeElement === document.body);
+}, { flush: "post" });
+function activatePane(focusTerminal = false) {
+  tabs.setActivePane(props.pane.id);
+  if (focusTerminal) focusInput();
+}
+function focusPane() { activatePane(true); }
+function reconnect() {
+  activatePane(true);
+  void connectWhenReady();
+}
+function writeError(message: string) {
+  error.value = message;
+  term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
+}
+async function ensureListeners(): Promise<boolean> {
+  if (disposed) return false;
+  if (listenersReady.value) return true;
+  if (listenerSetup) return listenerSetup;
+  listenerSetupPending.value = true;
+  listenerSetup = (async () => {
+    const staged: UnlistenFn[] = [];
+    try {
+      const dataListener = await api.onSessionData(event => {
+        if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
+        const data = new Uint8Array(event.data);
+        if (pendingOutput) pendingOutput.push(data);
+        else if (props.pane.connected) term?.write(data);
+      });
+      staged.push(dataListener);
+      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
+      const closeListener = await api.onSessionClosed(event => {
+        if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
+          sessionEnded = true;
+          tabs.setPaneDisconnected(props.pane.id);
+          // EOF does not invalidate diagnostics already received from this owner.
+          // Disable writes before parsing them: queries must not reply to a dead
+          // session. Reconnect still drains this queue before resetting xterm.
+          const output = pendingOutput;
+          pendingOutput = null;
+          for (const chunk of output ?? []) term?.write(chunk);
+          writeError(`Session closed: ${event.reason}`);
         }
       });
+      staged.push(closeListener);
+      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
+      listeners.push(...staged);
+      listenersReady.value = true;
+      return true;
+    } catch (cause) {
+      staged.forEach(unlisten => unlisten());
+      if (!disposed) writeError(`Could not initialize terminal: ${String(cause)}`);
+      return false;
+    } finally {
+      listenerSetupPending.value = false;
+      listenerSetup = null;
     }
-  },
-);
+  })();
+  return listenerSetup;
+}
+async function connectWhenReady() {
+  if (disposed || connecting.value) return;
+  if (await ensureListeners()) await connectSession();
+}
+async function connectSession() {
+  if (disposed || connecting.value || !term || !listenersReady.value) return;
+  const mayAutofocusPassword = captureFocusIntent();
+  connecting.value = true;
+  error.value = "";
+  tabs.setPaneDisconnected(props.pane.id);
+  const previous = currentSessionId;
+  const sessionId = crypto.randomUUID();
+  currentSessionId = sessionId;
+  sessionEnded = false;
+  pendingOutput = [];
+  let endpointForAttempt = "Local shell";
+  try {
+    if (previous) await api.closeSession(previous).catch(() => {});
+    if (disposed) return;
+    const terminal = term;
+    if (!terminal) return;
+    if (previous) {
+      // Old-session events are filtered before draining/resetting the emulator.
+      await new Promise<void>(resolve => terminal.write("", resolve));
+      if (disposed) return;
+      searchAddon?.clearDecorations();
+      terminal.reset();
+    }
+    fit();
+    if (props.pane.terminalType === "local") {
+      await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
+    } else {
+      // Direct hosts do not depend on the identity list. Linked hosts still fail
+      // closed, and every async boundary re-reads configuration before dispatch.
+      const resolveHost = async () => {
+        while (!disposed && !props.pane.closing) {
+          const host = hosts.hosts.find(h => h.id === props.pane.hostId);
+          if (!host) throw new Error("Host not found. Check the saved host configuration.");
+          if (sshIdentityReady(host, identities.loaded)) {
+            const effective = effectiveSshIdentity(host, identities.identities);
+            if (effective.missing) {
+              throw new Error("Linked SSH identity not found. Repair the host configuration before reconnecting.");
+            }
+            return host;
+          }
+          await identities.ensureLoaded();
+        }
+      };
+      const host = await resolveHost();
+      if (!host || disposed || props.pane.closing) return;
+      const auth = effectiveSshIdentity(host, identities.identities).auth;
+      if (auth === "publickey" && !vault.unlocked) {
+        if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
+        if (disposed) return;
+      }
+      const openSsh = async () => {
+        // Re-read after unlock: an edited direct host may now link an identity.
+        const host = await resolveHost();
+        if (!host || disposed || props.pane.closing) return;
+        const effective = effectiveSshIdentity(host, identities.identities);
+        const key = sshConfigurationKey(host, identities.identities);
+        const transportHost = resolvedSshHost(host, identities.identities);
+        endpointForAttempt = configuredSshEndpoint(host, identities.identities);
+        let password: string | null = null;
+        try {
+          if (passwordAuth(effective.auth)) {
+            if (!passwordPrompt.value) throw new Error("Password prompt is not ready. Reconnect to retry.");
+            password = await passwordPrompt.value.request(endpointForAttempt, mayAutofocusPassword);
+            if (disposed || props.pane.closing) return;
+            if (password === null) throw new Error("Connection cancelled.");
+            const latest = hosts.hosts.find(h => h.id === props.pane.hostId);
+            if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
+              throw new Error("Connection settings changed. Reconnect to review the updated account.");
+          }
+          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, effective.username);
+          // The IPC request owns its serialized argument; retain no reusable credential.
+          password = null;
+          const connected = await request;
+          // Rust returns metadata from the same immutable transport snapshot used
+          // to authenticate; later identity edits cannot change this attempt.
+          if (connected) endpointForAttempt = formatSshEndpoint(connected);
+        } finally {
+          password = null;
+        }
+      };
+      try {
+        await openSsh();
+      } catch (cause) {
+        const message = String(cause);
+        if (!message.includes("vault passphrase required") && !message.includes("vault required")) throw cause;
+        if (!await ui.requestVaultUnlock()) throw new Error("Connection cancelled: vault remains locked.");
+        if (disposed) return;
+        await openSsh();
+      }
+    }
+    if (disposed || props.pane.closing) {
+      await api.closeSession(sessionId).catch(() => {});
+      return;
+    }
+    if (!sessionEnded) {
+      connectedEndpoint.value = endpointForAttempt;
+      tabs.setPaneConnected(props.pane.id, sessionId);
+      // Enable writes before xterm parses queued queries (including synchronous
+      // parser callbacks). Keep chunk order and the same session owner.
+      connecting.value = false;
+      const output = pendingOutput;
+      pendingOutput = null;
+      for (const chunk of output ?? []) terminal.write(chunk);
+    }
+    fit();
+  } catch (cause) {
+    if (!disposed) writeError(`Connection failed: ${String(cause)}`);
+  } finally {
+    pendingOutput = null;
+    connecting.value = false;
+  }
+}
 
 onMounted(async () => {
   if (!containerRef.value) return;
-
-  term = new Terminal({
-    fontSize: 13,
+  term = new Terminal({ fontSize: 13,
     fontFamily: "'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'Roboto Mono', ui-monospace, monospace",
-    theme: {
-      background: "#000000",
-      foreground: "#e6e9ef",
-      cursor: "#4f9cf9",
-      selectionBackground: "#264f78",
-    },
-    cursorBlink: true,
-    scrollback: 10000,
-  });
-
+    theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
+    cursorBlink: true, scrollback: 10000 });
   fitAddon = new FitAddon();
-  term.loadAddon(fitAddon);
   searchAddon = new SearchAddon();
+  term.loadAddon(fitAddon);
   term.loadAddon(searchAddon);
-
-  // Intercept Ctrl/Cmd+F before xterm can convert it to ^F and send it to the PTY.
-  term.attachCustomKeyEventHandler((event) => {
-    const isSearchShortcut =
-      (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f";
-    if (!isSearchShortcut) return true;
-
-    if (event.type === "keydown") {
-      event.preventDefault();
-      openSearch();
+  term.attachCustomKeyEventHandler(event => {
+    const command = event.metaKey || event.ctrlKey;
+    if (command && event.key.toLowerCase() === "f") {
+      if (event.type === "keydown") { event.preventDefault(); openSearch(); }
+      return false;
     }
-    return false;
+    const directions = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as const;
+    const direction = directions[event.key as keyof typeof directions];
+    if (command && !event.shiftKey && !event.altKey && direction) {
+      if (event.type === "keydown") { event.preventDefault(); tabs.navigatePane(direction); }
+      return false;
+    }
+    return true;
   });
-
   term.open(containerRef.value);
-  fitAddon.fit();
-
-  currentSessionId = crypto.randomUUID();
-  const sessionId = currentSessionId;
-
-  unlistenData = await api.onSessionData((event) => {
-    if (event.session_id === sessionId && term) {
-      const data = new Uint8Array(event.data);
-      term.write(data);
-    }
+  term.onData(data => {
+    const sessionId = currentSessionId;
+    if (!disposed && !props.pane.closing && !sessionEnded && sessionId && props.pane.connected && !connecting.value)
+      void api.sessionWrite(sessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
+        // An old write may settle after EOF or after xterm has a new session.
+        // Preserve that owner's transcript/status; only report a live owner's error.
+        if (!disposed && !props.pane.closing && !sessionEnded && currentSessionId === sessionId && props.pane.connected && !connecting.value)
+          writeError(`Write failed: ${String(cause)}`);
+      });
   });
-
-  unlistenClosed = await api.onSessionClosed((event) => {
-    if (event.session_id === sessionId && term) {
-      term.write(`\r\n\x1b[31m[session closed: ${event.reason}]\x1b[0m\r\n`);
-      tabs.setPaneDisconnected(props.pane.id);
-    }
-  });
-
-  term.onData((data) => {
-    if (currentSessionId) {
-      const bytes = Array.from(new TextEncoder().encode(data));
-      api.sessionWrite(currentSessionId, bytes);
-    }
-  });
-
-  await connectSession(sessionId);
-
-  resizeObserver = new ResizeObserver(() => {
-    if (fitAddon && term) {
-      try {
-        fitAddon.fit();
-        if (currentSessionId) {
-          api.sessionResize(currentSessionId, term.cols, term.rows);
-        }
-      } catch {
-        // Ignore resize errors during teardown
-      }
-    }
-  });
-  resizeObserver.observe(containerRef.value);
+  observer = new ResizeObserver(() => fit());
+  observer.observe(containerRef.value);
+  fit();
+  // Wait for ancestor v-show updates; the mount hook can run while still hidden.
+  // This ticket belongs to creation, not to later network completion.
+  queueFocus();
+  // Directly created panes auto-connect. Workspace restore can explicitly opt an
+  // SSH pane out; Reconnect then initializes listeners and starts it on demand.
+  if (props.pane.autoConnect !== false) await connectWhenReady();
 });
-
-onUnmounted(() => {
-  if (unlistenData) unlistenData();
-  if (unlistenClosed) unlistenClosed();
-  if (resizeObserver) resizeObserver.disconnect();
-  if (term) term.dispose();
-  if (currentSessionId) {
-    api.closeSession(currentSessionId).catch(() => {});
-  }
+onBeforeUnmount(() => {
+  disposed = true;
+  pendingOutput = null;
+  passwordPrompt.value?.cancel();
+  listeners.forEach(unlisten => unlisten());
+  observer?.disconnect();
+  term?.dispose();
+  term = null;
+  if (currentSessionId && (!props.pane.closing || props.pane.sessionId !== currentSessionId))
+    void api.closeSession(currentSessionId).catch(() => {});
 });
-
-async function connectSession(sessionId: string) {
-  if (!term || !fitAddon) return;
-  connectionAttempted = true;
-
-  if (props.pane.terminalType === "local") {
-    try {
-      await api.createLocalTerminal(sessionId, term.cols, term.rows);
-      tabs.setPaneConnected(props.pane.id, sessionId);
-    } catch (e) {
-      term?.write(`\x1b[31mFailed to create local terminal: ${e}\x1b[0m\r\n`);
-    }
-    return;
-  }
-
-  if (!props.pane.hostId) return;
-  const host = hosts.hosts.find((h) => h.id === props.pane.hostId);
-  if (!host) {
-    term?.write("Host not found\r\n");
-    return;
-  }
-
-  const needsVault =
-    host.auth === "publickey" ||
-    (host.identity_id != null &&
-      identities.identities.some(
-        (i) => i.id === host.identity_id && i.auth === "publickey",
-      ));
-
-  if (needsVault && !vault.unlocked) {
-    term?.write("\x1b[33mVault is locked — required for SSH key authentication.\x1b[0m\r\n");
-    const success = await ui.requestVaultUnlock();
-    if (!success) {
-      term?.write("\x1b[31mConnection cancelled: vault remains locked.\x1b[0m\r\n");
-      return;
-    }
-  }
-
-  const password = null;
-  try {
-    await api.connectSsh(sessionId, host, password, term.cols, term.rows);
-    tabs.setPaneConnected(props.pane.id, sessionId);
-  } catch (e) {
-    const msg = String(e);
-    if (msg.includes("vault passphrase required") || msg.includes("vault required")) {
-      term?.write("\x1b[33mVault passphrase required. Please unlock the vault.\x1b[0m\r\n");
-      const success = await ui.requestVaultUnlock();
-      if (!success) {
-        term?.write("\x1b[31mConnection cancelled.\x1b[0m\r\n");
-        return;
-      }
-      try {
-        await api.connectSsh(sessionId, host, password, term.cols, term.rows);
-        tabs.setPaneConnected(props.pane.id, sessionId);
-      } catch (e2) {
-        term?.write(`\x1b[31mConnection failed: ${e2}\x1b[0m\r\n`);
-      }
-    } else {
-      term?.write(`\x1b[31mConnection failed: ${e}\x1b[0m\r\n`);
-    }
-  }
-}
-
-async function reconnect() {
-  if (!term) return;
-
-  if (currentSessionId) {
-    api.closeSession(currentSessionId).catch(() => {});
-  }
-
-  term.reset();
-
-  const newSessionId = crypto.randomUUID();
-  currentSessionId = newSessionId;
-
-  if (unlistenData) unlistenData();
-  if (unlistenClosed) unlistenClosed();
-
-  unlistenData = await api.onSessionData((event) => {
-    if (event.session_id === newSessionId && term) {
-      const data = new Uint8Array(event.data);
-      term.write(data);
-    }
-  });
-
-  unlistenClosed = await api.onSessionClosed((event) => {
-    if (event.session_id === newSessionId && term) {
-      term.write(`\r\n\x1b[31m[session closed: ${event.reason}]\x1b[0m\r\n`);
-      tabs.setPaneDisconnected(props.pane.id);
-    }
-  });
-
-  await connectSession(newSessionId);
-}
-
-function focusPane() {
-  tabs.setActivePane(props.pane.id);
-  term?.focus();
-}
-
-function searchOptions() {
-  return {
-    caseSensitive: searchCaseSensitive.value,
-    regex: searchRegex.value,
-    wholeWord: searchWholeWord.value,
-    decorations: {
-      matchOverviewRuler: "#4f9cf9",
-      activeMatchColorOverviewRuler: "#f59e0b",
-      matchBackground: "#264f78",
-      activeMatchBackground: "#f59e0b80",
-    },
-  };
-}
-
 function openSearch() {
+  activatePane();
   showSearch.value = true;
+  const current = captureFocusIntent();
   nextTick(() => {
-    searchInputRef.value?.focus();
-    searchInputRef.value?.select();
+    if (!current()) return;
+    focusInput();
+    if (document.activeElement === searchInputRef.value) searchInputRef.value?.select();
   });
 }
-
 function closeSearch() {
+  activatePane();
   showSearch.value = false;
-  searchQuery.value = "";
   searchAddon?.clearDecorations();
-  term?.focus();
+  focusInput();
 }
-
-function doSearch(direction: "next" | "prev") {
-  if (!searchAddon || !searchQuery.value) return;
-  if (direction === "next") {
-    searchAddon.findNext(searchQuery.value, searchOptions());
-  } else {
-    searchAddon.findPrevious(searchQuery.value, searchOptions());
+function toggleFullscreen() {
+  activatePane();
+  ui.toggleFullscreen(props.pane.id);
+}
+function doSearch(previous = false) {
+  if (!searchQuery.value) { searchAddon?.clearDecorations(); return; }
+  const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
+    decorations: { matchOverviewRuler: "#4f9cf9", activeMatchColorOverviewRuler: "#f59e0b", matchBackground: "#264f78", activeMatchBackground: "#f59e0b80" } };
+  try {
+    if (previous) searchAddon?.findPrevious(searchQuery.value, options);
+    else searchAddon?.findNext(searchQuery.value, options);
+  } catch { /* An incomplete regular expression should not break the terminal. */ }
+}
+function searchKey(event: KeyboardEvent) {
+  if (event.key === "Escape") { event.preventDefault(); closeSearch(); }
+  else if (event.key === "Enter" || ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "g")) {
+    event.preventDefault(); doSearch(event.shiftKey);
   }
 }
-
-function onSearchInput() {
-  if (!searchAddon || !searchQuery.value) {
-    searchAddon?.clearDecorations();
-    return;
-  }
-  searchAddon.findNext(searchQuery.value, searchOptions());
-}
-
-function onSearchKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    closeSearch();
-  } else if (e.key === "Enter") {
-    e.preventDefault();
-    doSearch(e.shiftKey ? "prev" : "next");
-  } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "g") {
-    e.preventDefault();
-    doSearch(e.shiftKey ? "prev" : "next");
-  }
-}
-
-function onDragStart(e: DragEvent) {
+function startDrag(event: DragEvent) {
   tabs.startDrag(props.pane.id);
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", props.pane.id);
-  }
+  if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", props.pane.id); }
 }
-
-function onDragEnd() {
-  tabs.endDrag();
+function dropPosition(event: DragEvent): DropPosition {
+  const bounds = paneRef.value!.getBoundingClientRect();
+  const x = (event.clientX - bounds.left) / bounds.width;
+  const y = (event.clientY - bounds.top) / bounds.height;
+  if (x > 0.3 && x < 0.7 && y > 0.3 && y < 0.7) return "center";
+  const edges: [DropPosition, number][] = [["left", x], ["right", 1 - x], ["top", y], ["bottom", 1 - y]];
+  return edges.sort((a, b) => a[1] - b[1])[0][0];
 }
-
-function onDragOver(e: DragEvent) {
-  if (!tabs.draggedPaneId || tabs.draggedPaneId === props.pane.id) return;
-  e.preventDefault();
-  if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-  if (!paneRef.value) return;
-
-  const rect = paneRef.value.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width;
-  const y = (e.clientY - rect.top) / rect.height;
-  const centerSize = 0.2;
-  const isCenter =
-    x > 0.5 - centerSize && x < 0.5 + centerSize &&
-    y > 0.5 - centerSize && y < 0.5 + centerSize;
-
-  let position: DropPosition;
-  if (isCenter) {
-    position = "center";
-  } else {
-    const distLeft = x;
-    const distRight = 1 - x;
-    const distTop = y;
-    const distBottom = 1 - y;
-    const minDist = Math.min(distLeft, distRight, distTop, distBottom);
-    if (minDist === distLeft) position = "left";
-    else if (minDist === distRight) position = "right";
-    else if (minDist === distTop) position = "top";
-    else position = "bottom";
-  }
-  tabs.setDragOver(props.pane.id, position);
+function dragOver(event: DragEvent) {
+  if (!tabs.draggedPaneId || isDragging.value || !paneRef.value) return;
+  event.preventDefault();
+  tabs.setDragOver(props.pane.id, dropPosition(event));
 }
-
-function onDragLeave(e: DragEvent) {
-  if (!paneRef.value) return;
-  const rect = paneRef.value.getBoundingClientRect();
-  const x = e.clientX;
-  const y = e.clientY;
-  if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
-    tabs.clearDragOver();
-  }
+function drop(event: DragEvent) {
+  if (!tabs.draggedPaneId || !paneRef.value) return;
+  event.preventDefault();
+  tabs.dropPane(props.pane.id, dropPosition(event));
 }
-
-function onDrop(e: DragEvent) {
-  e.preventDefault();
-  if (!tabs.draggedPaneId) return;
-  if (!paneRef.value) {
-    tabs.endDrag();
-    return;
-  }
-
-  const rect = paneRef.value.getBoundingClientRect();
-  const x = (e.clientX - rect.left) / rect.width;
-  const y = (e.clientY - rect.top) / rect.height;
-  const centerSize = 0.2;
-  const isCenter =
-    x > 0.5 - centerSize && x < 0.5 + centerSize &&
-    y > 0.5 - centerSize && y < 0.5 + centerSize;
-
-  let position: DropPosition;
-  if (isCenter) {
-    position = "center";
-  } else {
-    const distLeft = x;
-    const distRight = 1 - x;
-    const distTop = y;
-    const distBottom = 1 - y;
-    const minDist = Math.min(distLeft, distRight, distTop, distBottom);
-    if (minDist === distLeft) position = "left";
-    else if (minDist === distRight) position = "right";
-    else if (minDist === distTop) position = "top";
-    else position = "bottom";
-  }
-  tabs.dropPane(props.pane.id, position);
+const actions = computed<MenuAction[]>(() => [
+  { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
+  { id: "split-v", label: "Split below…", icon: SplitSquareVertical },
+  { id: "search", label: "Find in terminal", icon: Search, shortcut: "⌘ / Ctrl F", separator: true },
+  { id: "fullscreen", label: isFullscreen.value ? "Restore pane" : "Maximize pane", icon: isFullscreen.value ? Minimize2 : Maximize2 },
+  ...otherTabs.value.map((tab, index) => ({ id: `move:${tab.id}`, label: `Move to ${tab.title}`, icon: ArrowUpRight, separator: index === 0 })),
+  ...(!props.pane.connected ? [{ id: "reconnect", label: "Reconnect", icon: RotateCw, disabled: busy.value, separator: true }] : []),
+  { id: "close", label: "Close session", icon: X, danger: true, separator: true },
+]);
+function selectAction(id: string) {
+  activatePane();
+  if (id === "split-h") emit("split-h");
+  else if (id === "split-v") emit("split-v");
+  else if (id === "search") openSearch();
+  else if (id === "fullscreen") toggleFullscreen();
+  else if (id === "reconnect") { queueFocus(); void nextTick(() => connectWhenReady()); }
+  else if (id === "close") emit("close");
+  else if (id.startsWith("move:")) tabs.movePaneToTab(props.pane.id, id.slice(5));
 }
 </script>
 
 <template>
-  <div
-    ref="paneRef"
-    class="flex flex-col w-full h-full relative transition-all duration-100"
-    :class="{
-      'ring-1 ring-inset ring-primary/40': isActive && !isDragOver && !isFullscreen,
-      'ring-2 ring-inset ring-primary': isActive && isDragOver && !isFullscreen,
-      'fixed inset-0 z-[90]': isFullscreen,
-    }"
-    @click="focusPane"
-    @dragover="onDragOver"
-    @dragleave="onDragLeave"
-    @drop="onDrop"
-  >
-    <div
-      class="flex h-6 items-center gap-1.5 px-2 bg-sidebar border-b border-sidebar-border flex-shrink-0 select-none"
-      :class="{
-        'cursor-grabbing': isDragging,
-        'cursor-grab': !isDragging && someoneDragging === false,
-        'bg-primary/10 border-primary/20': isActive,
-      }"
-      draggable="true"
-      @dragstart="onDragStart"
-      @dragend="onDragEnd"
-      @click="focusPane"
-    >
-      <GripVertical class="size-3 text-muted-foreground/50 shrink-0" :stroke-width="1.75" />
-      <CircleDot
-        v-if="pane.connected"
-        class="size-2.5 text-green-500 shrink-0"
-        :stroke-width="0"
-        fill="currentColor"
-      />
-      <Circle v-else class="size-2.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
-      <span
-        class="text-[11px] truncate flex-1"
-        :class="isActive ? 'text-foreground font-medium' : 'text-muted-foreground'"
-      >{{ pane.title }}</span>
-      <div class="flex items-center gap-0.5">
-        <button
-          v-if="!pane.connected && !isFullscreen"
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:text-green-500 hover:bg-sidebar-accent transition-colors duration-100"
-          aria-label="Reconnect"
-          title="Reconnect"
-          @click.stop="reconnect"
-        >
-          <RotateCw class="size-3" :stroke-width="1.75" />
-        </button>
-        <button
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors duration-100"
-          aria-label="Search in terminal"
-          title="Search (Cmd/Ctrl+F)"
-          @click.stop="openSearch"
-        >
-          <Search class="size-3" :stroke-width="1.75" />
-        </button>
-        <button
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors duration-100"
-          :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
-          :title="isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'"
-          @click.stop="ui.toggleFullscreen(props.pane.id)"
-        >
-          <Minimize2 v-if="isFullscreen" class="size-3" :stroke-width="1.75" />
-          <Maximize2 v-else class="size-3" :stroke-width="1.75" />
-        </button>
-        <button
-          v-if="!isFullscreen"
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors duration-100"
-          aria-label="Split horizontally"
-          title="Split horizontally"
-          @click.stop="emit('split-h')"
-        >
-          <SplitSquareHorizontal class="size-3" :stroke-width="1.75" />
-        </button>
-        <button
-          v-if="!isFullscreen"
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors duration-100"
-          aria-label="Split vertically"
-          title="Split vertically"
-          @click.stop="emit('split-v')"
-        >
-          <SplitSquareVertical class="size-3" :stroke-width="1.75" />
-        </button>
-        <button
-          class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100"
-          aria-label="Close pane"
-          title="Close pane"
-          @click.stop="emit('close')"
-        >
-          <X class="size-3" :stroke-width="1.75" />
-        </button>
+  <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-blue-400/50' : '']"
+    :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
+    @click="focusPane" @dragover="dragOver" @drop="drop"
+    @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
+    <header class="pane-header" :class="{ 'pane-header-active': isActive }" data-testid="pane-header">
+      <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2" draggable="true"
+        :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
+        <GripVertical class="size-3 shrink-0 text-slate-500" />
+        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-blue-300" aria-label="Connecting" />
+        <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-400' : 'bg-slate-500'" :title="status" />
+        <span class="truncate text-[12px]" :title="`${pane.title} · ${hostAddress} · ${status}`">{{ hostAddress }}</span>
+        <span class="sr-only" role="status">{{ status }}</span>
       </div>
+      <div class="flex shrink-0 items-center gap-0.5 text-slate-400" @click.stop
+        @pointerdown.capture="activatePane()" @focusin="activatePane()">
+        <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
+        <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
+        <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
+      </div>
+    </header>
+    <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
+      <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
+      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="busy" @click.stop="reconnect">Reconnect</button>
     </div>
-
-    <div ref="containerRef" class="flex-1 overflow-hidden bg-black"></div>
-
-    <div
-      v-if="showSearch"
-      class="absolute top-7 right-2 z-40 flex items-center gap-1 rounded-md border border-border bg-background shadow-lg p-1"
-      @click.stop
-    >
-      <input
-        ref="searchInputRef"
-        v-model="searchQuery"
-        type="text"
-        placeholder="Search..."
-        class="h-6 w-[160px] rounded bg-transparent px-2 text-[12px] text-foreground placeholder:text-muted-foreground outline-none border-none"
-        @input="onSearchInput"
-        @keydown="onSearchKeydown"
-      />
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded transition-colors duration-100"
-        :class="searchCaseSensitive ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-muted'"
-        :title="'Case sensitive' + (searchCaseSensitive ? ' (on)' : '')"
-        @click="searchCaseSensitive = !searchCaseSensitive; onSearchInput()"
-      >
-        <CaseSensitive class="size-3.5" :stroke-width="1.75" />
-      </button>
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded transition-colors duration-100"
-        :class="searchWholeWord ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-muted'"
-        :title="'Whole word' + (searchWholeWord ? ' (on)' : '')"
-        @click="searchWholeWord = !searchWholeWord; onSearchInput()"
-      >
-        <WholeWord class="size-3.5" :stroke-width="1.75" />
-      </button>
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded transition-colors duration-100"
-        :class="searchRegex ? 'bg-primary/20 text-primary' : 'text-muted-foreground hover:bg-muted'"
-        :title="'Regex' + (searchRegex ? ' (on)' : '')"
-        @click="searchRegex = !searchRegex; onSearchInput()"
-      >
-        <Regex class="size-3.5" :stroke-width="1.75" />
-      </button>
-      <div class="w-px h-4 bg-border mx-0.5"></div>
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-        title="Previous match (Shift+Enter)"
-        @click="doSearch('prev')"
-      >
-        <ChevronUp class="size-3.5" :stroke-width="1.75" />
-      </button>
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-        title="Next match (Enter)"
-        @click="doSearch('next')"
-      >
-        <ChevronDown class="size-3.5" :stroke-width="1.75" />
-      </button>
-      <button
-        class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
-        title="Close search (Esc)"
-        @click="closeSearch"
-      >
-        <X class="size-3.5" :stroke-width="1.75" />
-      </button>
+    <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
+         any subsequent key is routed; do not gate background protocol replies. -->
+    <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
+    <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
+    <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
+      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
+      <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
+      <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>
+      <button class="pane-button" :aria-pressed="searchRegex" aria-label="Regular expression" @click="searchRegex = !searchRegex; doSearch()"><Regex class="size-3.5" /></button>
+      <button class="pane-button" aria-label="Previous match" @click="doSearch(true)"><ChevronUp class="size-3.5" /></button>
+      <button class="pane-button" aria-label="Next match" @click="doSearch()"><ChevronDown class="size-3.5" /></button>
+      <button class="pane-button" aria-label="Close search" @click="closeSearch"><X class="size-3.5" /></button>
     </div>
-
-    <div
-      v-if="!pane.connected && connectionAttempted"
-      class="absolute inset-0 top-6 z-10 flex items-center justify-center bg-black/60 pointer-events-auto"
-    >
-      <div class="flex flex-col items-center gap-2">
-        <Circle class="size-6 text-muted-foreground" :stroke-width="1.5" />
-        <span class="text-sm text-muted-foreground">Disconnected</span>
-        <button
-          class="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-xs font-medium hover:bg-primary/90 transition-colors"
-          @click.stop="reconnect"
-        >
-          <RotateCw class="size-3.5" :stroke-width="2" />
-          Reconnect
-        </button>
-      </div>
-    </div>
-
-    <div
-      v-if="isDragOver && someoneDragging && !isDragging"
-      class="absolute inset-0 z-20 pointer-events-none"
-    >
-      <div
-        v-if="dragPosition === 'top'"
-        class="absolute top-0 left-0 right-0 h-1/2 bg-primary/20 border-2 border-primary border-bottom-0 rounded-t-md flex items-center justify-center"
-      >
-        <div class="bg-primary text-primary-foreground text-[11px] font-medium px-2 py-1 rounded-md flex items-center gap-1">
-          <Maximize2 class="size-3" :stroke-width="1.75" />
-          Drop to split top
-        </div>
-      </div>
-      <div
-        v-else-if="dragPosition === 'bottom'"
-        class="absolute bottom-0 left-0 right-0 h-1/2 bg-primary/20 border-2 border-primary border-top-0 rounded-b-md flex items-center justify-center"
-      >
-        <div class="bg-primary text-primary-foreground text-[11px] font-medium px-2 py-1 rounded-md flex items-center gap-1">
-          <Maximize2 class="size-3" :stroke-width="1.75" />
-          Drop to split bottom
-        </div>
-      </div>
-      <div
-        v-else-if="dragPosition === 'left'"
-        class="absolute top-0 bottom-0 left-0 w-1/2 bg-primary/20 border-2 border-primary border-right-0 rounded-l-md flex items-center justify-center"
-      >
-        <div class="bg-primary text-primary-foreground text-[11px] font-medium px-2 py-1 rounded-md flex items-center gap-1">
-          <Maximize2 class="size-3" :stroke-width="1.75" />
-          Drop to split left
-        </div>
-      </div>
-      <div
-        v-else-if="dragPosition === 'right'"
-        class="absolute top-0 bottom-0 right-0 w-1/2 bg-primary/20 border-2 border-primary border-left-0 rounded-r-md flex items-center justify-center"
-      >
-        <div class="bg-primary text-primary-foreground text-[11px] font-medium px-2 py-1 rounded-md flex items-center gap-1">
-          <Maximize2 class="size-3" :stroke-width="1.75" />
-          Drop to split right
-        </div>
-      </div>
-      <div
-        v-else-if="dragPosition === 'center'"
-        class="absolute inset-0 bg-primary/15 border-2 border-dashed border-primary rounded-md flex items-center justify-center"
-      >
-        <div class="bg-primary text-primary-foreground text-[11px] font-medium px-2 py-1 rounded-md flex items-center gap-1">
-          <Maximize2 class="size-3" :stroke-width="1.75" />
-          Drop to swap
-        </div>
-      </div>
-    </div>
-
-    <div
-      v-if="isDragging"
-      class="absolute inset-0 z-30 bg-muted/50 pointer-events-none flex items-center justify-center"
-    >
-      <div class="text-[12px] font-medium text-muted-foreground">Moving pane...</div>
+    <div v-if="isDragOver && tabs.draggedPaneId && !isDragging" class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-primary bg-primary/20">
+      <span class="rounded bg-primary px-3 py-2 text-xs text-primary-foreground">{{ tabs.dragOverPosition === 'center' ? 'Swap pane positions' : `Move pane to ${tabs.dragOverPosition}` }}</span>
     </div>
   </div>
 </template>
+
+<style scoped>
+.terminal-pane { background: var(--terminal-background); }
+.pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-slate-400; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
+.pane-header-active { background: var(--terminal-toolbar-active); color: #e3e8f1; box-shadow: inset 2px 0 var(--workspace-accent); }
+.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-white/10 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
+</style>

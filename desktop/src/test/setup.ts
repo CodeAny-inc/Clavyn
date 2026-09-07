@@ -22,7 +22,12 @@ const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
   if (mockInvokeHandlers.has(cmd)) {
     return mockInvokeHandlers.get(cmd)!(args);
   }
-  // Default: return empty data
+  if (cmd === "list_identities") return [];
+  if (cmd === "connect_ssh") return {
+    username: args.expectedUsername ?? args.host.username,
+    hostname: args.host.hostname,
+    port: args.host.port,
+  };
   return undefined;
 });
 
