@@ -29,7 +29,7 @@ const form = ref({
   username: "",
   useIdentity: false,
   identityId: "",
-  authMode: "password" as "password" | "publickey",
+  authMode: "password" as "password" | "publickey" | "agent",
   credentialKey: "",
   keyId: "",
   groupId: "",
@@ -40,10 +40,10 @@ watch(
   () => props.host,
   (host) => {
     if (host) {
-      // Agent auth is not implemented natively yet. Legacy Agent hosts open as
-      // Password so saving the form cannot keep advertising an unsupported mode.
-      const authMode: "password" | "publickey" =
-        host.auth === "publickey" ? "publickey" : "password";
+      // Preserve legacy Agent auth on unrelated edits. It remains visibly
+      // unsupported and cannot be selected for a new host.
+      const authMode: "password" | "publickey" | "agent" =
+        typeof host.auth === "string" ? host.auth : "password";
       const credentialKey =
         typeof host.auth === "object" && "password" in host.auth
           ? host.auth.password.credential_key
@@ -110,6 +110,7 @@ function buildAuth(): AuthMethod {
     return id?.auth ?? { password: { credential_key: "default" } };
   }
   if (form.value.authMode === "publickey") return "publickey";
+  if (form.value.authMode === "agent") return "agent";
   return {
     password: { credential_key: form.value.credentialKey || "default" },
   };
@@ -228,11 +229,17 @@ async function save() {
         <FormGroup>
           <Label>Authentication method</Label>
           <Select v-model="form.authMode">
+            <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="password">Password</option>
             <option value="publickey">SSH Key</option>
           </Select>
           <p class="text-[11px] text-muted-foreground mt-1">
-            SSH Agent will return when native agent signing is implemented across supported platforms.
+            <template v-if="form.authMode === 'agent'">
+              This legacy host remains unchanged until you deliberately choose Password or SSH Key. SSH Agent cannot connect yet.
+            </template>
+            <template v-else>
+              SSH Agent will return when native agent signing is implemented across supported platforms.
+            </template>
           </p>
         </FormGroup>
 
