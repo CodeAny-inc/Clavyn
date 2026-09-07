@@ -12,7 +12,7 @@ import { useUiStore } from "../stores/ui";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
-import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
@@ -224,6 +224,7 @@ async function connectSession() {
         if (!host || disposed || props.pane.closing) return;
         const effective = effectiveSshIdentity(host, identities.identities);
         const key = sshConfigurationKey(host, identities.identities);
+        const transportHost = resolvedSshHost(host, identities.identities);
         endpointForAttempt = configuredSshEndpoint(host, identities.identities);
         let password: string | null = null;
         try {
@@ -236,12 +237,12 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
-          const request = api.connectSsh(sessionId, host, password, terminal.cols, terminal.rows, effective.username);
+          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
           const connected = await request;
-          // Rust returns metadata from the same identity snapshot it authenticated.
-          // The preflight endpoint also supports older bridges returning no metadata.
+          // Rust returns metadata from the same immutable transport snapshot used
+          // to authenticate; later identity edits cannot change this attempt.
           if (connected) endpointForAttempt = formatSshEndpoint(connected);
         } finally {
           password = null;
@@ -445,7 +446,7 @@ function selectAction(id: string) {
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
-      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
+      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 flex-1 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchRegex" aria-label="Regular expression" @click="searchRegex = !searchRegex; doSearch()"><Regex class="size-3.5" /></button>
