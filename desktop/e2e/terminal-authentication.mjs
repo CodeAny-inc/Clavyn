@@ -102,37 +102,42 @@ async function scenario(name, mode, exercise, narrow = false) {
 }
 try {
   await scenario("auth-delayed-identities", "delayed", async page => {
+    // HostList must never dispatch with the stale saved-host account while the
+    // linked identity is unresolved. The picker remains usable for local/direct hosts.
     await connectAtlas(page);
     await page.waitForFunction(() => window.__authTest.pending.length > 0);
     assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 0);
-    assert.doesNotMatch(await pane(page).locator("header").innerText(), /deploy@/);
+    assert.equal(await pane(page).count(), 0);
+    assert.equal(await page.getByText("deploy@atlas.example.test:22", { exact: true }).count(), 0);
     await page.getByRole("button", { name: "New session", exact: true }).click();
-    assert.ok(await page.getByRole("button", { name: "Connect Atlas Production", exact: true }).isDisabled());
-    assert.ok(await page.getByRole("button", { name: "Open local shell", exact: true }).isEnabled());
-    await page.getByRole("button", { name: "Close session picker", exact: true }).click();
+    const picker = page.locator("dialog[open]");
+    assert.ok(await picker.getByRole("button", { name: "Connect Atlas Production", exact: true }).isDisabled());
+    assert.ok(await picker.getByRole("button", { name: "Open local shell", exact: true }).isEnabled());
+    await picker.getByRole("button", { name: "Close session picker", exact: true }).click();
     await page.evaluate(() => window.__authTest.release());
+    await page.getByText("root@atlas.example.test:22", { exact: true }).waitFor();
+    await connectAtlas(page);
     await connected(page);
     assert.match(await pane(page).locator("header").innerText(), /root@atlas\.example\.test:22/);
   });
   await scenario("auth-identity-load-retry", "failed", async page => {
     await page.getByRole("button", { name: "New session", exact: true }).click();
-    await page.getByRole("alert").filter({ hasText: "Could not load SSH identities" }).waitFor();
-    assert.ok(await page.getByRole("button", { name: "Connect Atlas Production", exact: true }).isDisabled());
+    const picker = page.locator("dialog[open]");
+    await picker.getByRole("alert").filter({ hasText: "Could not load SSH identities" }).waitFor();
+    assert.ok(await picker.getByRole("button", { name: "Connect Atlas Production", exact: true }).isDisabled());
     assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 0);
     await page.evaluate(() => { window.__authTest.failLoad = false; });
-    await page.getByRole("button", { name: "Retry identities", exact: true }).click();
-    const choice = page.getByRole("button", { name: "Connect Atlas Production", exact: true });
-    await page.waitForFunction(() => !document.querySelector('[aria-label="Connect Atlas Production"]')?.disabled);
+    await picker.getByRole("button", { name: "Retry identities", exact: true }).click();
+    const choice = picker.getByRole("button", { name: "Connect Atlas Production", exact: true });
+    await page.waitForFunction(() => !document.querySelector('dialog[open] [aria-label="Connect Atlas Production"]')?.disabled);
     assert.match(await choice.innerText(), /root@atlas\.example\.test:22/);
-    await page.getByRole("textbox", { name: "Search sessions", exact: true }).fill("root");
+    await picker.getByRole("textbox", { name: "Search sessions", exact: true }).fill("root");
     await page.keyboard.press("Enter");
     await connected(page);
   });
   for (const mode of ["password-identity", "password-host"]) {
     await scenario(`auth-${mode}`, mode, async page => {
       await connectAtlas(page);
-      const input = page.getByRole("textbox", { name: "SSH password", exact: true });
-      // Password inputs have no implicit textbox role.
       const password = page.locator('input[aria-label="SSH password"]');
       await password.waitFor();
       await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "SSH password");
@@ -183,20 +188,27 @@ try {
     await connectAtlas(page);
     const password = page.locator('input[aria-label="SSH password"]');
     await password.waitFor();
+    await password.fill(fixturePassword);
+
+    // Leaving the persistent pane must cancel and clear the pending credential.
     await page.getByRole("button", { name: "Identities", exact: true }).click();
+    await password.waitFor({ state: "hidden" });
+    assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 0);
+
     await page.getByRole("button", { name: "Edit identity", exact: true }).click();
     await page.getByRole("textbox", { name: "Username", exact: true }).fill("ops");
     await page.getByRole("button", { name: "Save changes", exact: true }).click();
     await page.getByRole("textbox", { name: "Username", exact: true }).waitFor({ state: "hidden" });
     await page.locator("[data-tab-id]").first().click();
+    await pane(page).getByRole("alert").filter({ hasText: "Connection cancelled" }).waitFor();
+
+    // Reconnect requests a fresh password for the updated effective account.
+    await pane(page).getByRole("button", { name: "Reconnect", exact: true }).click();
+    await password.waitFor();
+    assert.equal(await password.inputValue(), "");
+    assert.match(await pane(page).getByRole("region").innerText(), /ops@atlas\.example\.test:22/);
     await password.fill(fixturePassword);
     await page.keyboard.press("Enter");
-    await pane(page).getByRole("alert").filter({ hasText: "Connection settings changed" }).waitFor();
-    assert.equal(await page.evaluate(() => window.__terminalTest.connects.length), 0);
-    await pane(page).getByRole("button", { name: "Reconnect", exact: true }).click();
-    await password.waitFor(); assert.equal(await password.inputValue(), "");
-    assert.match(await pane(page).getByRole("region").innerText(), /ops@atlas\.example\.test:22/);
-    await password.fill(fixturePassword); await page.keyboard.press("Enter");
     await connected(page);
     assert.match(await pane(page).locator("header").innerText(), /ops@atlas\.example\.test:22/);
   });
