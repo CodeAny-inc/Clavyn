@@ -83,7 +83,7 @@ onUnmounted(() => {
       :tab-count="tabs.tabs.length" @navigate="activeView = $event"
       @open-command-palette="commandPaletteOpen = true" />
     <main class="flex-1 flex flex-col overflow-hidden min-w-0">
-      <button class="flex h-9 w-9 items-center justify-center rounded-md text-slate-300 hover:bg-white/10 md:hidden absolute top-1.5 left-1.5 z-30"
+      <button class="flex h-9 w-9 items-center justify-center rounded-md text-muted-foreground hover:bg-muted md:hidden absolute top-1.5 left-1.5 z-30"
         aria-label="Open navigation" @click="ui.openMobileSidebar()">
         <Menu class="size-4" :stroke-width="1.75" />
       </button>

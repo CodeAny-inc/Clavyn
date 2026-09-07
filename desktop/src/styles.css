@@ -6,13 +6,15 @@
    (putting :root/.dark custom properties inside @layer base caused the
    dark-theme block to be stripped from the compiled CSS). */
 :root {
-  /* Workspace chrome remains dark around light and dark app surfaces. */
-  --workspace-chrome: #252938;
-  --workspace-accent: #72a9ff;
+  /* Terminal chrome adapts to the app theme. The xterm viewport itself stays
+     dark (standard for terminals), but the surrounding tab strip and pane
+     headers use neutral surfaces so light mode doesn't show a black nav bar. */
+  --workspace-chrome: hsl(0 0% 96.5%);
+  --workspace-accent: hsl(215 90% 56%);
   --terminal-background: #10151e;
-  --terminal-border: #293343;
-  --terminal-toolbar: #181e2a;
-  --terminal-toolbar-active: #1f2838;
+  --terminal-border: hsl(0 0% 88%);
+  --terminal-toolbar: hsl(0 0% 95%);
+  --terminal-toolbar-active: hsl(0 0% 93%);
   --background: 0 0% 99%;
   --foreground: 0 0% 10%;
   --card: 0 0% 100%;
@@ -64,6 +66,12 @@
   --sidebar-accent: 0 0% 16%;
   --sidebar-accent-foreground: 0 0% 94%;
   --sidebar-border: 0 0% 20%;
+  /* Terminal chrome stays dark-on-dark in dark mode. */
+  --workspace-chrome: hsl(0 0% 11%);
+  --workspace-accent: hsl(213 88% 64%);
+  --terminal-border: hsl(0 0% 20%);
+  --terminal-toolbar: hsl(0 0% 12%);
+  --terminal-toolbar-active: hsl(0 0% 16%);
 }
 
 @layer base {

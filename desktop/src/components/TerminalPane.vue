@@ -423,20 +423,20 @@ function selectAction(id: string) {
 
 <template>
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
-    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-blue-400/50' : '']"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
     @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
     <header class="pane-header" :class="{ 'pane-header-active': isActive }" data-testid="pane-header">
       <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2" draggable="true"
         :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
-        <GripVertical class="size-3 shrink-0 text-slate-500" />
-        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-blue-300" aria-label="Connecting" />
-        <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-400' : 'bg-slate-500'" :title="status" />
+        <GripVertical class="size-3 shrink-0 text-muted-foreground" />
+        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-muted-foreground" aria-label="Connecting" />
+        <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-500' : 'bg-muted-foreground'" :title="status" />
         <span class="truncate text-[12px]" :title="`${pane.title} · ${hostAddress} · ${status}`">{{ hostAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
       </div>
-      <div class="flex shrink-0 items-center gap-0.5 text-slate-400" @click.stop
+      <div class="flex shrink-0 items-center gap-0.5 text-muted-foreground" @click.stop
         @pointerdown.capture="activatePane()" @focusin="activatePane()">
         <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
         <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
@@ -468,8 +468,8 @@ function selectAction(id: string) {
 
 <style scoped>
 .terminal-pane { background: var(--terminal-background); }
-.pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-slate-400; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
-.pane-header-active { background: var(--terminal-toolbar-active); color: #e3e8f1; box-shadow: inset 2px 0 var(--workspace-accent); }
-.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-white/10 disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-muted-foreground; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
+.pane-header-active { background: var(--terminal-toolbar-active); color: hsl(var(--foreground)); box-shadow: inset 2px 0 var(--workspace-accent); }
+.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
 </style>
