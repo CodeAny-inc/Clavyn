@@ -122,3 +122,51 @@ pub async fn connect(
     }
     Ok(session)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn known_hosts() -> Arc<Mutex<KnownHosts>> {
+        let path = std::env::temp_dir().join(format!(
+            "opentermius-connection-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        Arc::new(Mutex::new(KnownHosts::load(path).unwrap()))
+    }
+
+    fn host(auth: serde_json::Value, identity_id: Option<&str>) -> Host {
+        serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "label": "Fixture",
+            "hostname": "must-not-connect.example.test",
+            "port": 22,
+            "username": "deploy",
+            "auth": auth,
+            "identity_id": identity_id,
+            "tags": []
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_linked_identity_fails_before_network_fallback() {
+        let host = host(
+            serde_json::json!({"password": {"credential_key": "metadata-only"}}),
+            Some("00000000-0000-0000-0000-000000000002"),
+        );
+        let error = connect(&host, None, known_hosts(), None, None, Some("SECRET"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("linked SSH identity not found"));
+    }
+
+    #[tokio::test]
+    async fn agent_auth_fails_explicitly_before_network_connection() {
+        let host = host(serde_json::json!("agent"), None);
+        let error = connect(&host, None, known_hosts(), None, None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
+    }
+}
