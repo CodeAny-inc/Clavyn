@@ -1,5 +1,10 @@
 import type { AuthMethod, Host, Identity } from "../types";
 
+/** A direct host is self-contained; only linked identities depend on the identity cache. */
+export function sshIdentityReady(host: Host, identitiesLoaded: boolean): boolean {
+  return !host.identity_id || identitiesLoaded;
+}
+
 /** Presentation/preflight only. Rust still resolves and authenticates the identity. */
 export function effectiveSshIdentity(host: Host, identities: readonly Identity[]) {
   const identity = identities.find(item => item.id === host.identity_id);
