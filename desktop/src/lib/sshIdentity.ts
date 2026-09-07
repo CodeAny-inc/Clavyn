@@ -5,13 +5,30 @@ export function sshIdentityReady(host: Host, identitiesLoaded: boolean): boolean
   return !host.identity_id || identitiesLoaded;
 }
 
-/** Presentation/preflight only. Rust still resolves and authenticates the identity. */
+/** Resolve the account/auth/key that this exact frontend configuration represents. */
 export function effectiveSshIdentity(host: Host, identities: readonly Identity[]) {
   const identity = identities.find(item => item.id === host.identity_id);
   return {
     username: identity?.username ?? host.username,
     auth: identity?.auth ?? host.auth,
     keyId: identity ? identity.key_id : host.key_id,
+  };
+}
+
+/**
+ * Freeze the effective linked-identity configuration into an immutable transport
+ * host. Clearing identity_id is intentional: the native command must authenticate
+ * this exact reviewed username/auth/key snapshot rather than re-resolving a
+ * same-id identity that may have changed after frontend preflight.
+ */
+export function resolvedSshHost(host: Host, identities: readonly Identity[]): Host {
+  const effective = effectiveSshIdentity(host, identities);
+  return {
+    ...host,
+    username: effective.username,
+    auth: effective.auth,
+    key_id: effective.keyId ?? null,
+    identity_id: null,
   };
 }
 
