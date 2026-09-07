@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, useId } from "vue";
+import { nextTick, onBeforeUnmount, ref, useId, watch } from "vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 
 const props = defineProps<{ active: boolean }>();
@@ -37,6 +37,12 @@ function request(address: string, mayAutofocus: () => boolean = () => true): Pro
   void nextTick(() => { if (current() && mayAutofocus()) focus(); });
   return result;
 }
+// Terminal panes intentionally stay mounted across tabs/views. Once this pane
+// loses ownership, discard any unsubmitted credential instead of retaining it
+// in a hidden component. A future reconnect requests a fresh password.
+watch(() => props.active, active => {
+  if (!active && pending.value) finish(null, false);
+}, { flush: "sync" });
 onBeforeUnmount(() => finish(null, false));
 defineExpose({ request, cancel, focus, pending });
 </script>
