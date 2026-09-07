@@ -49,7 +49,7 @@ const browsingFile = ref(false);
 const form = ref({
   label: "",
   username: "",
-  authMode: "agent" as "password" | "publickey" | "agent",
+  authMode: "password" as "password" | "publickey",
   credentialKey: "",
   keyId: "",
   groupId: "",
@@ -94,7 +94,7 @@ function addIdentity() {
   form.value = {
     label: "",
     username: "",
-    authMode: "agent",
+    authMode: "password",
     credentialKey: "",
     keyId: "",
     groupId: identities.selectedGroupId ?? "",
@@ -109,8 +109,10 @@ function addIdentity() {
 
 function editIdentity(id: Identity) {
   editing.value = id;
-  const authMode: "password" | "publickey" | "agent" =
-    typeof id.auth === "string" ? id.auth : "password";
+  // Legacy Agent identities are migrated through a supported form mode instead
+  // of continuing to advertise an authentication path the native core rejects.
+  const authMode: "password" | "publickey" =
+    id.auth === "publickey" ? "publickey" : "password";
   const credentialKey =
     typeof id.auth === "object" && "password" in id.auth
       ? id.auth.password.credential_key
@@ -133,7 +135,6 @@ function editIdentity(id: Identity) {
 
 function buildAuth(): AuthMethod {
   if (form.value.authMode === "publickey") return "publickey";
-  if (form.value.authMode === "agent") return "agent";
   return {
     password: { credential_key: form.value.credentialKey || "default" },
   };
@@ -247,7 +248,7 @@ async function browseForKeyFile() {
 
 function authLabel(auth: AuthMethod): string {
   if (auth === "publickey") return "SSH Key";
-  if (auth === "agent") return "Agent";
+  if (auth === "agent") return "Agent (unsupported)";
   return "Password";
 }
 
@@ -415,10 +416,12 @@ function hostsUsingIdentity(identityId: string): number {
         <FormGroup>
           <Label>Authentication method</Label>
           <Select v-model="form.authMode">
-            <option value="agent">SSH Agent</option>
             <option value="publickey">SSH Key</option>
             <option value="password">Password</option>
           </Select>
+          <p class="text-[11px] text-muted-foreground mt-1">
+            SSH Agent is temporarily unavailable until native agent signing is implemented across supported platforms.
+          </p>
         </FormGroup>
 
         <FormGroup v-if="form.authMode === 'password'">
