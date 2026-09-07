@@ -14,6 +14,14 @@ const host: Host = {
   tags: [],
 };
 
+const otherHost: Host = {
+  ...host,
+  id: "orion",
+  label: "Orion",
+  hostname: "orion.example.test",
+  username: "root",
+};
+
 const calls = (command: string) =>
   getInvokeMock().mock.calls.filter(([name]) => name === command);
 
@@ -43,6 +51,26 @@ describe("SFTP connection ownership", () => {
     expect(calls("sftp_list_dir")).toHaveLength(1);
     expect(sftp.sessionId).toBe(calls("sftp_connect")[0][1].sessionId);
     expect(sftp.error).toBeNull();
+  });
+
+  it("rejects a different host while the first immutable attempt is still pending", async () => {
+    let release!: () => void;
+    setInvokeHandler("sftp_connect", () => new Promise<void>(resolve => { release = resolve; }));
+
+    const sftp = useSftpStore();
+    const first = sftp.connect(host, "ATLAS_SECRET", "deploy");
+    await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
+
+    await expect(sftp.connect(otherHost, "ORION_SECRET", "root"))
+      .rejects.toThrow("Another SFTP connection is still in progress");
+    expect(calls("sftp_connect")).toHaveLength(1);
+    expect(calls("sftp_connect")[0][1].host.id).toBe("atlas");
+    expect(sftp.error).toContain("Another SFTP connection is still in progress");
+
+    release();
+    await first;
+    expect(sftp.connectedHost?.id).toBe("atlas");
+    expect(sftp.sessionId).toBe(calls("sftp_connect")[0][1].sessionId);
   });
 
   it("closes an obsolete late attempt without clearing a newer connection", async () => {
