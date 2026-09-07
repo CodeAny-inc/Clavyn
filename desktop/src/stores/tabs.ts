@@ -11,6 +11,8 @@ export interface Pane {
   title: string;
   connected: boolean;
   closing: boolean;
+  /** false only for restored SSH panes in a workspace with auto_connect disabled. */
+  autoConnect?: boolean;
 }
 export interface SplitNode {
   id: string;
