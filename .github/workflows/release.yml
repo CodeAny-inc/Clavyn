@@ -9,6 +9,14 @@ on:
       version:
         description: "Version to release (e.g. 0.1.2-alpha.1)"
         required: false
+      runner_mode:
+        description: "Runner mode. Keep GitHub-hosted by default; use self-hosted only to retry a failed trusted release."
+        type: choice
+        required: false
+        default: github
+        options:
+          - github
+          - self-hosted
 
 permissions:
   contents: write
@@ -18,7 +26,7 @@ jobs:
   # Determine version and release type
   # ──────────────────────────────────────────────
   prepare:
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","x64"]' || '["ubuntu-22.04"]') }}
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
@@ -40,7 +48,7 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "is_prerelease=$IS_PRERELEASE" >> $GITHUB_OUTPUT
-          echo "Releasing $TAG (prerelease=$IS_PRERELEASE)"
+          echo "Releasing $TAG (prerelease=$IS_PRERELEASE, runner_mode=${{ inputs.runner_mode || 'github' }})"
 
   # ──────────────────────────────────────────────
   # Build on all platforms
@@ -52,30 +60,38 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            runner: '["self-hosted","macOS"]'
+            github_runner: '["macos-latest"]'
+            self_hosted_runner: '["self-hosted","macOS"]'
             target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin"
             rust_target: aarch64-apple-darwin
           - platform: macos-latest
-            runner: '["self-hosted","macOS"]'
+            github_runner: '["macos-latest"]'
+            self_hosted_runner: '["self-hosted","macOS"]'
             target: x86_64-apple-darwin
             args: "--target x86_64-apple-darwin"
             rust_target: x86_64-apple-darwin
           - platform: ubuntu-22.04
-            runner: '["self-hosted","linux","x64"]'
+            github_runner: '["ubuntu-22.04"]'
+            self_hosted_runner: '["self-hosted","linux","x64"]'
             target: x86_64-unknown-linux-gnu
             args: ""
             rust_target: ""
           - platform: windows-latest
-            runner: '["self-hosted","windows","x64"]'
+            github_runner: '["windows-latest"]'
+            self_hosted_runner: '["self-hosted","windows","x64"]'
             target: x86_64-pc-windows-msvc
             args: ""
             rust_target: ""
 
-    runs-on: ${{ fromJSON(matrix.runner) }}
+    # Tag pushes and ordinary manual releases use GitHub-hosted runners. A failed
+    # trusted release can be retried via workflow_dispatch with runner_mode=self-hosted.
+    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && matrix.self_hosted_runner || matrix.github_runner) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -202,12 +218,14 @@ jobs:
   # ──────────────────────────────────────────────
   publish-manifest:
     needs: [prepare, build]
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","x64"]' || '["ubuntu-22.04"]') }}
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Download all release assets
         env:
