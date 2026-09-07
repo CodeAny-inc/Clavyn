@@ -99,7 +99,7 @@ function reviewFixture(mode) {
         auth: { password: { credential_key: "fixture-only" } }, tags: [] }];
     }
     if (command === "list_workspaces" && mode.startsWith("vault")) return [{
-      id: "protected", name: "Protected pair", host_ids: [], auto_connect: false,
+      id: "protected", name: "Protected pair", host_ids: [], auto_connect: true,
       tabs: [{ id: "protected-tab", title: "Protected pair", layout: {
         type: "split", direction: "horizontal", ratio: 0.5,
         first: { type: "pane", host_id: "atlas", terminal_type: "ssh" },
