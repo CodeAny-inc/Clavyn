@@ -55,9 +55,14 @@ const contextMenuY = ref(0);
 const selectedHost = computed(() =>
   hosts.hosts.find((host) => host.id === selectedHostId.value) ?? null,
 );
+const selectedIdentityMissing = computed(() => {
+  const host = selectedHost.value;
+  if (!host || !sshIdentityReady(host, identities.loaded)) return false;
+  return effectiveSshIdentity(host, identities.identities).missing;
+});
 const selectedIdentityReady = computed(() => {
   const host = selectedHost.value;
-  return !host || sshIdentityReady(host, identities.loaded);
+  return !host || (sshIdentityReady(host, identities.loaded) && !selectedIdentityMissing.value);
 });
 const selectedEffectiveIdentity = computed(() => {
   const host = selectedHost.value;
@@ -134,8 +139,13 @@ async function connect() {
   }
   if (!sshIdentityReady(host, identities.loaded)) return;
 
-  const configurationKey = sshConfigurationKey(host, identities.identities);
   const effective = effectiveSshIdentity(host, identities.identities);
+  if (effective.missing) {
+    password.value = "";
+    sftp.error = "Linked SSH identity not found. Repair the host configuration before connecting.";
+    return;
+  }
+  const configurationKey = sshConfigurationKey(host, identities.identities);
   let credential: string | null = passwordAuth(effective.auth) ? password.value : null;
   // Submission consumes the credential immediately, just like the terminal prompt.
   password.value = "";
@@ -143,6 +153,7 @@ async function connect() {
   try {
     const latest = hosts.hosts.find((candidate) => candidate.id === host!.id);
     if (!latest || !sshIdentityReady(latest, identities.loaded) ||
+        effectiveSshIdentity(latest, identities.identities).missing ||
         sshConfigurationKey(latest, identities.identities) !== configurationKey) {
       sftp.error = "Connection settings changed. Re-enter credentials for the updated account.";
       return;
@@ -382,6 +393,9 @@ async function upload() {
           <div v-else-if="selectedHost?.identity_id && identities.loadError" class="text-[12px] text-destructive" role="alert">
             {{ identities.loadError }}
             <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
+          </div>
+          <div v-else-if="selectedIdentityMissing" class="text-[12px] text-destructive" role="alert">
+            Missing SSH identity. Repair this host before connecting.
           </div>
           <p v-else-if="selectedEndpoint" class="text-[11px] font-mono text-muted-foreground">
             {{ selectedEndpoint }}
