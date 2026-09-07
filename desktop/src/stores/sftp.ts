@@ -13,45 +13,90 @@ export const useSftpStore = defineStore("sftp", () => {
   const error = ref<string | null>(null);
   const selectedEntry = ref<SftpEntry | null>(null);
 
-  async function connect(
+  // Presentation controls disable Connect while loading, but keyboard submission
+  // can still call connect() again. Keep the invariant in the store so every UI
+  // surface shares one in-flight establishment attempt.
+  let connectPending: Promise<void> | null = null;
+  let connectGeneration = 0;
+
+  function clearPublishedConnection() {
+    sessionId.value = null;
+    connectedHost.value = null;
+    entries.value = [];
+    currentPath.value = "/";
+    selectedEntry.value = null;
+  }
+
+  function connect(
     host: Host,
     password: string | null = null,
     expectedUsername?: string,
-  ) {
-    error.value = null;
-    loading.value = true;
+  ): Promise<void> {
+    if (connectPending) return connectPending;
+
+    const generation = ++connectGeneration;
     const id = crypto.randomUUID();
-    let connected = false;
+    const task = (async () => {
+      error.value = null;
+      loading.value = true;
+      let connected = false;
 
-    try {
-      await api.sftpConnect(id, host, password, expectedUsername);
-      connected = true;
+      try {
+        await api.sftpConnect(id, host, password, expectedUsername);
+        connected = true;
 
-      // Complete initial navigation before publishing the session into store
-      // state. If any bootstrap step fails we can close the partially-created
-      // backend session and avoid leaking it.
-      const home = await api.sftpCanonicalize(id, "~");
-      const initialEntries = await api.sftpListDir(id, home);
+        // Disconnect/unmount can invalidate an attempt while native auth is in
+        // flight. Never let that late attempt publish a session into fresh UI state.
+        if (generation !== connectGeneration) {
+          await api.sftpClose(id).catch(() => {});
+          return;
+        }
 
-      sessionId.value = id;
-      connectedHost.value = host;
-      currentPath.value = home;
-      entries.value = initialEntries;
-      selectedEntry.value = null;
-    } catch (e) {
-      if (connected) {
-        await api.sftpClose(id).catch(() => {});
+        // Complete initial navigation before publishing the session into store
+        // state. If any bootstrap step fails we can close the partially-created
+        // backend session and avoid leaking it.
+        const home = await api.sftpCanonicalize(id, "~");
+        if (generation !== connectGeneration) {
+          await api.sftpClose(id).catch(() => {});
+          return;
+        }
+        const initialEntries = await api.sftpListDir(id, home);
+        if (generation !== connectGeneration) {
+          await api.sftpClose(id).catch(() => {});
+          return;
+        }
+
+        const previous = sessionId.value;
+        sessionId.value = id;
+        connectedHost.value = host;
+        currentPath.value = home;
+        entries.value = initialEntries;
+        selectedEntry.value = null;
+
+        // Defensive replacement support: UI normally connects only while
+        // disconnected, but never leak an older published backend session.
+        if (previous && previous !== id) {
+          await api.sftpClose(previous).catch(() => {});
+        }
+      } catch (e) {
+        if (connected) {
+          await api.sftpClose(id).catch(() => {});
+        }
+        if (generation !== connectGeneration) return;
+        clearPublishedConnection();
+        error.value = String(e);
+        throw e;
+      } finally {
+        if (generation === connectGeneration) loading.value = false;
       }
-      sessionId.value = null;
-      connectedHost.value = null;
-      entries.value = [];
-      currentPath.value = "/";
-      selectedEntry.value = null;
-      error.value = String(e);
-      throw e;
-    } finally {
-      loading.value = false;
-    }
+    })();
+
+    connectPending = task;
+    task.then(
+      () => { if (connectPending === task) connectPending = null; },
+      () => { if (connectPending === task) connectPending = null; },
+    );
+    return task;
   }
 
   async function listDir(path: string) {
@@ -110,7 +155,7 @@ export const useSftpStore = defineStore("sftp", () => {
     if (!sessionId.value) return;
     const oldPath = joinPath(currentPath.value, entry.name);
     const newPath = joinPath(currentPath.value, newName);
-    await api.sftpRename(sessionId.value, oldPath, newPath);
+    await api.sftpRename(sessionId.value, oldPath, newName);
     await refresh();
   }
 
@@ -156,17 +201,18 @@ export const useSftpStore = defineStore("sftp", () => {
   }
 
   async function disconnect() {
+    // Invalidate a native connection that has not published yet. Its continuation
+    // observes the generation change and closes the late backend session itself.
+    connectGeneration += 1;
+    connectPending = null;
+    loading.value = false;
     const id = sessionId.value;
     try {
       if (id) {
         await api.sftpClose(id);
       }
     } finally {
-      sessionId.value = null;
-      connectedHost.value = null;
-      entries.value = [];
-      currentPath.value = "/";
-      selectedEntry.value = null;
+      clearPublishedConnection();
       error.value = null;
     }
   }
