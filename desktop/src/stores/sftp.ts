@@ -155,7 +155,7 @@ export const useSftpStore = defineStore("sftp", () => {
     if (!sessionId.value) return;
     const oldPath = joinPath(currentPath.value, entry.name);
     const newPath = joinPath(currentPath.value, newName);
-    await api.sftpRename(sessionId.value, oldPath, newName);
+    await api.sftpRename(sessionId.value, oldPath, newPath);
     await refresh();
   }
 
