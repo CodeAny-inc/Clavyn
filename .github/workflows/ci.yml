@@ -6,11 +6,59 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
-  rust-check:
-    # Persistent self-hosted runners are trusted-only. Public fork PRs execute
-    # arbitrary repository code, so isolate them on GitHub-hosted infrastructure.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
+  # GitHub-hosted runners are the default. The probe jobs deliberately capture
+  # step failures as outputs so a trusted same-repository change can retry on the
+  # persistent self-hosted pool without leaving a permanently-red primary check.
+  rust-check-github:
+    runs-on: ubuntu-22.04
+    outputs:
+      failed: ${{ steps.result.outputs.failed }}
+    steps:
+      - id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: rust
+        continue-on-error: true
+        uses: dtolnay/rust-toolchain@stable
+      - id: deps
+        name: Install Linux dependencies
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
+      - id: checks
+        name: Cargo checks and tests
+        continue-on-error: true
+        run: |
+          cargo check --workspace
+          cargo test -p opentermius-core
+          cargo test -p opentermius-desktop
+      - id: result
+        if: always()
+        shell: bash
+        run: |
+          failed=false
+          for outcome in \
+            "${{ steps.checkout.outcome }}" \
+            "${{ steps.rust.outcome }}" \
+            "${{ steps.deps.outcome }}" \
+            "${{ steps.checks.outcome }}"; do
+            if [ "$outcome" != "success" ]; then failed=true; fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+  rust-check-self-hosted:
+    needs: rust-check-github
+    if: >-
+      ${{ always() && needs.rust-check-github.outputs.failed == 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,9 +75,63 @@ jobs:
       - name: Cargo test (desktop backend)
         run: cargo test -p opentermius-desktop
 
-  macos-rust-build:
-    # Use the persistent macOS runner only for trusted branches/PRs.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'macos-14' || fromJSON('["self-hosted","macOS"]') }}
+  rust-check:
+    needs: [rust-check-github, rust-check-self-hosted]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require GitHub-hosted success or trusted fallback success
+        shell: bash
+        run: |
+          if [ "${{ needs.rust-check-github.result }}" = "success" ] && [ "${{ needs.rust-check-github.outputs.failed }}" != "true" ]; then
+            exit 0
+          fi
+          if [ "${{ needs.rust-check-self-hosted.result }}" = "success" ]; then
+            echo "GitHub-hosted Rust checks failed; trusted self-hosted fallback passed."
+            exit 0
+          fi
+          echo "Rust checks did not pass on GitHub-hosted or an eligible self-hosted fallback."
+          exit 1
+
+  macos-rust-build-github:
+    runs-on: macos-14
+    outputs:
+      failed: ${{ steps.result.outputs.failed }}
+    steps:
+      - id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: rust
+        continue-on-error: true
+        uses: dtolnay/rust-toolchain@stable
+      - id: checks
+        name: Build and test macOS variants
+        continue-on-error: true
+        run: |
+          cargo build --workspace
+          cargo build -p opentermius-desktop --features macos-biometric
+          cargo test -p opentermius-desktop --features macos-biometric
+      - id: result
+        if: always()
+        shell: bash
+        run: |
+          failed=false
+          for outcome in \
+            "${{ steps.checkout.outcome }}" \
+            "${{ steps.rust.outcome }}" \
+            "${{ steps.checks.outcome }}"; do
+            if [ "$outcome" != "success" ]; then failed=true; fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+  macos-rust-build-self-hosted:
+    needs: macos-rust-build-github
+    if: >-
+      ${{ always() && needs.macos-rust-build-github.outputs.failed == 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, macOS]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,9 +144,72 @@ jobs:
       - name: Cargo test (macOS biometric implementation)
         run: cargo test -p opentermius-desktop --features macos-biometric
 
-  frontend-build:
-    # Fork PRs never share the long-lived Linux runner used by trusted workflows.
-    runs-on: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-22.04' || fromJSON('["self-hosted","linux","x64"]') }}
+  macos-rust-build:
+    needs: [macos-rust-build-github, macos-rust-build-self-hosted]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require GitHub-hosted success or trusted fallback success
+        shell: bash
+        run: |
+          if [ "${{ needs.macos-rust-build-github.result }}" = "success" ] && [ "${{ needs.macos-rust-build-github.outputs.failed }}" != "true" ]; then
+            exit 0
+          fi
+          if [ "${{ needs.macos-rust-build-self-hosted.result }}" = "success" ]; then
+            echo "GitHub-hosted macOS checks failed; trusted self-hosted fallback passed."
+            exit 0
+          fi
+          echo "macOS checks did not pass on GitHub-hosted or an eligible self-hosted fallback."
+          exit 1
+
+  frontend-build-github:
+    runs-on: ubuntu-22.04
+    outputs:
+      failed: ${{ steps.result.outputs.failed }}
+    steps:
+      - id: checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: node
+        continue-on-error: true
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - id: install
+        name: Install dependencies
+        continue-on-error: true
+        working-directory: desktop
+        run: npm ci
+      - id: checks
+        name: Typecheck, test and build
+        continue-on-error: true
+        working-directory: desktop
+        run: |
+          npx vue-tsc --noEmit
+          npm test
+          npm run build
+      - id: result
+        if: always()
+        shell: bash
+        run: |
+          failed=false
+          for outcome in \
+            "${{ steps.checkout.outcome }}" \
+            "${{ steps.node.outcome }}" \
+            "${{ steps.install.outcome }}" \
+            "${{ steps.checks.outcome }}"; do
+            if [ "$outcome" != "success" ]; then failed=true; fi
+          done
+          echo "failed=$failed" >> "$GITHUB_OUTPUT"
+
+  frontend-build-self-hosted:
+    needs: frontend-build-github
+    if: >-
+      ${{ always() && needs.frontend-build-github.outputs.failed == 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: [self-hosted, linux, x64]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,3 +229,21 @@ jobs:
       - name: Build
         working-directory: desktop
         run: npm run build
+
+  frontend-build:
+    needs: [frontend-build-github, frontend-build-self-hosted]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require GitHub-hosted success or trusted fallback success
+        shell: bash
+        run: |
+          if [ "${{ needs.frontend-build-github.result }}" = "success" ] && [ "${{ needs.frontend-build-github.outputs.failed }}" != "true" ]; then
+            exit 0
+          fi
+          if [ "${{ needs.frontend-build-self-hosted.result }}" = "success" ]; then
+            echo "GitHub-hosted frontend checks failed; trusted self-hosted fallback passed."
+            exit 0
+          fi
+          echo "Frontend checks did not pass on GitHub-hosted or an eligible self-hosted fallback."
+          exit 1
