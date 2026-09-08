@@ -1,6 +1,17 @@
 import { vi, beforeAll, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
 
+// Existing component tests assert full endpoint strings (identity resolution,
+// readiness, etc.). Address masking is a display-only concern tested in
+// isolation, so disable it by default in the test environment.
+try {
+  const raw = localStorage.getItem("clavyn-settings");
+  const parsed = raw ? JSON.parse(raw) : {};
+  localStorage.setItem("clavyn-settings", JSON.stringify({ ...parsed, maskAddresses: false }));
+} catch {
+  // localStorage may be unavailable in some environments; ignore.
+}
+
 // --- Mock crypto.randomUUID ---
 if (!globalThis.crypto) {
   (globalThis as any).crypto = {};

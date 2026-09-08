@@ -19,6 +19,7 @@ import {
   Shield,
   Lock,
   Clock,
+  EyeOff,
 } from "lucide-vue-next";
 
 const update = useUpdateStore();
@@ -168,6 +169,31 @@ function openReleases() {
               <span
                 class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
                 :class="settings.lockOnSleep ? 'translate-x-6' : 'translate-x-1'"
+              />
+            </button>
+          </div>
+
+          <div class="flex items-center gap-3 pt-4 border-t border-border">
+            <div class="flex h-9 w-9 items-center justify-center rounded-md bg-muted shrink-0">
+              <EyeOff class="size-4 text-muted-foreground" :stroke-width="1.75" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium">Mask host addresses</div>
+              <div class="text-[11px] text-muted-foreground mt-0.5">
+                Hides full host addresses (IPs and hostnames) across the app so they are not exposed at a glance. Turn off to show full addresses everywhere.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="settings.maskAddresses"
+              class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
+              :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted'"
+              @click="settings.setMaskAddresses(!settings.maskAddresses)"
+            >
+              <span
+                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
+                :class="settings.maskAddresses ? 'translate-x-6' : 'translate-x-1'"
               />
             </button>
           </div>

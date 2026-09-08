@@ -31,6 +31,7 @@ import {
   sshConfigurationKey,
   sshIdentityReady,
 } from "../lib/sshIdentity";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 
@@ -38,6 +39,7 @@ const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true
 const sftp = useSftpStore();
 const hosts = useHostsStore();
 const identities = useIdentitiesStore();
+const { maskAddress } = useMaskedAddress();
 
 const selectedHostId = ref("");
 const password = ref("");
@@ -346,7 +348,7 @@ async function upload() {
         v-if="sftp.connectedHost"
         class="ml-2 text-[12px] text-muted-foreground"
       >
-        {{ sftp.connectedHost.hostname }}:{{ sftp.connectedHost.port }}
+        {{ maskAddress(`${sftp.connectedHost.hostname}:${sftp.connectedHost.port}`) }}
       </span>
       <div class="flex-1" />
       <Button
@@ -383,7 +385,7 @@ async function upload() {
           >
             <option value="" disabled>Select a host...</option>
             <option v-for="host in hosts.hosts" :key="host.id" :value="host.id">
-              {{ host.label || host.hostname }} ({{ host.hostname }}:{{ host.port }})
+              {{ host.label || host.hostname }} ({{ maskAddress(`${host.hostname}:${host.port}`) }})
             </option>
           </select>
 
@@ -398,7 +400,7 @@ async function upload() {
             Missing SSH identity. Repair this host before connecting.
           </div>
           <p v-else-if="selectedEndpoint" class="text-[11px] font-mono text-muted-foreground">
-            {{ selectedEndpoint }}
+            {{ maskAddress(selectedEndpoint) }}
           </p>
 
           <template v-if="passwordRequired">
