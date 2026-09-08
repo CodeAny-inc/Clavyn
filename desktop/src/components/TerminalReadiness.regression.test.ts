@@ -41,7 +41,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   dispose() { this.textarea.remove(); }
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} } }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} onDidChangeResults() { return () => {}; } } }));
 
 const host = (id: string, password = false): Host => ({ id, label: id,
   hostname: `${id}.example.test`, port: 22, username: "deploy", tags: [],

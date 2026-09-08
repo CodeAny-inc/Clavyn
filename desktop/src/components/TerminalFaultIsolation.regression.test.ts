@@ -37,7 +37,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   dispose() { this.textarea.remove(); }
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} } }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} onDidChangeResults() { return () => {}; } } }));
 
 const passwordAuth: AuthMethod = { password: { credential_key: "fixture-only" } };
 const identity: Identity = { id: "shared", label: "Shared", username: "root", auth: "agent", tags: [] };

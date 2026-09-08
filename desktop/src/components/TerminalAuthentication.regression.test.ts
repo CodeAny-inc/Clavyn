@@ -26,7 +26,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
   dispose() { this.textarea.remove(); }
 } }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} } }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} onDidChangeResults() { return () => {}; } } }));
 const passwordMethod = { password: { credential_key: "fixture-metadata" } };
 const host = (overrides: Partial<Host> = {}): Host => ({
   id: "atlas", label: "Atlas", hostname: "atlas.example.test", port: 22,

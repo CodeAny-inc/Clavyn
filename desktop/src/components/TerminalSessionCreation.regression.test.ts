@@ -32,7 +32,7 @@ vi.mock("@xterm/xterm", () => ({
   },
 }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: class { fit() {} } }));
-vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} } }));
+vi.mock("@xterm/addon-search", () => ({ SearchAddon: class { clearDecorations() {} onDidChangeResults() { return () => {}; } } }));
 
 const host = (id: string, overrides: Partial<Host> = {}): Host => ({
   id, label: id, hostname: `${id}.example.test`, port: 22,

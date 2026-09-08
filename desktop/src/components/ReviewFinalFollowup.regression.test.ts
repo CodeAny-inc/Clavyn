@@ -36,6 +36,7 @@ vi.mock("@xterm/addon-search", () => ({ SearchAddon: class {
   clearDecorations() {}
   findNext() { return false; }
   findPrevious() { return false; }
+  onDidChangeResults() { return () => {}; }
 } }));
 
 const passwordMethod = { password: { credential_key: "legacy" } } as const;

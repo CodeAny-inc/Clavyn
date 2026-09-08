@@ -39,6 +39,8 @@ const searchCaseSensitive = ref(false);
 const searchRegex = ref(false);
 const searchWholeWord = ref(false);
 const searchInputRef = ref<HTMLInputElement | null>(null);
+const searchResultIndex = ref(-1);
+const searchResultCount = ref(0);
 const connectedEndpoint = ref<string | null>(props.pane.terminalType === "local" ? "Local shell" : null);
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -62,6 +64,12 @@ const isDragOver = computed(() => tabs.dragOverPaneId === props.pane.id);
 const busy = computed(() => connecting.value || listenerSetupPending.value);
 const status = computed(() => busy.value ? "Connecting" : props.pane.connected ? "Connected" : "Disconnected");
 const otherTabs = computed(() => tabs.tabs.filter(t => t.id !== props.tabId));
+const searchSummary = computed(() => {
+  if (!searchQuery.value) return "";
+  if (searchResultCount.value === 0) return "No results";
+  const index = searchResultIndex.value < 0 ? 0 : searchResultIndex.value;
+  return `${index + 1} of ${searchResultCount.value}`;
+});
 
 const configuredEndpoint = computed(() => {
   if (props.pane.terminalType === "local") return "Local shell";
@@ -295,11 +303,15 @@ onMounted(async () => {
   term = new Terminal({ fontSize: 13,
     fontFamily: "'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'Roboto Mono', ui-monospace, monospace",
     theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
-    cursorBlink: true, scrollback: 10000 });
+    cursorBlink: true, scrollback: 10000, allowProposedApi: true });
   fitAddon = new FitAddon();
   searchAddon = new SearchAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(searchAddon);
+  searchAddon.onDidChangeResults(event => {
+    searchResultIndex.value = event.resultIndex;
+    searchResultCount.value = event.resultCount;
+  });
   term.attachCustomKeyEventHandler(event => {
     const command = event.metaKey || event.ctrlKey;
     if (command && event.key.toLowerCase() === "f") {
@@ -360,6 +372,8 @@ function closeSearch() {
   activatePane();
   showSearch.value = false;
   searchAddon?.clearDecorations();
+  searchResultIndex.value = -1;
+  searchResultCount.value = 0;
   focusInput();
 }
 function toggleFullscreen() {
@@ -367,7 +381,12 @@ function toggleFullscreen() {
   ui.toggleFullscreen(props.pane.id);
 }
 function doSearch(previous = false) {
-  if (!searchQuery.value) { searchAddon?.clearDecorations(); return; }
+  if (!searchQuery.value) {
+    searchAddon?.clearDecorations();
+    searchResultIndex.value = -1;
+    searchResultCount.value = 0;
+    return;
+  }
   const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
     decorations: { matchOverviewRuler: "#4f9cf9", activeMatchColorOverviewRuler: "#f59e0b", matchBackground: "#264f78", activeMatchBackground: "#f59e0b80" } };
   try {
@@ -456,6 +475,7 @@ function selectAction(id: string) {
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
+      <span v-if="searchSummary" class="px-1 text-[11px] tabular-nums whitespace-nowrap select-none" :class="searchResultCount === 0 ? 'text-destructive' : 'text-muted-foreground'" aria-live="polite">{{ searchSummary }}</span>
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchRegex" aria-label="Regular expression" @click="searchRegex = !searchRegex; doSearch()"><Regex class="size-3.5" /></button>
