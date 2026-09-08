@@ -19,17 +19,17 @@ It's the default view on launch. Click `Hosts` in the sidebar, or `Cmd/Ctrl+K`
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs home
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs components --pretty
+    node scripts/verify/control-clavyn.mjs home
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs components --pretty
 
     # Connect the Atlas fixture host (double-click by visible label)
-    node control-clavyn.mjs connect "Atlas Production"
-    node control-clavyn.mjs network-summary --pretty   # expect a connect_ssh call
+    node scripts/verify/control-clavyn.mjs connect "Atlas Production"
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # expect a connect_ssh call
 
     # Add a host via the form
-    node control-clavyn.mjs click --name "Add Host"
-    node control-clavyn.mjs snapshot --pretty           # dialog open
+    node scripts/verify/control-clavyn.mjs click --name "Add Host"
+    node scripts/verify/control-clavyn.mjs snapshot --pretty           # dialog open
     # ... type into fields, then click Save
 
 ## Gotchas

@@ -11,13 +11,15 @@ allowed-tools:
 
 # verify-clavyn — UI verification skill for Clavyn
 
-You verify Clavyn's Tauri renderer with a small, composable CLI that drives the
-live app over the Chrome DevTools Protocol (via Playwright). This is the
-"lever": instead of writing throwaway scripts to click things, run one command.
+You verify Clavyn's Tauri renderer with a composable CLI that drives the live
+app over the Chrome DevTools Protocol (via Playwright). The canonical CLI and
+docs live in `scripts/verify/` (agent-agnostic). This skill is the Devin
+pointer; Claude Code and Cursor have equivalent pointers in
+`.claude/commands/` and `.cursor/rules/`.
 
 ## The CLI
 
-    node .devin/skills/verify-clavyn/control-clavyn.mjs <command> [options]
+    node scripts/verify/control-clavyn.mjs <command> [options]
 
 It holds a persistent Chromium + page (the "harness") so state survives across
 commands — `navigate` then `snapshot` then `screenshot` all share one session.
@@ -29,16 +31,13 @@ touch the network. Every command prints one JSON object on stdout; use
 ### Prerequisites (run once per machine)
 
     cd desktop && npm install                       # frontend deps + vite
-    cd ../desktop/e2e && npm install                # playwright (pinned 1.56.1)
+    cd desktop/e2e && npm install                    # playwright (pinned 1.56.1)
     npx playwright install chromium                 # or set CHROMIUM_EXECUTABLE_PATH
-
-Then start the dev server (the harness also auto-starts it if needed):
-
     cd desktop && npm run dev                       # serves http://127.0.0.1:1420
 
 ### Always start here
 
-    node .devin/skills/verify-clavyn/control-clavyn.mjs doctor --pretty
+    node scripts/verify/control-clavyn.mjs doctor --pretty
 
 `doctor` checks node, playwright, the browser binary, the dev server, the
 fixture, and the harness. Fix anything it flags before continuing.
@@ -49,9 +48,9 @@ When asked to verify a change in Clavyn, work in this order:
 
 1. **Bring up the app.** Ensure `npm run dev` is running (or let the harness
    auto-start it). Run `doctor`.
-2. **Reproduce / navigate.** Use `home`, `navigate <view>`, `open-command-palette`,
-   or keyboard `press`. See the Feature Map (`references/features/README.md`)
-   for how to reach any feature from a user's POV.
+2. **Reproduce / navigate.** Use `home`, `navigate <view>`,
+   `open-command-palette`, or keyboard `press`. See the Feature Map
+   (`scripts/verify/features/README.md`) for how to reach any feature.
 3. **Inspect.** `snapshot` (a11y tree), `components` (data-*/roles/labels),
    `info` (app version + current view), `console` (errors/warnings),
    `network-summary` (which Tauri commands were invoked).
@@ -65,41 +64,28 @@ When asked to verify a change in Clavyn, work in this order:
 ### Composing commands (the point of the lever)
 
     # Verify the Hosts view loads and lists fixture hosts with no console errors
-    node .devin/skills/verify-clavyn/control-clavyn.mjs home
-    node .devin/skills/verify-clavyn/control-clavyn.mjs snapshot --pretty
-    node .devin/skills/verify-clavyn/control-clavyn.mjs console --pretty
+    node scripts/verify/control-clavyn.mjs home
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs console --pretty
 
     # Verify a terminal session can be opened and echo round-trips
-    node .devin/skills/verify-clavyn/control-clavyn.mjs navigate terminal
-    node .devin/skills/verify-clavyn/control-clavyn.mjs new-session
-    node .devin/skills/verify-clavyn/control-clavyn.mjs send "echo ok"
-    node .devin/skills/verify-clavyn/control-clavyn.mjs fixture state --pretty
-    node .devin/skills/verify-clavyn/control-clavyn.mjs screenshot /tmp/term.png
+    node scripts/verify/control-clavyn.mjs navigate terminal
+    node scripts/verify/control-clavyn.mjs new-session
+    node scripts/verify/control-clavyn.mjs send "echo ok"
+    node scripts/verify/control-clavyn.mjs fixture state --pretty
+    node scripts/verify/control-clavyn.mjs screenshot /tmp/term.png
 
     # Verify SSH connect path against a fixture host
-    node .devin/skills/verify-clavyn/control-clavyn.mjs home
-    node .devin/skills/verify-clavyn/control-clavyn.mjs connect "Atlas Production"
-    node .devin/skills/verify-clavyn/control-clavyn.mjs network-summary --pretty
-
-### Driving a real Tauri build (not the Vite dev server)
-
-The harness defaults to the Vite dev server + fixture mock. To drive a real
-`tauri dev`/`tauri build` webview instead, expose its CDP endpoint and point
-the CLI at it:
-
-    CLAVYN_URL=http://127.0.0.1:<webview-port> CHROMIUM_EXECUTABLE_PATH=<chrome> \
-      node .devin/skills/verify-clavyn/control-clavyn.mjs doctor
-
-(For `tauri dev`, the webview is the same Vite URL, so the default works. For
-a packaged build, enable `webviewOptions.devtools` / remote debugging and set
-`CLAVYN_URL` to the webview's http endpoint.)
+    node scripts/verify/control-clavyn.mjs home
+    node scripts/verify/control-clavyn.mjs connect "Atlas Production"
+    node scripts/verify/control-clavyn.mjs network-summary --pretty
 
 ## Feature Map
 
-Before navigating, read `references/features/README.md` — it catalogs every
-major feature, what it does, how to reach it from the UI, and the exact
-`control-clavyn` commands to drive it. Use it to save context tokens instead
-of re-deriving how the app is laid out each time.
+Before navigating, read `scripts/verify/features/README.md` — it catalogs
+every major feature, what it does, how to reach it from the UI, and the exact
+CLI commands to drive it. Use it to save context tokens instead of re-deriving
+how the app is laid out each time.
 
 ## Rules
 
@@ -112,3 +98,5 @@ of re-deriving how the app is laid out each time.
   `--dry-run`. Use it when unsure.
 - If a command fails, read the `remedy` field, run `doctor`, and retry. Run
   `stop` + retry if the harness is wedged.
+- Full docs: `scripts/verify/README.md`. Command help:
+  `node scripts/verify/control-clavyn.mjs help`.

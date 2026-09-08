@@ -12,11 +12,11 @@ Global shortcuts handled in `App.vue`'s `handleKeydown`.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs press "Control+KeyK"     # open palette
-    node control-clavyn.mjs press "Control+Comma"    # go to settings
-    node control-clavyn.mjs press "Control+KeyN"     # new terminal tab
-    node control-clavyn.mjs press "Escape"           # close palette / exit fullscreen
-    node control-clavyn.mjs info --pretty            # confirm current view
+    node scripts/verify/control-clavyn.mjs press "Control+KeyK"     # open palette
+    node scripts/verify/control-clavyn.mjs press "Control+Comma"    # go to settings
+    node scripts/verify/control-clavyn.mjs press "Control+KeyN"     # new terminal tab
+    node scripts/verify/control-clavyn.mjs press "Escape"           # close palette / exit fullscreen
+    node scripts/verify/control-clavyn.mjs info --pretty            # confirm current view
 
 ## Gotchas
 

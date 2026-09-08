@@ -18,11 +18,11 @@ persist the current terminal layout; the play button to restore.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate workspaces
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs click --name "New Workspace"
+    node scripts/verify/control-clavyn.mjs navigate workspaces
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs click --name "New Workspace"
     # ... type name, confirm
-    node control-clavyn.mjs network-summary --pretty   # create_workspace / save_workspace
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # create_workspace / save_workspace
 
 ## Gotchas
 

@@ -22,12 +22,12 @@ opens it.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate settings
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs click --name "Check for updates"
-    node control-clavyn.mjs wait-settle
-    node control-clavyn.mjs network-summary --pretty   # check_for_updates call
-    node control-clavyn.mjs info --pretty               # app version
+    node scripts/verify/control-clavyn.mjs navigate settings
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs click --name "Check for updates"
+    node scripts/verify/control-clavyn.mjs wait-settle
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # check_for_updates call
+    node scripts/verify/control-clavyn.mjs info --pretty               # app version
 
 ## Gotchas
 

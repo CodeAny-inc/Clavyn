@@ -22,16 +22,16 @@ split → optionally "Open local shell".
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate terminal
-    node control-clavyn.mjs new-session              # local shell in a new tab
-    node control-clavyn.mjs send "echo hello"
-    node control-clavyn.mjs fixture state --pretty   # see writes + live session
-    node control-clavyn.mjs screenshot /tmp/term.png
+    node scripts/verify/control-clavyn.mjs navigate terminal
+    node scripts/verify/control-clavyn.mjs new-session              # local shell in a new tab
+    node scripts/verify/control-clavyn.mjs send "echo hello"
+    node scripts/verify/control-clavyn.mjs fixture state --pretty   # see writes + live session
+    node scripts/verify/control-clavyn.mjs screenshot /tmp/term.png
 
     # From Hosts: connect a fixture host, then interact
-    node control-clavyn.mjs home
-    node control-clavyn.mjs connect "Atlas Production"
-    node control-clavyn.mjs send "ls /srv"
+    node scripts/verify/control-clavyn.mjs home
+    node scripts/verify/control-clavyn.mjs connect "Atlas Production"
+    node scripts/verify/control-clavyn.mjs send "ls /srv"
 
 ## Gotchas
 

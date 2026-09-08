@@ -16,11 +16,11 @@ fingerprint. The trash icon removes an entry (after a browser confirm).
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate known-hosts
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs components --pretty
+    node scripts/verify/control-clavyn.mjs navigate known-hosts
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs components --pretty
     # Removal triggers a native confirm() — see gotchas.
-    node control-clavyn.mjs network-summary --pretty   # list_known_hosts
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # list_known_hosts
 
 ## Gotchas
 

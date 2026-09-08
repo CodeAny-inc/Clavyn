@@ -18,10 +18,10 @@ to edit; trash icon to delete.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate identities
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs click --name "Add Identity"
-    node control-clavyn.mjs snapshot --pretty        # dialog open
+    node scripts/verify/control-clavyn.mjs navigate identities
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs click --name "Add Identity"
+    node scripts/verify/control-clavyn.mjs snapshot --pretty        # dialog open
 
 ## Gotchas
 

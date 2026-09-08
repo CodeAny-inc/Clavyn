@@ -33,5 +33,5 @@ known_hosts
 vault.json
 
 # Agent verification harness — transient session + screenshots
-.devin/skills/verify-clavyn/.session.json
-.devin/skills/verify-clavyn/screenshot-*.png
+scripts/verify/.session.json
+scripts/verify/screenshot-*.png

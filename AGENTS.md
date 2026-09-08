@@ -21,13 +21,23 @@ over the Chrome DevTools Protocol (via Playwright). Use it after any frontend
 change to confirm behavior, capture evidence, and navigate features — it's
 far cheaper than writing throwaway scripts.
 
-    node .devin/skills/verify-clavyn/control-clavyn.mjs doctor --pretty
+    node scripts/verify/control-clavyn.mjs doctor --pretty
 
-The CLI (`control-clavyn.mjs`) holds a persistent Chromium + page (the
-"harness") so state survives across commands. It loads the Vite dev server
-with `desktop/e2e/tauri-fixture.js` mocking the full Tauri IPC surface, so
-SSH/SFTP/vault calls are deterministic and never touch the network. Every
-command prints one JSON object; errors include a `remedy` field.
+The CLI holds a persistent Chromium + page (the "harness") so state survives
+across commands. It loads the Vite dev server with `desktop/e2e/tauri-fixture.js`
+mocking the full Tauri IPC surface, so SSH/SFTP/vault calls are deterministic
+and never touch the network. Every command prints one JSON object; errors
+include a `remedy` field.
+
+The canonical CLI + docs live in `scripts/verify/` (agent-agnostic). Thin
+pointer files for specific agents all reference that location:
+
+| Agent | Pointer |
+|-------|---------|
+| Universal / Codex | `AGENTS.md` (this file) |
+| Devin | `.devin/skills/verify-clavyn/SKILL.md` |
+| Claude Code | `.claude/commands/verify-clavyn.md` |
+| Cursor | `.cursor/rules/verify-clavyn.mdc` |
 
 Prerequisites (once per machine):
 
@@ -41,11 +51,9 @@ Common commands: `doctor`, `status`, `info`, `snapshot`, `screenshot`,
 `network-summary`, `fixture state`, `cleanup`, `reset`, `stop`. Run with no
 args for full `--help`. Destructive commands accept `--dry-run`.
 
-The `verify-clavyn` Devin skill (`.devin/skills/verify-clavyn/SKILL.md`)
-documents the full workflow. The **Feature Map**
-(`.devin/skills/verify-clavyn/references/features/README.md`) catalogs every
-view, what it does, how to reach it, and the exact CLI commands to drive it —
-read it before navigating to save context tokens.
+The **Feature Map** (`scripts/verify/features/README.md`) catalogs every view,
+what it does, how to reach it, and the exact CLI commands to drive it — read
+it before navigating to save context tokens. Full docs: `scripts/verify/README.md`.
 
 Notes:
 - The fixture mocks the transport; this verifies the **renderer**, not

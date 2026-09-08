@@ -1,0 +1,47 @@
+---
+description: Verify Clavyn's Tauri UI with the composable control-clavyn CLI (CDP/Playwright). Use after frontend changes to navigate, inspect, interact, and capture evidence.
+globs:
+  - "desktop/src/**/*"
+  - "desktop/src-tauri/src/**/*"
+  - "scripts/verify/**/*"
+alwaysApply: false
+---
+
+# Verifying Clavyn UI changes
+
+After making changes to the Clavyn frontend, verify behavior with the
+composable CLI at `scripts/verify/control-clavyn.mjs`. It drives the live
+renderer over CDP (via Playwright) with a persistent harness server, so
+state survives across commands.
+
+## Prerequisites (once per machine)
+
+```bash
+cd desktop && npm install
+cd desktop/e2e && npm install && npx playwright install chromium
+cd desktop && npm run dev   # Vite dev server on :1420
+```
+
+## Workflow
+
+1. `node scripts/verify/control-clavyn.mjs doctor --pretty` — check environment
+2. `node scripts/verify/control-clavyn.mjs home` / `navigate <view>` — navigate
+3. `node scripts/verify/control-clavyn.mjs snapshot --pretty` — a11y tree
+4. `node scripts/verify/control-clavyn.mjs click --name "text"` / `type` / `press` — interact
+5. `node scripts/verify/control-clavyn.mjs screenshot /tmp/proof.png` — evidence
+6. `node scripts/verify/control-clavyn.mjs console --pretty` — must be clean (no errors)
+7. `node scripts/verify/control-clavyn.mjs stop` — tear down when done
+
+## Feature Map
+
+Read `scripts/verify/features/README.md` before navigating — it catalogs
+every view, what it does, how to reach it, and the exact CLI commands.
+
+## Rules
+
+- Never assert "it works" without a `snapshot`/`screenshot` and a clean
+  `console` as evidence.
+- The fixture mocks SSH/SFTP/vault — this verifies the **renderer**, not
+  end-to-end SSH. Core Rust logic is verified with `cargo test -p clavyn-core`.
+- Destructive commands accept `--dry-run`.
+- Full docs: `scripts/verify/README.md`. Help: `node scripts/verify/control-clavyn.mjs help`.

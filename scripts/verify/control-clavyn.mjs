@@ -27,7 +27,7 @@ import http from "node:http";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const REPO_ROOT = resolve(__dirname, "../../..");
+const REPO_ROOT = resolve(__dirname, "../..");
 const require = createRequire(import.meta.url);
 
 // ---------------------------------------------------------------------------
@@ -522,7 +522,7 @@ function parseArgs(argv) {
 const HELP = `control-clavyn — agent-friendly CLI for driving & verifying the Clavyn Tauri app.
 
 USAGE
-  node control-clavyn.mjs <command> [options]
+  node scripts/verify/control-clavyn.mjs <command> [options]
 
 The harness holds a Chromium browser + the Clavyn renderer (loaded from the
 Vite dev server with tauri-fixture.js mocking Tauri IPC). State persists
@@ -592,6 +592,13 @@ ENVIRONMENT
   CLAVYN_SLOW_MO         Slow down actions by N ms (debugging).
   CLAVYN_AUTO_START_DEV=0  Don't auto-start Vite if :1420 is down.
   CLAVYN_VIEWPORT_W/H    Browser viewport (default 1440x900).
+
+This CLI is agent-agnostic. Agent-specific pointer files:
+  AGENTS.md (root)          — universal / Codex
+  .devin/skills/verify-clavyn/SKILL.md — Devin
+  .claude/commands/verify-clavyn.md    — Claude Code
+  .cursor/rules/verify-clavyn.mdc       — Cursor
+Full docs: scripts/verify/README.md. Feature map: scripts/verify/features/README.md.
 `;
 
 const DESTRUCTIVE = new Set(["stop", "reset", "cleanup", "connect"]);
@@ -655,12 +662,12 @@ async function main() {
       case "cleanup": res = await client("cleanup"); break;
       case "reset": res = await client("reset"); break;
       default:
-        return fail(`Unknown command '${cmd}'.`, "Run `control-clavyn.mjs help` to see all commands.");
+        return fail(`Unknown command '${cmd}'.`, "Run `node scripts/verify/control-clavyn.mjs help` to see all commands.");
     }
     out(res, pretty);
     if (res && res.ok === false) process.exit(1);
   } catch (e) {
-    fail(String(e.message ?? e), "Run `control-clavyn.mjs doctor` to diagnose, or `control-clavyn.mjs stop` then retry.");
+    fail(String(e.message ?? e), "Run `node scripts/verify/control-clavyn.mjs doctor` to diagnose, or `node scripts/verify/control-clavyn.mjs stop` then retry.");
   }
 }
 
@@ -713,7 +720,7 @@ async function runDoctor(pretty) {
       const body = await res.json();
       report.checks.harness = { ok: true, port: sess.port, ready: body.ready };
     } catch {
-      report.checks.harness = { ok: false, remedy: "Stale session file. Run `control-clavyn.mjs stop` then retry." };
+      report.checks.harness = { ok: false, remedy: "Stale session file. Run `node scripts/verify/control-clavyn.mjs stop` then retry." };
     }
   } else {
     report.checks.harness = { ok: false, remedy: "Not running yet — it auto-starts on the next command, or run `serve`." };
@@ -724,4 +731,4 @@ async function runDoctor(pretty) {
   if (!report.ok) process.exit(1);
 }
 
-main().catch(e => fail(String(e), "Run `control-clavyn.mjs doctor`."));
+main().catch(e => fail(String(e), "Run `node scripts/verify/control-clavyn.mjs doctor`."));

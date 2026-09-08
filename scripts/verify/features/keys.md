@@ -19,12 +19,12 @@ key's eye icon to reveal its public key; copy icon to copy; trash to delete.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate keys
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs click --name "Generate Key"
-    node control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs navigate keys
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs click --name "Generate Key"
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
     # ... type label, confirm
-    node control-clavyn.mjs network-summary --pretty   # generate_key call
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # generate_key call
 
 ## Gotchas
 

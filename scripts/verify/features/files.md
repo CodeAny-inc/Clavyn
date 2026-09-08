@@ -18,12 +18,12 @@ SFTP". The fixture's `sftp_list_dir` returns `deployments/`, `logs/`,
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate files
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs click --name "Connect to SFTP"
-    node control-clavyn.mjs wait-settle
-    node control-clavyn.mjs components --pretty        # directory entries
-    node control-clavyn.mjs network-summary --pretty   # sftp_* calls
+    node scripts/verify/control-clavyn.mjs navigate files
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs click --name "Connect to SFTP"
+    node scripts/verify/control-clavyn.mjs wait-settle
+    node scripts/verify/control-clavyn.mjs components --pretty        # directory entries
+    node scripts/verify/control-clavyn.mjs network-summary --pretty   # sftp_* calls
 
 ## Gotchas
 

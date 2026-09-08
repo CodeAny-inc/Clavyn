@@ -23,9 +23,9 @@ prompted to create it. If locked, enter passphrase (or use biometric on macOS).
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs navigate vault
-    node control-clavyn.mjs snapshot --pretty
-    node control-clavyn.mjs info --pretty            # vault status via store
+    node scripts/verify/control-clavyn.mjs navigate vault
+    node scripts/verify/control-clavyn.mjs snapshot --pretty
+    node scripts/verify/control-clavyn.mjs info --pretty            # vault status via store
     # The fixture reports vault_is_initialized=true, is_vault_unlocked=true,
     # biometric_available=false — so the unlocked state is the default.
 

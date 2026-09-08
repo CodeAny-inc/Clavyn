@@ -7,8 +7,8 @@ this instead of re-reading components each time — it saves context tokens.
 The app is a single-window Tauri 2 + Vue 3 desktop app. A persistent left
 sidebar (`AppSidebar`) switches between views. A command palette
 (`Cmd/Ctrl+K`) jumps anywhere. The renderer is driven via
-`control-clavyn.mjs` against the Vite dev server with `tauri-fixture.js`
-mocking Tauri IPC.
+`scripts/verify/control-clavyn.mjs` against the Vite dev server with
+`tauri-fixture.js` mocking Tauri IPC.
 
 ## Views at a glance
 
@@ -35,7 +35,7 @@ mocking Tauri IPC.
 
 ## Driving conventions
 
-- **Navigate to a view:** `node control-clavyn.mjs navigate <view>` (view ids:
+- **Navigate to a view:** `node scripts/verify/control-clavyn.mjs navigate <view>` (view ids:
   `hosts terminal files workspaces identities keys known-hosts vault settings`).
 - **Inspect before acting:** `snapshot --pretty` gives the a11y tree;
   `components --pretty` lists `data-*`/roles/labels.

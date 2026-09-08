@@ -17,12 +17,12 @@ Escape or clicking away closes it.
 
 ## Driving it with control-clavyn
 
-    node control-clavyn.mjs open-command-palette
-    node control-clavyn.mjs snapshot --pretty        # dialog with command list
-    node control-clavyn.mjs type "term"
-    node control-clavyn.mjs press Enter              # runs "Go to Terminal"
-    node control-clavyn.mjs info --pretty            # view should be terminal
-    node control-clavyn.mjs close-command-palette
+    node scripts/verify/control-clavyn.mjs open-command-palette
+    node scripts/verify/control-clavyn.mjs snapshot --pretty        # dialog with command list
+    node scripts/verify/control-clavyn.mjs type "term"
+    node scripts/verify/control-clavyn.mjs press Enter              # runs "Go to Terminal"
+    node scripts/verify/control-clavyn.mjs info --pretty            # view should be terminal
+    node scripts/verify/control-clavyn.mjs close-command-palette
 
 ## Gotchas
 
