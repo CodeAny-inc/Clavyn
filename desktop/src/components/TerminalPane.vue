@@ -316,6 +316,11 @@ onMounted(async () => {
     searchResultCount.value = event.resultCount;
   });
   term.attachCustomKeyEventHandler(event => {
+    // xterm calls stopPropagation() for Escape by default, which prevents the
+    // window-level Escape handler in App.vue from firing. Return false while
+    // fullscreen so the event bubbles up and exits fullscreen without being
+    // sent to the remote shell.
+    if (event.key === "Escape" && isFullscreen.value) return false;
     const command = event.metaKey || event.ctrlKey;
     if (command && event.key.toLowerCase() === "f") {
       if (event.type === "keydown") { event.preventDefault(); openSearch(); }

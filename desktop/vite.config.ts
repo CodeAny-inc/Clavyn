@@ -22,7 +22,7 @@ function tauriFixtureDevPlugin() {
     },
     transformIndexHtml(html: string) {
       if (!fixtureCode) return html;
-      const injection = `<script>window.__TAURI_INTERNALS__||(${fixtureCode});</script>`;
+      const injection = `<script>if(!window.__TAURI_INTERNALS__){${fixtureCode}}</script>`;
       return html.replace("</head>", `${injection}\n  </head>`);
     },
   };
