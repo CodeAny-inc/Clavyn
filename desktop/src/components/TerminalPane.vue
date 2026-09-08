@@ -445,7 +445,7 @@ function selectAction(id: string) {
 
 <template>
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
-    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '']"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
     @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
@@ -483,16 +483,32 @@ function selectAction(id: string) {
       <button class="pane-button" aria-label="Next match" @click="doSearch()"><ChevronDown class="size-3.5" /></button>
       <button class="pane-button" aria-label="Close search" @click="closeSearch"><X class="size-3.5" /></button>
     </div>
-    <div v-if="isDragOver && tabs.draggedPaneId && !isDragging" class="pointer-events-none absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-primary bg-primary/20">
-      <span class="rounded bg-primary px-3 py-2 text-xs text-primary-foreground">{{ tabs.dragOverPosition === 'center' ? 'Swap pane positions' : `Move pane to ${tabs.dragOverPosition}` }}</span>
+    <div v-if="isDragOver && tabs.draggedPaneId && !isDragging" class="drop-overlay" aria-hidden="true">
+      <div class="drop-zone drop-zone-top" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'top' }"><span>Split above</span></div>
+      <div class="drop-zone drop-zone-bottom" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'bottom' }"><span>Split below</span></div>
+      <div class="drop-zone drop-zone-left" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'left' }"><span>Split left</span></div>
+      <div class="drop-zone drop-zone-right" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'right' }"><span>Split right</span></div>
+      <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>Swap</span></div>
     </div>
   </div>
 </template>
 
 <style scoped>
 .terminal-pane { background: var(--terminal-background); }
+.pane-dragging { @apply opacity-50; }
 .pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-muted-foreground; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
 .pane-header-active { background: var(--terminal-toolbar-active); color: hsl(var(--foreground)); box-shadow: inset 2px 0 var(--workspace-accent); }
 .pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
+/* Directional drop zones: four edges split the pane, the center swaps it.
+   The overlay never captures pointer events so dragover/drop reach the pane. */
+.drop-overlay { @apply pointer-events-none absolute inset-0 z-30; }
+.drop-zone { @apply absolute flex items-center justify-center text-[11px] font-medium text-primary-foreground opacity-0 transition-opacity duration-100; }
+.drop-zone span { @apply rounded-md bg-primary/70 px-2 py-1 shadow; }
+.drop-zone-active { @apply opacity-100; }
+.drop-zone-top { @apply left-0 right-0 top-0 h-1/3 bg-primary/25; }
+.drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3 bg-primary/25; }
+.drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3 bg-primary/25; }
+.drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3 bg-primary/25; }
+.drop-zone-center { @apply inset-1/3 rounded-md bg-primary/35; }
 </style>

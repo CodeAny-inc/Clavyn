@@ -118,3 +118,61 @@ describe("persistent terminal workspace", () => {
     expect(tree.ratio).toBe(0.9);
   });
 });
+
+describe("drag a pane between tabs (Termius-style split-on-drop)", () => {
+  it("extracts a split pane into its own tab without closing its session", () => {
+    const store = useTabsStore();
+    store.newTab(host("atlas"));
+    const first = store.activePaneId!;
+    store.setPaneConnected(first, "keep-me");
+    store.splitPane(first, "horizontal", host("orion"));
+    store.startDrag(first);
+    store.extractPaneToNewTab(first);
+    // The pane keeps its live session and is now the sole pane of a new tab.
+    expect(store.tabs).toHaveLength(2);
+    expect(collectPanes(store.tabs[1].tree)).toEqual([expect.objectContaining({ id: first, sessionId: "keep-me", connected: true })]);
+    expect(store.activeTabId).toBe(store.tabs[1].id);
+    expect(store.activePaneId).toBe(first);
+    expect(closes()).toEqual([]);
+  });
+  it("extracts the sole pane of a tab by removing the source tab", () => {
+    const store = useTabsStore();
+    store.newTab(host("atlas"));
+    const first = store.activePaneId!;
+    store.setPaneConnected(first, "keep-me");
+    store.newTab(host("orion"));
+    store.startDrag(first);
+    store.extractPaneToNewTab(first);
+    // The atlas pane left its (sole-pane) source tab, which is now gone.
+    expect(store.tabs).toHaveLength(2);
+    expect(store.tabs.some(t => collectPanes(t.tree).some(p => p.id === first && p.sessionId === "keep-me"))).toBe(true);
+    expect(closes()).toEqual([]);
+  });
+  it("ignores extract for an unknown pane id", () => {
+    const store = useTabsStore();
+    store.newTab();
+    const before = JSON.stringify(store.tabs);
+    store.extractPaneToNewTab("missing-pane");
+    expect(JSON.stringify(store.tabs)).toBe(before);
+    expect(closes()).toEqual([]);
+  });
+  it("clears the tab drop highlight and drag state after a drop", () => {
+    const store = useTabsStore();
+    store.newTab(host("atlas"));
+    const first = store.activePaneId!;
+    store.newTab(host("orion"));
+    store.startDrag(first);
+    store.setDragOverTab(store.tabs[1].id);
+    expect(store.dragOverTabId).toBe(store.tabs[1].id);
+    store.movePaneToTab(first, store.tabs[1].id);
+    expect(store.draggedPaneId).toBeNull();
+    expect(store.dragOverTabId).toBeNull();
+    expect(closes()).toEqual([]);
+  });
+  it("setDragOverTab is a no-op when no pane is being dragged", () => {
+    const store = useTabsStore();
+    store.newTab();
+    store.setDragOverTab(store.tabs[0].id);
+    expect(store.dragOverTabId).toBeNull();
+  });
+});
