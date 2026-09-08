@@ -43,6 +43,7 @@ vi.mock("@xterm/addon-search", () => ({
     clearDecorations() {}
     findNext() { return true; }
     findPrevious() { return true; }
+    onDidChangeResults() { return () => {}; }
   },
 }));
 
