@@ -29,15 +29,20 @@ mocking the full Tauri IPC surface, so SSH/SFTP/vault calls are deterministic
 and never touch the network. Every command prints one JSON object; errors
 include a `remedy` field.
 
-The canonical CLI + docs live in `scripts/verify/` (agent-agnostic). Thin
-pointer files for specific agents all reference that location:
+The canonical CLI + docs live in `scripts/verify/` (agent-agnostic). The
+canonical Agent Skill (following the agentskills.io standard) lives at
+`.agents/skills/verify-clavyn/SKILL.md` — this is the cross-agent entry point
+supported by VS Code, Copilot, Claude Code, Cursor, Codex, Gemini CLI, Goose,
+OpenHands, and more. Agent-specific pointer files reference that canonical
+skill:
 
-| Agent | Pointer |
-|-------|---------|
-| Universal / Codex | `AGENTS.md` (this file) |
-| Devin | `.devin/skills/verify-clavyn/SKILL.md` |
-| Claude Code | `.claude/commands/verify-clavyn.md` |
-| Cursor | `.cursor/rules/verify-clavyn.mdc` |
+| Agent | Pointer | Convention |
+|-------|---------|------------|
+| **All agentskills.io-compatible** | `.agents/skills/verify-clavyn/SKILL.md` | Standard Agent Skills (agentskills.io) |
+| Universal / Codex | `AGENTS.md` (this file) | De facto standard |
+| Devin | `.devin/skills/verify-clavyn/SKILL.md` | Devin skills |
+| Claude Code | `.claude/commands/verify-clavyn.md` | Slash commands |
+| Cursor | `.cursor/rules/verify-clavyn.mdc` | Rules |
 
 Prerequisites (once per machine):
 

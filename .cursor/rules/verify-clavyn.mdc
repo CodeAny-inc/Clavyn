@@ -4,44 +4,31 @@ globs:
   - "desktop/src/**/*"
   - "desktop/src-tauri/src/**/*"
   - "scripts/verify/**/*"
+  - ".agents/skills/verify-clavyn/**/*"
 alwaysApply: false
 ---
 
 # Verifying Clavyn UI changes
 
-After making changes to the Clavyn frontend, verify behavior with the
-composable CLI at `scripts/verify/control-clavyn.mjs`. It drives the live
-renderer over CDP (via Playwright) with a persistent harness server, so
-state survives across commands.
+The canonical Agent Skill lives at `.agents/skills/verify-clavyn/SKILL.md`
+(standard agentskills.io location). This Cursor rule is a thin pointer so
+Cursor's rules discovery finds it.
 
-## Prerequisites (once per machine)
+## Quick reference
 
 ```bash
-cd desktop && npm install
-cd desktop/e2e && npm install && npx playwright install chromium
-cd desktop && npm run dev   # Vite dev server on :1420
+node scripts/verify/control-clavyn.mjs doctor --pretty   # always start here
+node scripts/verify/control-clavyn.mjs home
+node scripts/verify/control-clavyn.mjs navigate <view>
+node scripts/verify/control-clavyn.mjs snapshot --pretty
+node scripts/verify/control-clavyn.mjs screenshot /tmp/proof.png
+node scripts/verify/control-clavyn.mjs console --pretty
+node scripts/verify/control-clavyn.mjs stop
 ```
 
-## Workflow
+## Full instructions
 
-1. `node scripts/verify/control-clavyn.mjs doctor --pretty` — check environment
-2. `node scripts/verify/control-clavyn.mjs home` / `navigate <view>` — navigate
-3. `node scripts/verify/control-clavyn.mjs snapshot --pretty` — a11y tree
-4. `node scripts/verify/control-clavyn.mjs click --name "text"` / `type` / `press` — interact
-5. `node scripts/verify/control-clavyn.mjs screenshot /tmp/proof.png` — evidence
-6. `node scripts/verify/control-clavyn.mjs console --pretty` — must be clean (no errors)
-7. `node scripts/verify/control-clavyn.mjs stop` — tear down when done
-
-## Feature Map
-
-Read `scripts/verify/features/README.md` before navigating — it catalogs
-every view, what it does, how to reach it, and the exact CLI commands.
-
-## Rules
-
-- Never assert "it works" without a `snapshot`/`screenshot` and a clean
-  `console` as evidence.
-- The fixture mocks SSH/SFTP/vault — this verifies the **renderer**, not
-  end-to-end SSH. Core Rust logic is verified with `cargo test -p clavyn-core`.
-- Destructive commands accept `--dry-run`.
-- Full docs: `scripts/verify/README.md`. Help: `node scripts/verify/control-clavyn.mjs help`.
+Read `.agents/skills/verify-clavyn/SKILL.md` for the complete workflow,
+examples, gotchas, and rules. Read `scripts/verify/features/README.md` before
+navigating — it catalogs every view and the exact CLI commands to drive it.
+Full CLI docs: `scripts/verify/README.md`.
