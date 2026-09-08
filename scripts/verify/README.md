@@ -1,9 +1,13 @@
-# Clavyn UI Verification CLI
+# Clavyn Verification Tools
 
-A composable, agent-friendly CLI for driving and verifying the Clavyn Tauri
-app's webview via the Chrome DevTools Protocol (through Playwright). Any AI
-agent (Devin, Claude Code, Cursor, Codex, Copilot, ...) can use it — run one
-command per action instead of writing throwaway scripts.
+Agent-friendly CLIs for verifying the Clavyn Tauri app. Any AI agent (Devin,
+Claude Code, Cursor, Codex, Copilot, ...) can use them — run one command per
+action instead of writing throwaway scripts.
+
+- **`control-clavyn.mjs`** — drives the live Tauri renderer over CDP
+  (Playwright) to navigate, inspect, interact, and capture evidence.
+- **`check-comments.mjs`** — scans source for history/attribution comments
+  that should be documentation instead. Gates commits.
 
 ## Quick start
 
@@ -57,6 +61,28 @@ you what to do next. Destructive commands accept `--dry-run`.
 
 Run `node scripts/verify/control-clavyn.mjs help` for full usage.
 
+## Comment hygiene — `check-comments.mjs`
+
+Scans source (`.rs`, `.ts`, `.tsx`, `.vue`, `.js`, `.mjs`) for comments that
+narrate history or attribute work instead of documenting the code. Comments
+must describe the code as it exists now — never "This implements…", "Added…",
+"Changed from X to Y", "John asked for this", "per discussion", "PR #5".
+
+```bash
+node scripts/verify/check-comments.mjs                 # scan tracked source
+node scripts/verify/check-comments.mjs --pretty         # human-readable
+node scripts/verify/check-comments.mjs --staged         # only git-staged files
+node scripts/verify/check-comments.mjs <path> [path…]   # scan specific paths
+```
+
+Exits `0` if clean, `1` if violations found. Each finding includes a `remedy`
+field. Fix or delete every violating comment before committing. See
+`AGENTS.md` "Comment hygiene (enforced)" for the full policy.
+
+Escape hatches (use sparingly): append `// check-comments:allow` to suppress
+a line, or add `// check-comments:skip-file` to exclude a file (e.g. tooling
+that documents the patterns by example).
+
 ## Feature Map
 
 Before navigating, read [`features/README.md`](features/README.md) — it
@@ -66,20 +92,24 @@ re-deriving how the app is laid out each time.
 
 ## Agent integration
 
-This CLI is agent-agnostic. The canonical Agent Skill (following the
-[agentskills.io](https://agentskills.io) standard) lives at
-`.agents/skills/verify-clavyn/SKILL.md` — this is the cross-agent entry point
-supported by VS Code, Copilot, Claude Code, Cursor, Codex, Gemini CLI, Goose,
-OpenHands, and more. Agent-specific pointer files reference that canonical
-skill:
+These CLIs are agent-agnostic. The canonical Agent Skills (following the
+[agentskills.io](https://agentskills.io) standard) live in `.agents/skills/`
+— the cross-agent entry point supported by VS Code, Copilot, Claude Code,
+Cursor, Codex, Gemini CLI, Goose, OpenHands, and more. Agent-specific pointer
+files reference the canonical skills:
 
-| Agent | Pointer file | Convention |
-|-------|-------------|------------|
-| **All agentskills.io-compatible** | `.agents/skills/verify-clavyn/SKILL.md` | Standard Agent Skills (agentskills.io) |
-| Universal / Codex | `AGENTS.md` (root) | De facto standard |
-| Devin | `.devin/skills/verify-clavyn/SKILL.md` | Devin skills |
-| Claude Code | `.claude/commands/verify-clavyn.md` | Slash commands |
-| Cursor | `.cursor/rules/verify-clavyn.mdc` | Rules |
+| Skill | Canonical | Agent pointers |
+|-------|-----------|----------------|
+| verify-clavyn (UI) | `.agents/skills/verify-clavyn/SKILL.md` | `AGENTS.md`, `.devin/skills/`, `.claude/commands/`, `.cursor/rules/` |
+| check-comments (comment hygiene) | `.agents/skills/check-comments/SKILL.md` | `AGENTS.md`, `.devin/skills/`, `.claude/commands/`, `.cursor/rules/` |
+
+| Agent | Pointer file convention |
+|-------|--------------------------|
+| **All agentskills.io-compatible** | `.agents/skills/<name>/SKILL.md` (standard) |
+| Universal / Codex | `AGENTS.md` (root) |
+| Devin | `.devin/skills/<name>/SKILL.md` |
+| Claude Code | `.claude/commands/<name>.md` |
+| Cursor | `.cursor/rules/<name>.mdc` |
 
 ## Driving a real Tauri build
 

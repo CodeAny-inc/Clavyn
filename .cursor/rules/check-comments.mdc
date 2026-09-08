@@ -1,0 +1,30 @@
+---
+description: Scan Clavyn source for history/attribution comments that should be documentation instead. Use after writing or editing code to catch and fix violating comments before committing.
+globs:
+  - "desktop/src/**/*"
+  - "desktop/src-tauri/src/**/*"
+  - "core/src/**/*"
+  - "scripts/verify/**/*"
+  - ".agents/skills/check-comments/**/*"
+alwaysApply: false
+---
+
+# Comment hygiene for Clavyn
+
+The canonical Agent Skill lives at `.agents/skills/check-comments/SKILL.md`
+(standard agentskills.io location). This Cursor rule is a thin pointer so
+Cursor's rules discovery finds it.
+
+## Quick reference
+
+```bash
+node scripts/verify/check-comments.mjs --pretty     # scan tracked source
+node scripts/verify/check-comments.mjs --staged     # only staged files
+node scripts/verify/check-comments.mjs <path>       # scan a path
+```
+
+## Full instructions
+
+Read `.agents/skills/check-comments/SKILL.md` for the full rule, the fix
+workflow, escape hatches, and gotchas. See `AGENTS.md` "Comment hygiene
+(enforced)" for the policy. Fix every finding before committing.

@@ -13,6 +13,8 @@
 - Frontend unit tests: `cd desktop && npm test` (Vitest).
 - Browser regression suite: `cd desktop/e2e && npm test` (Playwright + tauri-fixture.js mock).
 - **UI verification with the agent CLI** — see "Agent UI verification" below.
+- **Comment hygiene check** — `node scripts/verify/check-comments.mjs` before
+  committing. See "Comment hygiene (enforced)" below.
 
 ## Agent UI verification
 
@@ -43,6 +45,21 @@ skill:
 | Devin | `.devin/skills/verify-clavyn/SKILL.md` | Devin skills |
 | Claude Code | `.claude/commands/verify-clavyn.md` | Slash commands |
 | Cursor | `.cursor/rules/verify-clavyn.mdc` | Rules |
+
+## Comment hygiene verification
+
+The comment hygiene rule (see "Comment hygiene (enforced)" below) is enforced
+by `scripts/verify/check-comments.mjs`, which has its own canonical Agent
+Skill at `.agents/skills/check-comments/SKILL.md` with the same multi-agent
+pointer pattern:
+
+| Agent | Pointer | Convention |
+|-------|---------|------------|
+| **All agentskills.io-compatible** | `.agents/skills/check-comments/SKILL.md` | Standard Agent Skills (agentskills.io) |
+| Universal / Codex | `AGENTS.md` (this file) | De facto standard |
+| Devin | `.devin/skills/check-comments/SKILL.md` | Devin skills |
+| Claude Code | `.claude/commands/check-comments.md` | Slash commands |
+| Cursor | `.cursor/rules/check-comments.mdc` | Rules |
 
 Prerequisites (once per machine):
 
@@ -171,6 +188,43 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
 - Host key mismatches never auto-accept; surface to user.
 - No secrets in logs; no plaintext keys on disk; vault is the only persisted form.
 - Pin dependency versions (no floating `latest` / `*`).
+
+## Comment hygiene (enforced)
+Code comments must document the code as it exists now — what it does, why it
+behaves this way, and any non-obvious invariants or gotchas. Comments must
+**never** narrate history or attribute work.
+
+A comment is a violation if it reads like a changelog entry, a request log,
+or a story about how the code got here. Rewrite or delete violating comments
+before committing; do not leave them in the codebase.
+
+**Forbidden (history / attribution):**
+- Narrating a completed change: "This implements the SSH feature",
+  "Added biometric support", "Changed from X to Y because…", "Removed the
+  old loop", "Replaced the mock with a real call".
+- Attribution to people or requests: "John asked for this", "requested by
+  the client", "per discussion with the PM", "as discussed", "stakeholder
+  wants", "was asked to".
+- Temporal history: "was previously", "used to be", "originally", "before
+  this change", "after the refactor".
+- External tracking refs inside code: "PR #5", "issue #12", "JIRA-123",
+  "fixes #8", "CVE-2024-xxxx". (Keep these in commit messages and PR
+  descriptions, not in source comments.)
+- Workaround/hack narratives: "workaround for bug X", "hack to work around",
+  "TODO: remove when Y ships".
+
+**Required (documentation):**
+- Explain intent and invariants: "Reject changed accounts before submitting
+  credentials to avoid authenticating the wrong identity."
+- Document non-obvious behavior: "Treat that expected [event] … guard
+  reject every retry, even after the filesystem problem is fixed."
+- Explain why, in present tense: "Uses AES-256-GCM with a random nonce
+  because the vault is the only persisted form of secrets."
+
+**Enforcement:** Run `node scripts/verify/check-comments.mjs` (or invoke the
+`check-comments` Agent Skill) before committing. It scans source files and
+reports violations with a suggested fix. The check is part of the verification
+workflow — fix every finding before considering a task done.
 
 ## Git conventions
 - NEVER mention, attribute, or add a co-author trailer for Devin or any AI
