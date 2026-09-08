@@ -1,50 +1,37 @@
 // Address obfuscation for display. The full host address is never rendered when
-// masking is enabled; enough of the address is kept so a user can still tell
-// hosts apart at a glance. The host label (shown separately) remains the
-// primary identifier, so the address only needs to disambiguate.
+// masking is enabled. Only a minimal prefix (first 2 characters) of the host
+// is kept — just enough for a hint — and the rest is replaced with a
+// fixed-length bullet mask. The fixed length is intentional: it prevents
+// length-based information leakage so an observer cannot infer how long the
+// real hostname or IP is, let alone reconstruct it.
+//
+// The host label (shown separately) remains the primary identifier, so the
+// address only needs to offer a minimal hint, not full disambiguation.
 
-const MASK = "••••••";
+// Fixed-length mask: 12 bullets. Constant regardless of input length so the
+// mask never leaks the real address length.
+const MASK = "••••••••••••";
+const PREFIX_LEN = 2;
 
 /**
- * Mask a bare hostname/IP. Keeps the leading segment(s) that carry the most
- * identifying information and replaces the rest with a bullet placeholder.
+ * Mask a bare hostname/IP. Keeps only the first 2 characters (1 for very
+ * short names) and replaces everything else with a fixed-length bullet mask.
+ * All dots, colons, and subsequent labels/groups are dropped — they would
+ * reveal structure (IPv4 vs IPv6 vs hostname, number of labels, etc.).
  */
 export function maskHostname(hostname: string): string {
   if (!hostname) return hostname;
-
-  // IPv4: keep the first three octets, hide the last.
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname)) {
-    const parts = hostname.split(".");
-    return `${parts[0]}.${parts[1]}.${parts[2]}.${MASK}`;
-  }
-
-  // IPv6 (brackets already stripped by maskAddress): keep the first three
-  // groups and hide the remainder.
-  if (hostname.includes(":")) {
-    const groups = hostname.split(":");
-    if (groups.length >= 2) return [...groups.slice(0, 3), MASK].join(":");
-    return MASK;
-  }
-
-  // Dotted hostname: keep the first and last label, hide the middle labels.
-  const labels = hostname.split(".");
-  if (labels.length >= 3) {
-    return [labels[0], MASK, labels[labels.length - 1]].join(".");
-  }
-  if (labels.length === 2) {
-    return [labels[0], MASK].join(".");
-  }
-
-  // Single label: keep the first half so short local names stay recognizable.
-  if (hostname.length <= 3) return MASK;
-  return hostname.slice(0, Math.ceil(hostname.length / 2)) + MASK;
+  const prefix = hostname.length <= 3 ? hostname.slice(0, 1) : hostname.slice(0, PREFIX_LEN);
+  return prefix + MASK;
 }
 
 /**
  * Mask a full endpoint string in any of the forms the app renders:
  * `user@host:port`, `host:port`, `[ipv6]:port`, `user@[ipv6]:port`, or a bare
  * host. Status prefixes separated by ` · ` (e.g. "Resolving SSH identity · …")
- * are preserved and only the trailing address portion is masked.
+ * are preserved and only the trailing address portion is masked. The port is
+ * preserved (it is a small, non-secret space and helps the user recognize the
+ * connection).
  */
 export function maskAddress(address: string): string {
   if (!address) return address;
