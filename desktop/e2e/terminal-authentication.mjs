@@ -74,6 +74,7 @@ async function scenario(name, mode, exercise, narrow = false) {
   const result = { name, passed: false, viewport, errors };
   try {
     await page.addInitScript({ content: fixture + `\n(${authenticationFixture.toString()})(${JSON.stringify(mode)});` });
+    await page.addInitScript({ content: "localStorage.setItem('clavyn-settings', JSON.stringify({maskAddresses:false}))" });
     await page.goto(url);
     assert.match(await page.title(), /Clavyn/i);
     assert.ok(page.url().startsWith(url));

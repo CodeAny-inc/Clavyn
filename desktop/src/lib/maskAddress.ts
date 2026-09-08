@@ -3,7 +3,7 @@
 // hosts apart at a glance. The host label (shown separately) remains the
 // primary identifier, so the address only needs to disambiguate.
 
-const MASK = "•••";
+const MASK = "••••••";
 
 /**
  * Mask a bare hostname/IP. Keeps the leading segment(s) that carry the most
