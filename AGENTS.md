@@ -10,6 +10,48 @@
 - `cargo test -p clavyn-core` once tests are added.
 - Tauri build: `cd desktop && npm run tauri build`.
 - Frontend typecheck: `cd desktop && npx vue-tsc --noEmit`.
+- Frontend unit tests: `cd desktop && npm test` (Vitest).
+- Browser regression suite: `cd desktop/e2e && npm test` (Playwright + tauri-fixture.js mock).
+- **UI verification with the agent CLI** — see "Agent UI verification" below.
+
+## Agent UI verification
+
+There is a composable CLI for driving and verifying the live Tauri renderer
+over the Chrome DevTools Protocol (via Playwright). Use it after any frontend
+change to confirm behavior, capture evidence, and navigate features — it's
+far cheaper than writing throwaway scripts.
+
+    node .devin/skills/verify-clavyn/control-clavyn.mjs doctor --pretty
+
+The CLI (`control-clavyn.mjs`) holds a persistent Chromium + page (the
+"harness") so state survives across commands. It loads the Vite dev server
+with `desktop/e2e/tauri-fixture.js` mocking the full Tauri IPC surface, so
+SSH/SFTP/vault calls are deterministic and never touch the network. Every
+command prints one JSON object; errors include a `remedy` field.
+
+Prerequisites (once per machine):
+
+    cd desktop && npm install
+    cd desktop/e2e && npm install && npx playwright install chromium
+    # or set CHROMIUM_EXECUTABLE_PATH to a system Chrome/Chromium
+
+Common commands: `doctor`, `status`, `info`, `snapshot`, `screenshot`,
+`components`, `navigate <view>`, `home`, `click --name "text"`, `type`,
+`press`, `new-session`, `connect "<host>"`, `send "<text>"`, `console`,
+`network-summary`, `fixture state`, `cleanup`, `reset`, `stop`. Run with no
+args for full `--help`. Destructive commands accept `--dry-run`.
+
+The `verify-clavyn` Devin skill (`.devin/skills/verify-clavyn/SKILL.md`)
+documents the full workflow. The **Feature Map**
+(`.devin/skills/verify-clavyn/references/features/README.md`) catalogs every
+view, what it does, how to reach it, and the exact CLI commands to drive it —
+read it before navigating to save context tokens.
+
+Notes:
+- The fixture mocks the transport; this verifies the **renderer**, not
+  end-to-end SSH. Core Rust logic is verified with `cargo test -p clavyn-core`.
+- To drive a real `tauri dev`/packaged webview, set `CLAVYN_URL` and
+  `CHROMIUM_EXECUTABLE_PATH` to point at its webview endpoint.
 
 ## Building distributable versions
 - Local build (current platform only): `cd desktop && npm run tauri build`
