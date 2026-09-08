@@ -2,7 +2,6 @@
 
 mod biometric;
 mod commands;
-mod legacy_keychain;
 mod sftp_transfer;
 mod state;
 mod vault_commands;
@@ -27,12 +26,6 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            // Early revisions of the Touch ID work wrote the static
-            // `master-passphrase` account to the legacy file-based Keychain.
-            // Current code never reads that account; delete it opportunistically
-            // before normal app state starts using the per-vault protected item.
-            legacy_keychain::clear_file_based_legacy_passphrase_best_effort();
-
             let app_data = app
                 .path()
                 .app_data_dir()

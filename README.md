@@ -66,6 +66,25 @@ npm run tauri dev    # launches the app with hot reload
 npm run tauri build  # produces installers in src-tauri/target/release/bundle
 ```
 
+## A note on "damaged app" / SmartScreen warnings
+
+Clavyn is not yet signed with an Apple Developer ID or a Windows code-signing
+certificate, so the OS may complain when you open a downloaded build for the
+first time:
+
+- **macOS:** Gatekeeper may report the app as "damaged" or "unidentified
+  developer." This is expected for unsigned builds, not actual corruption. To
+  run it, strip the quarantine attribute:
+  ```sh
+  xattr -cr /Applications/Clavyn.app
+  ```
+- **Windows:** SmartScreen may show "Windows protected your PC." Click
+  **More info → Run anyway**.
+
+This is temporary. Proper code signing and notarization are planned for a
+future release, after which these warnings will disappear. No worries — for
+now just tell your OS it's fine to open Clavyn. :)
+
 ## Security model (summary)
 
 | Asset                | At rest                         | In memory                |
