@@ -5,6 +5,7 @@ import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -32,6 +33,7 @@ const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
 const hosts = useHostsStore();
 const identities = useIdentitiesStore();
+const { maskAddress } = useMaskedAddress();
 
 const showForm = ref(false);
 const editing = ref<Workspace | null>(null);
@@ -400,7 +402,7 @@ const colorOptions = [
               >
                 <Server class="size-3 text-muted-foreground" :stroke-width="1.75" />
                 <span class="font-medium">{{ h.label }}</span>
-                <span class="text-muted-foreground font-mono">{{ hostEndpoint(h) }}</span>
+                <span class="text-muted-foreground font-mono">{{ maskAddress(hostEndpoint(h)) }}</span>
               </div>
             </div>
           </div>
@@ -549,7 +551,7 @@ const colorOptions = [
             <Server class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
             <div class="flex-1 min-w-0">
               <span class="text-[12px] font-medium">{{ h.label }}</span>
-              <span class="text-[11px] text-muted-foreground font-mono ml-2">{{ hostEndpoint(h) }}</span>
+              <span class="text-[11px] text-muted-foreground font-mono ml-2">{{ maskAddress(hostEndpoint(h)) }}</span>
             </div>
           </div>
           <div v-if="!filteredHostsForPicker.length" class="px-3 py-6 text-center text-[12px] text-muted-foreground">

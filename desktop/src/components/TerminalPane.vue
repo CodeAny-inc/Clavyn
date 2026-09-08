@@ -13,6 +13,7 @@ import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
@@ -25,6 +26,7 @@ const hosts = useHostsStore();
 const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
+const { maskAddress } = useMaskedAddress();
 const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
@@ -69,6 +71,7 @@ const configuredEndpoint = computed(() => {
   return configuredSshEndpoint(host, identities.identities);
 });
 const hostAddress = computed(() => connectedEndpoint.value ?? configuredEndpoint.value);
+const displayAddress = computed(() => maskAddress(hostAddress.value));
 
 function focusInput() {
   if (disposed || !isActive.value || inputObscured.value || terminalFocusBlocked()) return;
@@ -433,7 +436,7 @@ function selectAction(id: string) {
         <GripVertical class="size-3 shrink-0 text-muted-foreground" />
         <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-muted-foreground" aria-label="Connecting" />
         <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-500' : 'bg-muted-foreground'" :title="status" />
-        <span class="truncate text-[12px]" :title="`${pane.title} · ${hostAddress} · ${status}`">{{ hostAddress }}</span>
+        <span class="truncate text-[12px]" :title="`${pane.title} · ${displayAddress} · ${status}`">{{ displayAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
       </div>
       <div class="flex shrink-0 items-center gap-0.5 text-muted-foreground" @click.stop

@@ -38,6 +38,7 @@ async function fresh(target = url, baseline = false, name = "01-workspace-scenar
     if (!baseline && ["error", "warning"].includes(message.type())) errors.push(message.text());
   });
   await page.addInitScript({ path: fixture });
+  await page.addInitScript({ content: "localStorage.setItem('clavyn-settings', JSON.stringify({maskAddresses:false}))" });
   await page.goto(target);
   await atlasLabel().waitFor();
   return context;

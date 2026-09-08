@@ -83,6 +83,7 @@ async function scenario(name, exercise, identity = false) {
   try {
     // One init script guarantees the base transport is installed before its extension.
     await page.addInitScript({ content: fixture + (identity ? "\n" + identityFixture : "") });
+    await page.addInitScript({ content: "localStorage.setItem('clavyn-settings', JSON.stringify({maskAddresses:false}))" });
     await page.goto(url);
     assert.match(await page.title(), /Clavyn/i, "Correct page identity");
     assert.ok(page.url().startsWith(url), "Correct app URL");

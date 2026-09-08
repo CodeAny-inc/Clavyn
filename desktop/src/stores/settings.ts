@@ -8,11 +8,14 @@ export interface AppSettings {
   autoLockMinutes: number;
   /** Lock after an extended background/timer-suspension gap is observed. */
   lockOnSleep: boolean;
+  /** Obfuscate host addresses in the UI so the full address is never shown. */
+  maskAddresses: boolean;
 }
 
 const DEFAULTS: AppSettings = {
   autoLockMinutes: 15,
   lockOnSleep: true,
+  maskAddresses: true,
 };
 
 function loadSettings(): AppSettings {
@@ -39,13 +42,15 @@ function saveSettings(settings: AppSettings) {
 export const useSettingsStore = defineStore("settings", () => {
   const autoLockMinutes = ref(loadSettings().autoLockMinutes);
   const lockOnSleep = ref(loadSettings().lockOnSleep);
+  const maskAddresses = ref(loadSettings().maskAddresses);
 
   watch(
-    [autoLockMinutes, lockOnSleep],
+    [autoLockMinutes, lockOnSleep, maskAddresses],
     () => {
       saveSettings({
         autoLockMinutes: autoLockMinutes.value,
         lockOnSleep: lockOnSleep.value,
+        maskAddresses: maskAddresses.value,
       });
     },
   );
@@ -58,10 +63,16 @@ export const useSettingsStore = defineStore("settings", () => {
     lockOnSleep.value = enabled;
   }
 
+  function setMaskAddresses(enabled: boolean) {
+    maskAddresses.value = enabled;
+  }
+
   return {
     autoLockMinutes,
     lockOnSleep,
+    maskAddresses,
     setAutoLockMinutes,
     setLockOnSleep,
+    setMaskAddresses,
   };
 });

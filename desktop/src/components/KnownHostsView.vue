@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import * as api from "../api";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
 import {
@@ -14,6 +15,7 @@ import type { KnownHostEntry } from "../types";
 const hosts = ref<KnownHostEntry[]>([]);
 const search = ref("");
 const loading = ref(false);
+const { maskAddress } = useMaskedAddress();
 
 onMounted(async () => {
   await load();
@@ -91,7 +93,7 @@ async function remove(entry: KnownHostEntry) {
           </div>
           <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2">
-              <span class="text-[13px] font-medium truncate font-mono">{{ host.host }}</span>
+              <span class="text-[13px] font-medium truncate font-mono">{{ maskAddress(host.host) }}</span>
               <Badge>{{ host.key_type }}</Badge>
             </div>
             <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">

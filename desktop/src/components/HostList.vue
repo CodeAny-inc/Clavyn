@@ -4,6 +4,7 @@ import { useHostsStore } from "../stores/hosts";
 import { useTabsStore } from "../stores/tabs";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
 import HostForm from "./HostForm.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -35,6 +36,7 @@ const emit = defineEmits<{
 const hosts = useHostsStore();
 const tabs = useTabsStore();
 const identities = useIdentitiesStore();
+const { maskAddress } = useMaskedAddress();
 
 const showForm = ref(false);
 const editingHost = ref<Host | null>(null);
@@ -300,7 +302,7 @@ function authLabel(host: Host): string {
           <div class="flex-1 min-w-0">
             <div class="text-[13px] font-medium truncate">{{ host.label }}</div>
             <div class="text-[11px] text-muted-foreground truncate font-mono">
-              {{ hostEndpoint(host) }}
+              {{ maskAddress(hostEndpoint(host)) }}
             </div>
           </div>
           <!-- Auth method badge -->
@@ -364,7 +366,7 @@ function authLabel(host: Host): string {
       <Server class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
       <span class="text-[12px] text-muted-foreground truncate flex-1 min-w-0">
         <span class="text-foreground font-medium">{{ selectedHost.label }}</span>
-        <span class="ml-2 font-mono hidden sm:inline">{{ hostEndpoint(selectedHost) }}</span>
+        <span class="ml-2 font-mono hidden sm:inline">{{ maskAddress(hostEndpoint(selectedHost)) }}</span>
       </span>
       <Button size="sm" class="shrink-0" @click="connectDirectly(selectedHost)">
         <Plug class="size-3.5" :stroke-width="1.75" />
@@ -392,7 +394,7 @@ function authLabel(host: Host): string {
             <div class="flex-1 min-w-0">
               <div class="text-[14px] font-semibold truncate">{{ connectTarget.label }}</div>
               <div class="text-[12px] text-muted-foreground font-mono mt-0.5">
-                {{ hostEndpoint(connectTarget) }}
+                {{ maskAddress(hostEndpoint(connectTarget)) }}
               </div>
             </div>
           </div>
@@ -402,7 +404,7 @@ function authLabel(host: Host): string {
             <div class="flex items-center gap-2 text-[12px]">
               <TerminalIcon class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />
               <span class="text-muted-foreground">Connection:</span>
-              <span class="font-mono text-foreground">{{ connectTarget.hostname }}:{{ connectTarget.port }}</span>
+              <span class="font-mono text-foreground">{{ maskAddress(`${connectTarget.hostname}:${connectTarget.port}`) }}</span>
             </div>
             <div class="flex items-center gap-2 text-[12px]">
               <UserCircle class="size-3.5 text-muted-foreground shrink-0" :stroke-width="1.75" />

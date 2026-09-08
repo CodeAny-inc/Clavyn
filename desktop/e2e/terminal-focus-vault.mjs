@@ -52,6 +52,7 @@ async function scenario(name, exercise, mode = "normal") {
   try {
     await page.addInitScript({ path: fixture });
     await page.addInitScript(reviewFixture, mode);
+    await page.addInitScript({ content: "localStorage.setItem('clavyn-settings', JSON.stringify({maskAddresses:false}))" });
     await page.goto(url);
     assert.match(await page.title(), /Clavyn/i, "Correct page identity");
     assert.ok(page.url().startsWith(url), "Correct app URL");
