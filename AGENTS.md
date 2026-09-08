@@ -233,6 +233,20 @@ workflow — fix every finding before considering a task done.
   like they were written by the human author only.
 - Commit messages: concise, focus on "why" not "what".
 
+## Pull request conventions
+- PR title and description must be in English.
+- PR description must explain which changes were made and what the
+  implementation solves — not just a diff summary.
+- Inline screenshots and recordings are required in the PR description for any
+  UI/UX change. Use absolute raw URLs, never relative paths — GitHub does not
+  resolve `./screenshots/foo.png` in a PR body. Use the form:
+  `https://github.com/CodeAny-inc/Clavyn/raw/<branch>/screenshots/foo.png`
+- Verify every media URL resolves to real content (HTTP 200, correct
+  content-type) before considering the PR done.
+- Run the full verification suite (typecheck, unit tests, comment hygiene,
+  browser verification with `control-clavyn`) and record the results in the
+  PR's test-plan checklist.
+
 ## Architecture
 See `docs/ARCHITECTURE.md`. One Rust core, Tauri desktop shell now, mobile
 via FFI later.

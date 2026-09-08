@@ -116,7 +116,7 @@ async function main() {
     { x: 0.5, y: 0.5 });
   await sleep(1000);
 
-  // The drop moved pane B into tab A as a horizontal split. Activate tab A.
+  // The drop moves pane B into tab A as a horizontal split; activate tab A.
   await tabButtons.nth(0).click();
   await sleep(800);
   await page.screenshot({ path: join(OUT_DIR, "drag-split-02-split-on-drop.png") });
