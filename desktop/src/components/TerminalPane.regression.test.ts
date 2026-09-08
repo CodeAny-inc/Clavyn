@@ -63,6 +63,13 @@ const makeHost = (id: string, overrides: Partial<Host> = {}): Host => ({
 });
 
 let wrapper: VueWrapper | undefined;
+// A fullscreen pane is teleported to <body>, so Vue Test Utils' wrapper.get()
+// cannot find it. Use this to locate an element wherever it lives in the DOM.
+function paneEl(selector: string): HTMLElement {
+  const el = document.querySelector(selector);
+  if (!el) throw new Error(`Unable to find ${selector} in document`);
+  return el as HTMLElement;
+}
 function mountPane(pane: ReturnType<typeof collectPanes>[number], tabId: string) {
   wrapper = mount(TerminalPane, {
     props: { pane, tabId, visible: true },
@@ -184,9 +191,11 @@ describe("TerminalPane input ownership", () => {
     const ui = useUiStore();
     await view.get('[data-host-id="atlas"] button[aria-label="Fullscreen"]').trigger("click");
     expect(ui.fullscreenPaneId).toBe(first.id);
-    await view.get('[data-host-id="atlas"] textarea').trigger("keydown", {
-      key: "ArrowRight", ctrlKey: !metaKey, metaKey,
-    });
+    // The pane is teleported to <body> while fullscreen; dispatch the keydown
+    // on the live DOM element rather than through the component wrapper.
+    paneEl('[data-host-id="atlas"] textarea').dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", ctrlKey: !metaKey, metaKey, bubbles: true }),
+    );
     expect(tabs.activePaneId).toBe(second.id);
     expect(ui.fullscreenPaneId).toBeNull();
     await vi.waitFor(() => expect(document.activeElement).toBe(view.get('[data-host-id="orion"] textarea').element));
@@ -198,6 +207,27 @@ describe("TerminalPane input ownership", () => {
     tabs.setActivePane(second.id);
     // Do not await nextTick: the old fullscreen must already be invalidated.
     expect(useUiStore().fullscreenPaneId).toBeNull();
+  });
+
+  it("teleports the pane to <body> while fullscreen and returns it on exit", async () => {
+    const { view, tabs, first } = await mountSplit();
+    const workspace = view.element as HTMLElement;
+    // Before fullscreen the pane lives inside the workspace subtree.
+    expect(workspace.querySelector('[data-host-id="atlas"]')).not.toBeNull();
+    await view.get('[data-host-id="atlas"] button[aria-label="Fullscreen"]').trigger("click");
+    await nextTick();
+    // While fullscreen the pane is teleported to <body>, escaping ancestor
+    // overflow:hidden / display:none containers that could clip a fixed element.
+    expect(workspace.querySelector('[data-host-id="atlas"]')).toBeNull();
+    const teleported = document.querySelector("body > [data-host-id='atlas'].terminal-pane");
+    expect(teleported).not.toBeNull();
+    expect(teleported?.classList.contains("fixed")).toBe(true);
+    // Exiting fullscreen teleports the pane back into the workspace.
+    paneEl('[data-host-id="atlas"] button[aria-label="Exit fullscreen"]').click();
+    await nextTick();
+    expect(workspace.querySelector('[data-host-id="atlas"]')).not.toBeNull();
+    expect(document.querySelector("body > [data-host-id='atlas'].terminal-pane")).toBeNull();
+    void first; void tabs;
   });
 
   it("restores the destination search input and returns Escape to that pane's terminal", async () => {

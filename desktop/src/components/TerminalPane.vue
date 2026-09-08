@@ -116,7 +116,10 @@ watch([isActive, () => props.visible], () => queueFocus(true), { flush: "post" }
 watch(() => tabs.paneFocusRequest, request => {
   if (request?.paneId === props.pane.id) queueFocus(false, () => request === tabs.paneFocusRequest);
 }, { flush: "post" });
-watch(isFullscreen, () => queueFocus(), { flush: "post" });
+// Teleporting the pane to <body> on fullscreen changes its DOM location; refit
+// the terminal immediately after the post-flush DOM update so xterm fills the
+// new viewport-sized container without a blank frame.
+watch(isFullscreen, () => { fit(); queueFocus(); }, { flush: "post" });
 watch(() => ui.showVaultUnlockModal, (open, wasOpen) => {
   // Closing the shared prompt returns input to the active waiter, not whichever
   // network connection happens to complete last. Respect any newer overlay.
@@ -444,6 +447,7 @@ function selectAction(id: string) {
 </script>
 
 <template>
+  <Teleport to="body" :disabled="!isFullscreen">
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
     :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
@@ -491,6 +495,7 @@ function selectAction(id: string) {
       <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>Swap</span></div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <style scoped>
