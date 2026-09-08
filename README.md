@@ -97,6 +97,80 @@ now just tell your OS it's fine to open Clavyn. :)
 Host-key mismatches raise `CoreError::HostKeyMismatch` and are surfaced to
 the user for explicit confirmation before any replacement.
 
+## Contributing
+
+Clavyn is open source and contributions are welcome. The project is already
+heavily used internally by CodeAny employees and is actively maintained — it
+will continue to be improved consistently over time. There is **no published
+roadmap**; instead, development is driven by real usage and by the issues and
+pull requests the community opens.
+
+### Reporting bugs and suggesting features
+
+- **Bugs:** Open an issue with the steps to reproduce, your OS, the Clavyn
+  version (`Settings → About` or `node scripts/verify/control-clavyn.mjs info`),
+  and any relevant logs. Do **not** include private keys, passphrases, or
+  vault contents in reports.
+- **Feature requests:** Open an issue describing the problem you are trying to
+  solve and your proposed approach. Keep scope focused — small, well-defined
+  proposals are easier to review and merge.
+- **Security vulnerabilities:** Do not open a public issue. See
+  [SECURITY.md](SECURITY.md) for responsible disclosure.
+
+### Development setup
+
+See [Prerequisites](#prerequisites) and [Build & run (desktop)](#build-run-desktop)
+above to get the app running locally. For the full development workflow,
+conventions, and verification steps, read [AGENTS.md](AGENTS.md) — it is the
+single source of truth for how the project is built, tested, and released.
+
+### How to submit a pull request
+
+1. **Open an issue first** for anything beyond a small fix or typo. Discussing
+   the approach before writing code saves everyone time and avoids rework.
+2. **Fork and branch** from `main`. Use a descriptive branch name
+   (`fix/vault-lock-race`, `feat/sftp-sort`, not `patch-1`).
+3. **Keep changes focused.** One logical change per PR. Mixing unrelated
+   refactors with a bug fix makes review harder and risks the whole PR being
+   blocked by one part.
+4. **Follow the conventions** in [AGENTS.md](AGENTS.md):
+   - All SSH/crypto logic lives in `core/`, never in shells.
+   - Private key material is wrapped to `Zeroize` on drop.
+   - Host key mismatches never auto-accept; surface to the user.
+   - No secrets in logs; no plaintext keys on disk; vault is the only persisted form.
+   - Pin dependency versions (no floating `latest` / `*`).
+5. **Verify before requesting review:**
+   ```sh
+   cargo check --workspace                    # after core changes
+   cargo test -p clavyn-core                  # core tests
+   cd desktop && npx vue-tsc --noEmit         # frontend typecheck
+   cd desktop && npm test                     # Vitest unit tests
+   cd desktop/e2e && npm test                 # Playwright regression suite
+   node scripts/verify/control-clavyn.mjs doctor --pretty   # UI verification
+   node scripts/verify/check-comments.mjs --pretty          # comment hygiene
+   ```
+   The comment-hygiene check enforces that code comments document the code
+   as it exists now — never narrate history or attribute work. See
+   [AGENTS.md](AGENTS.md) "Comment hygiene (enforced)" for the policy.
+6. **Write good commit messages.** Focus on *why*, not *what*. Keep commits
+   atomic and logically ordered. Squash WIP commits before requesting review.
+7. **Reference the issue** in the PR description (`Closes #123`). Include a
+   Summary, what changed, and how you verified it.
+
+### Code review
+
+PRs are reviewed by CodeAny maintainers. Expect feedback on security,
+correctness, and adherence to conventions. Please be patient and responsive —
+review is a collaboration, not a gate. Small, well-scoped PRs with clear
+descriptions and verification evidence are reviewed fastest.
+
+### Release process
+
+Releases are automated via GitHub Actions (triggered by a version tag) and the
+local `scripts/release.sh` / `scripts/version.sh` helpers. See
+[AGENTS.md](AGENTS.md) for the full release process, version management, and
+auto-update architecture.
+
 ## License
 
 GPL-3.0-or-later (see `LICENSE`). Inspired by but unaffiliated with Termius.
