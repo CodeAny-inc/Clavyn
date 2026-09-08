@@ -31,3 +31,7 @@ id_rsa*
 id_ed25519*
 known_hosts
 vault.json
+
+# Agent verification harness — transient session + screenshots
+scripts/verify/.session.json
+scripts/verify/screenshot-*.png

@@ -1,0 +1,34 @@
+---
+description: Verify Clavyn's Tauri UI with the composable control-clavyn CLI (CDP/Playwright). Use after frontend changes to navigate, inspect, interact, and capture evidence.
+globs:
+  - "desktop/src/**/*"
+  - "desktop/src-tauri/src/**/*"
+  - "scripts/verify/**/*"
+  - ".agents/skills/verify-clavyn/**/*"
+alwaysApply: false
+---
+
+# Verifying Clavyn UI changes
+
+The canonical Agent Skill lives at `.agents/skills/verify-clavyn/SKILL.md`
+(standard agentskills.io location). This Cursor rule is a thin pointer so
+Cursor's rules discovery finds it.
+
+## Quick reference
+
+```bash
+node scripts/verify/control-clavyn.mjs doctor --pretty   # always start here
+node scripts/verify/control-clavyn.mjs home
+node scripts/verify/control-clavyn.mjs navigate <view>
+node scripts/verify/control-clavyn.mjs snapshot --pretty
+node scripts/verify/control-clavyn.mjs screenshot /tmp/proof.png
+node scripts/verify/control-clavyn.mjs console --pretty
+node scripts/verify/control-clavyn.mjs stop
+```
+
+## Full instructions
+
+Read `.agents/skills/verify-clavyn/SKILL.md` for the complete workflow,
+examples, gotchas, and rules. Read `scripts/verify/features/README.md` before
+navigating — it catalogs every view and the exact CLI commands to drive it.
+Full CLI docs: `scripts/verify/README.md`.
