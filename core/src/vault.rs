@@ -133,6 +133,19 @@ impl Vault {
         let new_pt = serde_json::to_vec(&payload)?;
         let ct = seal(passphrase, &salt, &new_pt)?;
         self.file.ciphertext = base64(ct);
+        self.file.keys_meta.push(meta);
+        self.save()
+    }
+
+    pub fn remove_key(&mut self, passphrase: &str, key_id: &str) -> Result<()> {
+        let salt = unbase64(&self.file.salt)?;
+        let mut pt = open(passphrase, &salt, &unbase64(&self.file.ciphertext)?)?;
+        let mut payload: VaultPayload = serde_json::from_slice(&pt)?;
+        payload.keys.retain(|(id, _)| id != key_id);
+        pt.zeroize();
+        let new_pt = serde_json::to_vec(&payload)?;
+        let ct = seal(passphrase, &salt, &new_pt)?;
+        self.file.ciphertext = base64(ct);
         self.file
             .keys_meta
             .retain(|m| m.id.to_string() != key_id);
@@ -162,12 +175,20 @@ impl Vault {
     /// touches disk. The caller owns authorization (verifying the master
     /// passphrase) and biometric credential cleanup before invoking this.
     pub fn reset(&mut self) -> Result<()> {
-        crate::fs_util::remove_private(&self.path)?;
+        let removal = crate::fs_util::remove_private(&self.path)?;
+        self.finish_reset(removal)
+    }
+
+    fn finish_reset(&mut self, removal: crate::fs_util::RemovePrivateOutcome) -> Result<()> {
         self.file = VaultFile {
             salt: String::new(),
             ciphertext: String::new(),
             keys_meta: Vec::new(),
         };
+
+        if let Some(error) = removal.durability_error {
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -272,6 +293,26 @@ mod tests {
         vault.reset().expect("reset vault");
 
         assert!(!path.exists());
+        assert!(!vault.is_initialized());
+        assert!(vault.binding_id().is_none());
+        assert!(vault.keys_meta().is_empty());
+    }
+
+    #[test]
+    fn reset_clears_in_memory_state_even_when_directory_sync_fails() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path).expect("open vault");
+        vault.initialize("correct horse battery staple").expect("initialize");
+
+        let result = vault.finish_reset(crate::fs_util::RemovePrivateOutcome {
+            durability_error: Some(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "directory sync failed",
+            )),
+        });
+
+        assert!(result.is_err());
         assert!(!vault.is_initialized());
         assert!(vault.binding_id().is_none());
         assert!(vault.keys_meta().is_empty());
