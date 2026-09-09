@@ -353,22 +353,21 @@ pub(crate) async fn clear_for_vault_initialization() {
     let _ = finish_with_best_effort_legacy_cleanup("vault initialization", result);
 }
 
-/// Remove biometric credentials belonging to a vault generation that has
-/// already been destroyed. At this point the encrypted vault file is gone and
-/// the in-memory auth state has been invalidated, so cleanup failures are logged
-/// instead of being returned as an apparent reset failure. A leftover item is
-/// still cryptographically bound to the destroyed generation and cannot unlock a
-/// newly initialized vault.
-pub(crate) async fn clear_for_reset(binding_id: &str) {
+/// Remove the biometric credential for the current vault generation before the
+/// caller destroys that generation. Deleting the vault-bound item is
+/// authoritative: if it fails, reset must abort while the binding id is still
+/// available for a later retry. Cleanup of the obsolete pre-binding account
+/// remains best-effort migration hygiene.
+///
+/// The caller must serialize this operation with biometric credential mutations
+/// using `AppState::biometric_mutation` so a concurrent enrollment cannot recreate
+/// the old credential after cleanup but before vault destruction.
+pub(crate) async fn clear_for_reset(binding_id: &str) -> ApiResult<()> {
     let bound_id = binding_id.to_owned();
-    if let Err(error) = blocking_platform_call(move || platform::clear_passphrase(&bound_id)).await {
-        tracing::warn!(
-            "failed to clean vault-bound biometric credential during vault reset: {error}"
-        );
-    }
+    blocking_platform_call(move || platform::clear_passphrase(&bound_id)).await?;
 
     let result = blocking_platform_call(platform::clear_legacy_passphrase).await;
-    let _ = finish_with_best_effort_legacy_cleanup("vault reset", result);
+    finish_with_best_effort_legacy_cleanup("vault reset", result)
 }
 
 // ============================================================
@@ -401,14 +400,15 @@ pub async fn biometric_passphrase_stored(
 
 /// Store the vault passphrase in the OS keychain, protected by Touch ID.
 /// The passphrase is verified against the vault before storing to prevent
-/// saving an incorrect passphrase. The vault/auth generation is checked again
-/// after the blocking Keychain write so a concurrent reset cannot recreate a
-/// credential for a vault generation that has already been destroyed.
+/// saving an incorrect passphrase. Credential mutations are serialized against
+/// destructive reset, and the vault/auth generation is checked again after the
+/// blocking Keychain write so a newer lock still fails closed.
 #[tauri::command]
 pub async fn store_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
     passphrase: String,
 ) -> ApiResult<()> {
+    let _mutation = state.biometric_mutation.lock().await;
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
@@ -442,7 +442,7 @@ pub async fn store_biometric_passphrase(
             blocking_platform_call(move || platform::clear_passphrase(&stale_binding_id)).await
         {
             tracing::warn!(
-                "failed to clean superseded biometric enrollment for destroyed vault: {error}"
+                "failed to clean superseded biometric enrollment after auth transition: {error}"
             );
         }
         return Err("biometric enrollment was superseded by a newer vault state".into());
@@ -490,6 +490,7 @@ pub async fn unlock_with_biometric(state: State<'_, Arc<AppState>>) -> ApiResult
 pub async fn clear_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
 ) -> ApiResult<()> {
+    let _mutation = state.biometric_mutation.lock().await;
     let binding_id = {
         let vault = state.vault.lock().await;
         vault.binding_id().map(str::to_owned)
