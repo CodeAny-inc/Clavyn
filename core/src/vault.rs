@@ -133,19 +133,6 @@ impl Vault {
         let new_pt = serde_json::to_vec(&payload)?;
         let ct = seal(passphrase, &salt, &new_pt)?;
         self.file.ciphertext = base64(ct);
-        self.file.keys_meta.push(meta);
-        self.save()
-    }
-
-    pub fn remove_key(&mut self, passphrase: &str, key_id: &str) -> Result<()> {
-        let salt = unbase64(&self.file.salt)?;
-        let mut pt = open(passphrase, &salt, &unbase64(&self.file.ciphertext)?)?;
-        let mut payload: VaultPayload = serde_json::from_slice(&pt)?;
-        payload.keys.retain(|(id, _)| id != key_id);
-        pt.zeroize();
-        let new_pt = serde_json::to_vec(&payload)?;
-        let ct = seal(passphrase, &salt, &new_pt)?;
-        self.file.ciphertext = base64(ct);
         self.file
             .keys_meta
             .retain(|m| m.id.to_string() != key_id);
