@@ -103,6 +103,53 @@ pub async fn secure_lock_vault(state: State<'_, Arc<AppState>>) -> ApiResult<()>
     Ok(())
 }
 
+/// Permanently destroy the vault after proving knowledge of the current master
+/// passphrase. Every encrypted private key and credential is irrecoverably
+/// lost, the on-disk vault file is deleted, and in-memory state is reset to
+/// uninitialized.
+///
+/// Authorization is enforced before any destructive action: a wrong passphrase
+/// never destroys the vault. Biometric credentials for the destroyed
+/// generation are also cleared, since a leftover Keychain item would otherwise
+/// show a stale enrollment indicator for a vault that no longer exists. The
+/// auth generation is advanced before the passphrase mutex is acquired so an
+/// in-flight unlock cannot commit after this reset.
+#[tauri::command]
+pub async fn secure_reset_vault(
+    state: State<'_, Arc<AppState>>,
+    passphrase: String,
+) -> ApiResult<()> {
+    let passphrase = zeroize::Zeroizing::new(passphrase);
+
+    let mut vault = state.vault.lock().await;
+    if !vault.is_initialized() {
+        return Err("vault is not initialized".into());
+    }
+    // Authorization gate: prove knowledge of the current passphrase before
+    // touching the on-disk file or any biometric credential.
+    vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+    // Capture the binding id before reset so biometric cleanup targets the
+    // destroyed generation even after the in-memory vault state is cleared.
+    let binding_id = vault.binding_id().map(str::to_owned);
+    vault.reset().map_err(err)?;
+    drop(vault);
+
+    // Remove biometric credentials for the destroyed generation. A leftover
+    // bound item can never unlock the new vault (the salt changed), but
+    // cleaning it avoids a confusing stale enrollment indicator.
+    if let Some(binding_id) = binding_id {
+        crate::biometric::clear_for_reset(&binding_id).await?;
+    }
+    crate::biometric::clear_for_vault_initialization().await;
+
+    // Advance the generation before acquiring the passphrase mutex so an
+    // in-flight unlock/initialization cannot commit after this reset.
+    state.auth_generation.invalidate();
+    let mut pw = state.passphrase.lock().await;
+    *pw = None;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

@@ -343,6 +343,20 @@ pub(crate) async fn clear_for_vault_initialization() {
     let _ = finish_with_best_effort_legacy_cleanup("vault initialization", result);
 }
 
+/// Remove the biometric passphrase bound to a specific vault generation during
+/// a vault reset. The bound account is authoritative for the destroyed
+/// generation, so a deletion failure is surfaced to the caller rather than
+/// swallowed: leaving the credential behind would show a stale enrollment
+/// indicator for a vault that no longer exists. The legacy static account is
+/// cleaned up best-effort afterward.
+pub(crate) async fn clear_for_reset(binding_id: &str) -> ApiResult<()> {
+    let binding_id = binding_id.to_owned();
+    blocking_platform_call(move || platform::clear_passphrase(&binding_id)).await?;
+    let result = blocking_platform_call(platform::clear_legacy_passphrase).await;
+    let _ = finish_with_best_effort_legacy_cleanup("vault reset", result);
+    Ok(())
+}
+
 // ============================================================
 // Tauri commands
 // ============================================================

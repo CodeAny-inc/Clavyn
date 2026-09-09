@@ -8,6 +8,7 @@ vi.mock("../api", () => ({
   initializeVault: vi.fn(() => Promise.resolve(true)),
   unlockVault: vi.fn(() => Promise.resolve()),
   lockVault: vi.fn(() => Promise.resolve()),
+  resetVault: vi.fn(() => Promise.resolve()),
   biometricAvailable: vi.fn(() => Promise.resolve(false)),
   biometricPassphraseStored: vi.fn(() => Promise.resolve(false)),
   storeBiometricPassphrase: vi.fn(() => Promise.resolve()),
@@ -26,6 +27,7 @@ describe("vault store", () => {
     vi.mocked(api.initializeVault).mockResolvedValue(true);
     vi.mocked(api.unlockVault).mockResolvedValue(undefined);
     vi.mocked(api.lockVault).mockResolvedValue(undefined);
+    vi.mocked(api.resetVault).mockResolvedValue(undefined);
     vi.mocked(api.biometricAvailable).mockResolvedValue(false);
     vi.mocked(api.biometricPassphraseStored).mockResolvedValue(false);
     vi.mocked(api.unlockWithBiometric).mockResolvedValue(true);
@@ -282,6 +284,40 @@ describe("vault store", () => {
 
       expect(api.lockVault).toHaveBeenCalled();
       expect(store.unlocked).toBe(false);
+    });
+  });
+
+  describe("reset", () => {
+    it("destroys the vault and returns to the setup state", async () => {
+      const store = useVaultStore();
+      store.initialized = true;
+      store.unlocked = true;
+      store.biometricEnabled = true;
+
+      await store.reset("my-passphrase");
+
+      expect(api.resetVault).toHaveBeenCalledWith("my-passphrase");
+      expect(store.initialized).toBe(false);
+      expect(store.unlocked).toBe(false);
+      expect(store.biometricEnabled).toBe(false);
+      expect(store.needsSetup).toBe(true);
+      expect(store.error).toBeNull();
+    });
+
+    it("does not clear biometric state before the backend reset succeeds", async () => {
+      const store = useVaultStore();
+      store.initialized = true;
+      store.unlocked = true;
+      store.biometricEnabled = true;
+      vi.mocked(api.resetVault).mockRejectedValue(new Error("wrong passphrase"));
+
+      await expect(store.reset("wrong")).rejects.toThrow("wrong passphrase");
+
+      expect(api.resetVault).toHaveBeenCalledWith("wrong");
+      expect(store.initialized).toBe(true);
+      expect(store.unlocked).toBe(true);
+      expect(store.biometricEnabled).toBe(true);
+      expect(store.error).toBe("Error: wrong passphrase");
     });
   });
 

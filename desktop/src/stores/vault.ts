@@ -183,6 +183,25 @@ export const useVaultStore = defineStore("vault", () => {
     unlocked.value = false;
   }
 
+  async function reset(passphrase: string) {
+    // Invalidate old biometric snapshots without queueing authentication behind
+    // credential writes. The backend owns the entire reset boundary: it verifies
+    // the passphrase, destroys the vault, and clears biometric credentials.
+    ++biometricStateRevision;
+    error.value = null;
+    try {
+      await api.resetVault(passphrase);
+      // Discard any snapshot started while reset was pending.
+      ++biometricStateRevision;
+      initialized.value = false;
+      unlocked.value = false;
+      biometricEnabled.value = false;
+    } catch (e) {
+      error.value = String(e);
+      throw e;
+    }
+  }
+
   return {
     initialized,
     unlocked,
@@ -199,5 +218,6 @@ export const useVaultStore = defineStore("vault", () => {
     enableBiometric,
     disableBiometric,
     lock,
+    reset,
   };
 });

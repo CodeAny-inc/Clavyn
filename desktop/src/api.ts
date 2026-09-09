@@ -28,6 +28,7 @@ export const vaultIsInitialized = () => invoke<boolean>("vault_is_initialized");
 export const initializeVault = (passphrase: string) => invoke<boolean>("secure_initialize_vault", { passphrase });
 export const unlockVault = (passphrase: string) => invoke<void>("secure_unlock_vault", { passphrase });
 export const lockVault = () => invoke<void>("secure_lock_vault");
+export const resetVault = (passphrase: string) => invoke<void>("secure_reset_vault", { passphrase });
 export const isVaultUnlocked = () => invoke<boolean>("is_vault_unlocked");
 
 export const biometricAvailable = () => invoke<boolean>("biometric_available");

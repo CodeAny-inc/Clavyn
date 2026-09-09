@@ -12,6 +12,7 @@ vi.mock("../api", () => ({
   initializeVault: vi.fn(),
   unlockVault: vi.fn(),
   lockVault: vi.fn(),
+  resetVault: vi.fn(),
   biometricAvailable: vi.fn(),
   biometricPassphraseStored: vi.fn(),
   unlockWithBiometric: vi.fn(),

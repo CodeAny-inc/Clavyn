@@ -60,6 +60,7 @@ fn main() {
             vault_commands::secure_initialize_vault,
             vault_commands::secure_unlock_vault,
             vault_commands::secure_lock_vault,
+            vault_commands::secure_reset_vault,
             commands::is_vault_unlocked,
             biometric::biometric_available,
             biometric::biometric_passphrase_stored,

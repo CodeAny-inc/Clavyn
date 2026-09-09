@@ -153,6 +153,26 @@ impl Vault {
             .ok_or_else(|| CoreError::Vault(format!("key {key_id} not found")))
     }
 
+    /// Permanently destroy the vault: delete the on-disk file and reset
+    /// in-memory state to uninitialized. Every encrypted private key and
+    /// credential is irrecoverably lost.
+    ///
+    /// The on-disk file holds only AES-256-GCM ciphertext, so deleting it is
+    /// sufficient to destroy the secrets; the plaintext never touched disk.
+    /// The caller owns authorization (verifying the master passphrase) and
+    /// biometric credential cleanup before invoking this.
+    pub fn reset(&mut self) -> Result<()> {
+        if self.path.exists() {
+            std::fs::remove_file(&self.path)?;
+        }
+        self.file = VaultFile {
+            salt: String::new(),
+            ciphertext: String::new(),
+            keys_meta: Vec::new(),
+        };
+        Ok(())
+    }
+
     fn save(&self) -> Result<()> {
         let data = serde_json::to_string_pretty(&self.file)?;
         crate::fs_util::write_private(&self.path, &data)
@@ -239,6 +259,54 @@ mod tests {
 
         let reopened = Vault::open(path).expect("reopen vault");
         assert_eq!(reopened.binding_id(), Some(binding_id.as_str()));
+    }
+
+    #[test]
+    fn reset_deletes_the_vault_file_and_clears_in_memory_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open vault");
+        vault.initialize("correct horse battery staple").expect("initialize");
+        assert!(path.exists());
+        assert!(vault.is_initialized());
+        assert!(vault.binding_id().is_some());
+
+        vault.reset().expect("reset vault");
+
+        assert!(!path.exists());
+        assert!(!vault.is_initialized());
+        assert!(vault.binding_id().is_none());
+        assert!(vault.keys_meta().is_empty());
+    }
+
+    #[test]
+    fn reset_allows_reinitializing_with_a_new_passphrase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open vault");
+        vault.initialize("first passphrase").expect("initialize first");
+        let first_binding = vault.binding_id().expect("first binding").to_string();
+
+        vault.reset().expect("reset vault");
+
+        vault.initialize("second passphrase").expect("initialize second");
+        assert!(vault.is_initialized());
+        assert!(vault.verify_passphrase("second passphrase").is_ok());
+        assert!(vault.verify_passphrase("first passphrase").is_err());
+        assert_ne!(vault.binding_id(), Some(first_binding.as_str()));
+    }
+
+    #[test]
+    fn reset_on_an_uninitialized_vault_is_a_noop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open vault");
+        assert!(!vault.is_initialized());
+
+        vault.reset().expect("reset uninitialized vault");
+
+        assert!(!path.exists());
+        assert!(!vault.is_initialized());
     }
 
     #[test]
