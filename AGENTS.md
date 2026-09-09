@@ -83,6 +83,69 @@ Notes:
 - To drive a real `tauri dev`/packaged webview, set `CLAVYN_URL` and
   `CHROMIUM_EXECUTABLE_PATH` to point at its webview endpoint.
 
+## Browser UI test pitfalls (e2e)
+
+The e2e suite (`desktop/e2e/*.mjs`, run via `cd desktop/e2e && npm test`) uses
+Playwright + the tauri-fixture mock. The following pitfalls have caused
+real CI failures — check against this list before pushing frontend changes.
+
+### Always run e2e tests locally before pushing
+    cd desktop/e2e && UI_RECORD=0 npm test
+
+CI runners are slower than local machines; a 30-second `waitForFunction`
+timeout can pass locally but fail in CI. Always run the full e2e suite
+locally with `UI_RECORD=0` (disables video recording for speed) before
+pushing. If a test times out, reproduce with `UI_SLOW_MO=50` to see the
+exact interaction that stalls.
+
+### xterm stops propagation for certain keys
+xterm's `evaluateKeyboardEvent` sets `cancel: true` for keys like Escape
+(keyCode 27), Enter (13), and Tab (9). When `cancel` is true, xterm calls
+`event.stopPropagation()`, which prevents the event from bubbling up to
+window-level listeners (e.g. the Escape handler in `App.vue`).
+
+When adding a keyboard shortcut that must work while an xterm terminal has
+focus, handle it inside `attachCustomKeyEventHandler` in `TerminalPane.vue`
+and `return false` for that key. Returning `false` prevents xterm from
+calling `stopPropagation()`, so the event bubbles up to window-level
+handlers. Returning `true` lets xterm process the key AND stop propagation.
+
+### Teleport changes DOM location but not component identity
+`<Teleport to="body">` moves the DOM element to `<body>` without remounting
+the Vue component — refs, state, and xterm instances are preserved. However:
+- **Unit tests** (`@vue/test-utils`): `wrapper.get(selector)` only searches
+  the component's subtree, not teleported content. Use `document.querySelector`
+  for elements that may be teleported (e.g. a fullscreen pane).
+- **E2e tests** (Playwright): `page.locator(selector)` searches the entire
+  page, so teleported elements are found automatically.
+- Scoped styles still apply to teleported elements (Vue preserves the
+  `data-v-xxxx` attribute), but CSS variables from `:root` are the only
+  guaranteed inherited values.
+
+### Fullscreen panes must escape ancestor containers
+A `position: fixed` element inside a container with `overflow: hidden` or
+`v-show` (which sets `display: none`) can be clipped or hidden in some
+webview renderers (Tauri WKWebView, WebView2), even though the CSS spec says
+`overflow: hidden` should not clip fixed descendants. Use
+`<Teleport to="body" :disabled="!isFullscreen">` to move the fullscreen
+element out of all ancestor containers. The element returns to its original
+position when the Teleport is disabled.
+
+### Vite fixture injection must be syntactically valid
+The dev-only Vite plugin in `vite.config.ts` injects `tauri-fixture.js` into
+`index.html` so the app renders in a regular browser (not just Tauri). The
+fixture is an IIFE that ends with `();`. Do NOT wrap it in parentheses
+(`(fixture);` → `(););` → SyntaxError). Use an `if` block:
+`if(!window.__TAURI_INTERNALS__){fixtureCode}`. In Tauri,
+`__TAURI_INTERNALS__` is already defined so the fixture is skipped. The
+plugin uses `apply: "serve"` so production builds are unaffected.
+
+### Verify the app loads without the harness
+After changes to `vite.config.ts`, `index.html`, or the fixture, verify the
+app loads in a fresh browser without the Playwright `addInitScript` fixture:
+the Vite-injected fixture should be sufficient. Check for console errors
+and that the sidebar, terminal, and xterm all render.
+
 ## Building distributable versions
 - Local build (current platform only): `cd desktop && npm run tauri build`
   - macOS: produces `.dmg` + `.app` in `desktop/src-tauri/target/release/bundle/`
@@ -243,9 +306,14 @@ workflow — fix every finding before considering a task done.
   `https://github.com/CodeAny-inc/Clavyn/raw/<branch>/screenshots/foo.png`
 - Verify every media URL resolves to real content (HTTP 200, correct
   content-type) before considering the PR done.
-- Run the full verification suite (typecheck, unit tests, comment hygiene,
-  browser verification with `control-clavyn`) and record the results in the
-  PR's test-plan checklist.
+- Run the full verification suite and record the results in the
+  PR's test-plan checklist:
+  1. `cd desktop && npx vue-tsc --noEmit` — typecheck
+  2. `cd desktop && npm test` — unit tests (Vitest)
+  3. `cd desktop/e2e && UI_RECORD=0 npm test` — browser UI tests (Playwright)
+  4. `node scripts/verify/check-comments.mjs` — comment hygiene
+  5. `node scripts/verify/control-clavyn.mjs doctor --pretty` — harness health
+  6. Scenario-specific verification scripts (e.g. `verify-fullscreen.mjs`)
 
 ## Architecture
 See `docs/ARCHITECTURE.md`. One Rust core, Tauri desktop shell now, mobile
