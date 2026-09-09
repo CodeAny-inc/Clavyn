@@ -5,6 +5,13 @@ use tauri::State;
 
 type ApiResult<T> = std::result::Result<T, String>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BiometricCredentialState {
+    Stored,
+    Missing,
+    Invalidated,
+}
+
 async fn blocking_platform_call<T, F>(operation: F) -> ApiResult<T>
 where
     T: Send + 'static,
@@ -46,7 +53,7 @@ fn biometric_enrollment_is_current(
 
 #[cfg(all(target_os = "macos", feature = "macos-biometric"))]
 mod macos {
-    use super::{ACCOUNT_PREFIX, SERVICE};
+    use super::{BiometricCredentialState, ACCOUNT_PREFIX, SERVICE};
     use core_foundation::base::TCFType;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
@@ -73,13 +80,6 @@ mod macos {
     #[link(name = "Security", kind = "framework")]
     extern "C" {
         static kSecUseAuthenticationUIFail: CFStringRef;
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum PassphraseState {
-        Stored,
-        Missing,
-        Invalidated,
     }
 
     fn account_for_binding(binding_id: &str) -> String {
@@ -110,16 +110,18 @@ mod macos {
         }
     }
 
-    fn classify_passphrase_status(status: OSStatus) -> Result<PassphraseState, String> {
+    fn classify_passphrase_status(status: OSStatus) -> Result<BiometricCredentialState, String> {
         match status {
-            errSecSuccess | ERR_SEC_INTERACTION_NOT_ALLOWED => Ok(PassphraseState::Stored),
-            errSecItemNotFound => Ok(PassphraseState::Missing),
+            errSecSuccess | ERR_SEC_INTERACTION_NOT_ALLOWED => {
+                Ok(BiometricCredentialState::Stored)
+            }
+            errSecItemNotFound => Ok(BiometricCredentialState::Missing),
             // An item protected with BIOMETRY_CURRENT_SET can become invalid
             // after fingerprints are added or removed. Treat that expected
             // lifecycle state as replaceable rather than making re-enrollment
             // impossible; the command caller has already verified the master
             // passphrase before store_passphrase() is reached.
-            errSecAuthFailed => Ok(PassphraseState::Invalidated),
+            errSecAuthFailed => Ok(BiometricCredentialState::Invalidated),
             code => Err(format_keychain_error(Error::from_code(code))),
         }
     }
@@ -128,7 +130,9 @@ mod macos {
     /// A valid biometric item requires interaction and therefore reports as
     /// `Stored`; an item invalidated by enrollment changes is distinguished so
     /// callers can safely offer explicit re-enrollment with the master password.
-    fn passphrase_state(binding_id: &str) -> Result<PassphraseState, String> {
+    pub(super) fn credential_state(
+        binding_id: &str,
+    ) -> Result<BiometricCredentialState, String> {
         let mut options = password_options(binding_id);
 
         #[allow(deprecated)]
@@ -153,8 +157,8 @@ mod macos {
     /// exact vault generation without displaying an authentication prompt.
     pub fn passphrase_stored(binding_id: &str) -> Result<bool, String> {
         Ok(matches!(
-            passphrase_state(binding_id)?,
-            PassphraseState::Stored
+            credential_state(binding_id)?,
+            BiometricCredentialState::Stored
         ))
     }
 
@@ -163,15 +167,15 @@ mod macos {
     /// to the Touch ID enrollment that exists at enable time, while the account
     /// name binds it to the current vault generation.
     pub fn store_passphrase(binding_id: &str, passphrase: &str) -> Result<(), String> {
-        match passphrase_state(binding_id)? {
-            PassphraseState::Stored => {
+        match credential_state(binding_id)? {
+            BiometricCredentialState::Stored => {
                 return Err(concat!(
                     "biometric unlock is already enabled; disable it before replacing ",
                     "the protected credential"
                 )
                 .into());
             }
-            PassphraseState::Missing | PassphraseState::Invalidated => {
+            BiometricCredentialState::Missing | BiometricCredentialState::Invalidated => {
                 // The caller already verified the master passphrase against the
                 // vault. Missing and invalidated credentials are therefore safe
                 // to clean up before creating a fresh current-set item.
@@ -212,15 +216,11 @@ mod macos {
     }
 
     /// Delete the protected passphrase for this vault generation. Clearing an
-    /// already-missing item is intentionally idempotent.
+    /// already-missing item is intentionally idempotent for ordinary same-build
+    /// cleanup. Destructive reset uses the independently tracked cleanup module,
+    /// which treats a tracked-but-invisible item as a signing/access-group error.
     pub fn clear_passphrase(binding_id: &str) -> Result<(), String> {
         delete_if_present(binding_id)
-    }
-
-    /// Remove the pre-binding account used by earlier revisions of this PR.
-    /// This is only migration hygiene; new credentials are never stored there.
-    pub fn clear_legacy_passphrase() -> Result<(), String> {
-        delete_account_if_present(ACCOUNT_PREFIX)
     }
 
     fn delete_if_present(binding_id: &str) -> Result<(), String> {
@@ -260,7 +260,7 @@ mod macos {
     #[cfg(test)]
     mod tests {
         use super::{
-            account_for_binding, classify_passphrase_status, PassphraseState,
+            account_for_binding, classify_passphrase_status, BiometricCredentialState,
             ERR_SEC_INTERACTION_NOT_ALLOWED,
         };
         use security_framework_sys::base::{errSecAuthFailed, errSecItemNotFound, errSecSuccess};
@@ -269,19 +269,19 @@ mod macos {
         fn classifies_invalidated_biometry_as_replaceable() {
             assert_eq!(
                 classify_passphrase_status(errSecAuthFailed).unwrap(),
-                PassphraseState::Invalidated
+                BiometricCredentialState::Invalidated
             );
             assert_eq!(
                 classify_passphrase_status(errSecItemNotFound).unwrap(),
-                PassphraseState::Missing
+                BiometricCredentialState::Missing
             );
             assert_eq!(
                 classify_passphrase_status(errSecSuccess).unwrap(),
-                PassphraseState::Stored
+                BiometricCredentialState::Stored
             );
             assert_eq!(
                 classify_passphrase_status(ERR_SEC_INTERACTION_NOT_ALLOWED).unwrap(),
-                PassphraseState::Stored
+                BiometricCredentialState::Stored
             );
         }
 
@@ -300,13 +300,18 @@ mod macos {
 // ============================================================
 
 // The stub is used on non-macOS platforms and on ordinary/ad-hoc-signed macOS
-// builds. It deliberately cannot touch the protected Keychain item. Vault-bound
-// account names ensure an item left by an earlier feature-enabled build can
-// never become authoritative for a newly initialized vault after a downgrade.
+// builds. It deliberately cannot create or retrieve a protected Keychain item.
+// Reset/disable cleanup is handled separately so a tracked credential that is
+// invisible under a different macOS signing access group fails closed.
 #[cfg(not(all(target_os = "macos", feature = "macos-biometric")))]
 mod stub {
+    use super::BiometricCredentialState;
+
     pub fn biometry_available() -> bool {
         false
+    }
+    pub(super) fn credential_state(_binding_id: &str) -> Result<BiometricCredentialState, String> {
+        Ok(BiometricCredentialState::Missing)
     }
     pub fn passphrase_stored(_binding_id: &str) -> Result<bool, String> {
         Ok(false)
@@ -322,9 +327,6 @@ mod stub {
     pub fn clear_passphrase(_binding_id: &str) -> Result<(), String> {
         Ok(())
     }
-    pub fn clear_legacy_passphrase() -> Result<(), String> {
-        Ok(())
-    }
 }
 
 #[cfg(all(target_os = "macos", feature = "macos-biometric"))]
@@ -332,42 +334,11 @@ use macos as platform;
 #[cfg(not(all(target_os = "macos", feature = "macos-biometric")))]
 use stub as platform;
 
-fn finish_with_best_effort_legacy_cleanup(
-    context: &str,
-    result: ApiResult<()>,
-) -> ApiResult<()> {
-    if let Err(error) = result {
-        tracing::warn!("failed to clean legacy biometric credential during {context}: {error}");
-    }
-    Ok(())
-}
-
 /// Best-effort migration cleanup for the static account used by earlier
-/// revisions. New vaults are protected primarily by per-vault Keychain account
-/// binding, so an orphaned bound item cannot attach to a newly initialized vault.
-/// Cleanup failures are intentionally logged rather than returned: the legacy
-/// static account is not authoritative for the new vault generation and must not
-/// prevent creation of a password-only vault.
+/// revisions. The independent cleanup module remains compiled on macOS even
+/// when Touch ID enrollment/unlock support is disabled.
 pub(crate) async fn clear_for_vault_initialization() {
-    let result = blocking_platform_call(platform::clear_legacy_passphrase).await;
-    let _ = finish_with_best_effort_legacy_cleanup("vault initialization", result);
-}
-
-/// Remove the biometric credential for the current vault generation before the
-/// caller destroys that generation. Deleting the vault-bound item is
-/// authoritative: if it fails, reset must abort while the binding id is still
-/// available for a later retry. Cleanup of the obsolete pre-binding account
-/// remains best-effort migration hygiene.
-///
-/// The caller must serialize this operation with biometric credential mutations
-/// using `AppState::biometric_mutation` so a concurrent enrollment cannot recreate
-/// the old credential after cleanup but before vault destruction.
-pub(crate) async fn clear_for_reset(binding_id: &str) -> ApiResult<()> {
-    let bound_id = binding_id.to_owned();
-    blocking_platform_call(move || platform::clear_passphrase(&bound_id)).await?;
-
-    let result = blocking_platform_call(platform::clear_legacy_passphrase).await;
-    finish_with_best_effort_legacy_cleanup("vault reset", result)
+    crate::vault_keychain_cleanup::clear_legacy_best_effort("vault initialization").await;
 }
 
 // ============================================================
@@ -402,7 +373,9 @@ pub async fn biometric_passphrase_stored(
 /// The passphrase is verified against the vault before storing to prevent
 /// saving an incorrect passphrase. Credential mutations are serialized against
 /// destructive reset, and the vault/auth generation is checked again after the
-/// blocking Keychain write so a newer lock still fails closed.
+/// blocking Keychain write so a newer lock still fails closed. A durable,
+/// non-secret enrollment marker is maintained alongside the vault so a later
+/// differently signed build cannot mistake an invisible credential for absence.
 #[tauri::command]
 pub async fn store_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
@@ -420,11 +393,69 @@ pub async fn store_biometric_passphrase(
         vault_binding_id(&vault)?
     };
 
+    let marker_was_present = crate::vault_keychain_cleanup::marker_tracks_binding(
+        &state.app_data_dir,
+        &binding_id,
+    )?;
+    let state_binding_id = binding_id.clone();
+    let credential_state =
+        blocking_platform_call(move || platform::credential_state(&state_binding_id)).await?;
+
+    match credential_state {
+        BiometricCredentialState::Stored => {
+            // Migration safety: if a credential predates the marker mechanism,
+            // establish tracking before reporting that enrollment already exists.
+            if !marker_was_present {
+                crate::vault_keychain_cleanup::record_enrollment_marker(
+                    &state.app_data_dir,
+                    &binding_id,
+                )?;
+            }
+            return Err(concat!(
+                "biometric unlock is already enabled; disable it before replacing ",
+                "the protected credential"
+            )
+            .into());
+        }
+        BiometricCredentialState::Missing if marker_was_present => {
+            return Err(concat!(
+                "tracked biometric credential is not visible to this build; ",
+                "refusing to create a replacement because the current macOS ",
+                "code-signing identity may not have the original Keychain access group"
+            )
+            .into());
+        }
+        BiometricCredentialState::Missing | BiometricCredentialState::Invalidated => {}
+    }
+
+    if !marker_was_present {
+        crate::vault_keychain_cleanup::record_enrollment_marker(
+            &state.app_data_dir,
+            &binding_id,
+        )?;
+    }
+
     let stored_binding_id = binding_id.clone();
-    blocking_platform_call(move || {
+    if let Err(error) = blocking_platform_call(move || {
         platform::store_passphrase(&stored_binding_id, passphrase.as_str())
     })
-    .await?;
+    .await
+    {
+        // If this call created the marker, roll it back on a definite store
+        // failure. A cleanup failure leaves a conservative false-positive marker,
+        // which is safer than allowing a future reset to orphan a credential.
+        if !marker_was_present {
+            if let Err(marker_error) = crate::vault_keychain_cleanup::clear_enrollment_marker(
+                &state.app_data_dir,
+                &binding_id,
+            ) {
+                tracing::warn!(
+                    "failed to roll back biometric enrollment marker after store failure: {marker_error}"
+                );
+            }
+        }
+        return Err(error);
+    }
 
     let still_current = {
         let vault = state.vault.lock().await;
@@ -437,9 +468,11 @@ pub async fn store_biometric_passphrase(
     };
 
     if !still_current {
-        let stale_binding_id = binding_id.clone();
-        if let Err(error) =
-            blocking_platform_call(move || platform::clear_passphrase(&stale_binding_id)).await
+        if let Err(error) = crate::vault_keychain_cleanup::clear_bound_credential(
+            &state.app_data_dir,
+            &binding_id,
+        )
+        .await
         {
             tracing::warn!(
                 "failed to clean superseded biometric enrollment after auth transition: {error}"
@@ -482,10 +515,9 @@ pub async fn unlock_with_biometric(state: State<'_, Arc<AppState>>) -> ApiResult
     Ok(true)
 }
 
-/// Remove the biometric passphrase for the current vault generation. Deleting
-/// that bound credential is authoritative; cleanup of the obsolete pre-binding
-/// account is best-effort migration hygiene and must not turn success into an
-/// apparent disable failure.
+/// Remove the biometric passphrase for the current vault generation. A tracked
+/// credential must be visibly deleted before its marker is removed; if a macOS
+/// signing/access-group change makes the item invisible, disable fails closed.
 #[tauri::command]
 pub async fn clear_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
@@ -496,32 +528,29 @@ pub async fn clear_biometric_passphrase(
         vault.binding_id().map(str::to_owned)
     };
 
-    blocking_platform_call(move || {
-        if let Some(binding_id) = binding_id {
-            platform::clear_passphrase(&binding_id)?;
-        }
-        finish_with_best_effort_legacy_cleanup(
-            "biometric disable",
-            platform::clear_legacy_passphrase(),
+    if let Some(binding_id) = binding_id {
+        crate::vault_keychain_cleanup::clear_bound_credential(
+            &state.app_data_dir,
+            &binding_id,
         )
-    })
-    .await
+        .await?;
+    }
+    crate::vault_keychain_cleanup::clear_legacy_best_effort("biometric disable").await;
+    Ok(())
 }
 
 #[cfg(test)]
 mod cleanup_tests {
-    use super::{biometric_enrollment_is_current, finish_with_best_effort_legacy_cleanup};
+    use super::{biometric_enrollment_is_current, BiometricCredentialState};
     use crate::state::AuthGeneration;
     use clavyn_core::vault::Vault;
 
     #[test]
-    fn legacy_cleanup_failure_does_not_fail_authoritative_disable() {
-        let result = finish_with_best_effort_legacy_cleanup(
-            "biometric disable",
-            Err("legacy cleanup failed".into()),
+    fn credential_state_is_explicit_about_missing_vs_invalidated() {
+        assert_ne!(
+            BiometricCredentialState::Missing,
+            BiometricCredentialState::Invalidated
         );
-
-        assert!(result.is_ok());
     }
 
     #[test]
