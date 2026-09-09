@@ -38,6 +38,18 @@ export const useVaultStore = defineStore("vault", () => {
     biometricEnabled.value = await api.biometricPassphraseStored();
   }
 
+  async function reconcileResetFailureState() {
+    // A reset error can happen either before destruction (for example, a wrong
+    // passphrase) or after the vault file has already been unlinked (for example,
+    // a directory durability-sync failure). Query the backend source of truth so
+    // the renderer never keeps showing an unlocked vault that no longer exists.
+    const currentInitialized = await api.vaultIsInitialized();
+    const currentUnlocked = await api.isVaultUnlocked();
+    initialized.value = currentInitialized;
+    unlocked.value = currentInitialized && currentUnlocked;
+    await reconcileBiometricState();
+  }
+
   async function refreshBiometricState() {
     const revision = ++biometricStateRevision;
     // A probe started during enrollment/deletion must observe the completed
@@ -198,14 +210,14 @@ export const useVaultStore = defineStore("vault", () => {
         unlocked.value = false;
         biometricEnabled.value = false;
       } catch (e) {
-        // A reset may authoritatively delete the biometric credential before a
-        // later filesystem deletion fails. Reconcile that state, but keep this
-        // confirmation-form error local to the component instead of persisting
-        // it as a global vault runtime error after the form is dismissed.
+        // Reset failures can cross the destructive boundary. Reconcile the full
+        // vault/auth/credential state so a post-unlink durability error cannot
+        // leave the renderer showing stale initialized or unlocked state. Keep
+        // this confirmation-form error local instead of persisting it globally.
         try {
-          await reconcileBiometricState();
+          await reconcileResetFailureState();
         } catch {
-          // Reconciliation fails closed; preserve the original reset error.
+          // Preserve the original reset error if reconciliation itself fails.
         }
         throw e;
       }
