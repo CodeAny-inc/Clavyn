@@ -153,18 +153,16 @@ impl Vault {
             .ok_or_else(|| CoreError::Vault(format!("key {key_id} not found")))
     }
 
-    /// Permanently destroy the vault: delete the on-disk file and reset
-    /// in-memory state to uninitialized. Every encrypted private key and
-    /// credential is irrecoverably lost.
+    /// Permanently destroy the vault: delete the authoritative on-disk file and
+    /// any crash-leftover atomic-write temporary copy, then reset in-memory state
+    /// to uninitialized. Every encrypted private key and credential is
+    /// irrecoverably lost.
     ///
-    /// The on-disk file holds only AES-256-GCM ciphertext, so deleting it is
-    /// sufficient to destroy the secrets; the plaintext never touched disk.
-    /// The caller owns authorization (verifying the master passphrase) and
-    /// biometric credential cleanup before invoking this.
+    /// The on-disk files hold only AES-256-GCM ciphertext; plaintext never
+    /// touches disk. The caller owns authorization (verifying the master
+    /// passphrase) and biometric credential cleanup before invoking this.
     pub fn reset(&mut self) -> Result<()> {
-        if self.path.exists() {
-            std::fs::remove_file(&self.path)?;
-        }
+        crate::fs_util::remove_private(&self.path)?;
         self.file = VaultFile {
             salt: String::new(),
             ciphertext: String::new(),
@@ -277,6 +275,25 @@ mod tests {
         assert!(!vault.is_initialized());
         assert!(vault.binding_id().is_none());
         assert!(vault.keys_meta().is_empty());
+    }
+
+    #[test]
+    fn reset_deletes_a_crash_leftover_atomic_temp_copy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let tmp = dir.path().join("vault.json.tmp");
+        let mut vault = Vault::open(path.clone()).expect("open vault");
+        vault.initialize("correct horse battery staple").expect("initialize");
+        let encrypted_snapshot = std::fs::read(&path).expect("read encrypted vault");
+        std::fs::write(&tmp, encrypted_snapshot).expect("seed crash temp copy");
+        assert!(path.exists());
+        assert!(tmp.exists());
+
+        vault.reset().expect("reset vault");
+
+        assert!(!path.exists());
+        assert!(!tmp.exists());
+        assert!(!vault.is_initialized());
     }
 
     #[test]
