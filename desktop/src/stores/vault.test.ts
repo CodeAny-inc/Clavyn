@@ -304,20 +304,43 @@ describe("vault store", () => {
       expect(store.error).toBeNull();
     });
 
-    it("does not clear biometric state before the backend reset succeeds", async () => {
+    it("keeps wrong-passphrase errors local and preserves enrolled biometric state", async () => {
       const store = useVaultStore();
       store.initialized = true;
       store.unlocked = true;
       store.biometricEnabled = true;
       vi.mocked(api.resetVault).mockRejectedValue(new Error("wrong passphrase"));
+      vi.mocked(api.biometricPassphraseStored).mockResolvedValue(true);
 
       await expect(store.reset("wrong")).rejects.toThrow("wrong passphrase");
 
       expect(api.resetVault).toHaveBeenCalledWith("wrong");
+      expect(api.biometricPassphraseStored).toHaveBeenCalledTimes(1);
       expect(store.initialized).toBe(true);
       expect(store.unlocked).toBe(true);
       expect(store.biometricEnabled).toBe(true);
-      expect(store.error).toBe("Error: wrong passphrase");
+      expect(store.error).toBeNull();
+    });
+
+    it("reconciles biometric state when reset fails after credential cleanup", async () => {
+      const store = useVaultStore();
+      store.initialized = true;
+      store.unlocked = true;
+      store.biometricEnabled = true;
+      vi.mocked(api.resetVault).mockRejectedValue(
+        new Error("failed to remove vault file"),
+      );
+      vi.mocked(api.biometricPassphraseStored).mockResolvedValue(false);
+
+      await expect(store.reset("my-passphrase")).rejects.toThrow(
+        "failed to remove vault file",
+      );
+
+      expect(api.biometricPassphraseStored).toHaveBeenCalledTimes(1);
+      expect(store.initialized).toBe(true);
+      expect(store.unlocked).toBe(true);
+      expect(store.biometricEnabled).toBe(false);
+      expect(store.error).toBeNull();
     });
   });
 
