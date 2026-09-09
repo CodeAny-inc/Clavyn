@@ -2,6 +2,8 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
 
+const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
+
 export const useVaultStore = defineStore("vault", () => {
   const initialized = ref(false);
   const unlocked = ref(false);
@@ -36,18 +38,6 @@ export const useVaultStore = defineStore("vault", () => {
 
     // Credential existence is independent of transient Touch ID availability.
     biometricEnabled.value = await api.biometricPassphraseStored();
-  }
-
-  async function reconcileResetFailureState() {
-    // A reset error can happen either before destruction (for example, a wrong
-    // passphrase) or after the vault file has already been unlinked (for example,
-    // a directory durability-sync failure). Query the backend source of truth so
-    // the renderer never keeps showing an unlocked vault that no longer exists.
-    const currentInitialized = await api.vaultIsInitialized();
-    const currentUnlocked = await api.isVaultUnlocked();
-    initialized.value = currentInitialized;
-    unlocked.value = currentInitialized && currentUnlocked;
-    await reconcileBiometricState();
   }
 
   async function refreshBiometricState() {
@@ -210,14 +200,27 @@ export const useVaultStore = defineStore("vault", () => {
         unlocked.value = false;
         biometricEnabled.value = false;
       } catch (e) {
-        // Reset failures can cross the destructive boundary. Reconcile the full
-        // vault/auth/credential state so a post-unlink durability error cannot
-        // leave the renderer showing stale initialized or unlocked state. Keep
-        // this confirmation-form error local instead of persisting it globally.
-        try {
-          await reconcileResetFailureState();
-        } catch {
-          // Preserve the original reset error if reconciliation itself fails.
+        const resetError = String(e);
+        if (resetError.includes(RESET_DURABILITY_ERROR_MARKER)) {
+          // The backend only emits this marker after the authoritative vault file
+          // has already been unlinked and its in-memory/auth state cleared. Even
+          // though directory durability could not be confirmed, the renderer
+          // must treat the old vault as destroyed rather than showing stale
+          // unlocked state.
+          ++biometricStateRevision;
+          initialized.value = false;
+          unlocked.value = false;
+          biometricEnabled.value = false;
+        } else {
+          // Failures before the destructive boundary preserve the vault. A
+          // credential may still have been removed before a later unlink error,
+          // so reconcile biometric enrollment while keeping the reset-form error
+          // local to the component.
+          try {
+            await reconcileBiometricState();
+          } catch {
+            // Reconciliation fails closed; preserve the original reset error.
+          }
         }
         throw e;
       }
