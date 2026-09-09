@@ -1,0 +1,22 @@
+# Configuration for `cargo audit`, run by the security-audit job in CI.
+#
+# Everything listed here is a known advisory that has no drop-in fix today. The
+# point of the job is to fail on anything new, so this list should shrink and
+# should not grow without a note saying why.
+
+[advisories]
+ignore = [
+  # rsa 0.9.10, Marvin attack, CVE-2023-49092.
+  # No 0.9.x release fixes it. Reaches the tree through russh-keys and only
+  # applies when signing with a stored RSA key.
+  "RUSTSEC-2023-0071",
+
+  # russh-cryptovec 0.7.3, unchecked allocation, CVE-2026-46673.
+  # Fixed in 0.60.3, which is part of the russh 0.5x/0.6x API break.
+  "RUSTSEC-2026-0153",
+
+  # russh 0.46.0, unbounded 32-bit allocation, CVE-2026-46673.
+  # Same upgrade. The described vector is the SSH agent protocol, which
+  # connection.rs rejects before opening a connection.
+  "RUSTSEC-2026-0154",
+]
