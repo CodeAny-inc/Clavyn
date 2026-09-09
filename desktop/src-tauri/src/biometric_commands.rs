@@ -256,6 +256,7 @@ pub async fn store_biometric_passphrase(
             crate::vault_keychain_cleanup::clear_bound_credential(
                 &state.app_data_dir,
                 &binding_id,
+                false,
             )
             .await?;
         }
@@ -305,6 +306,7 @@ pub async fn store_biometric_passphrase(
         if let Err(error) = crate::vault_keychain_cleanup::clear_bound_credential(
             &state.app_data_dir,
             &binding_id,
+            false,
         )
         .await
         {
@@ -334,6 +336,7 @@ pub async fn clear_biometric_passphrase(
         crate::vault_keychain_cleanup::clear_bound_credential(
             &state.app_data_dir,
             &binding_id,
+            false,
         )
         .await?;
     }

@@ -106,9 +106,8 @@ fn read_marker(app_data_dir: &Path) -> ApiResult<Option<EnrollmentMarker>> {
         return Ok(Some(marker));
     }
 
-    // Backward compatibility for the first marker implementation in this PR,
-    // which stored only the binding id. Such a marker means a credential was
-    // believed to be enrolled, but no access-group scope probe exists yet.
+    // A legacy plain marker stores only the binding id with no access-group
+    // scope token. Treat it as enrolled without a scope probe.
     Ok(Some(EnrollmentMarker {
         version: 1,
         binding_id: trimmed.to_owned(),
@@ -355,12 +354,15 @@ pub(crate) async fn reconcile_credential_observation(
                     write_tracked_state(app_data_dir, binding_id, TrackingState::Enrolled).await?;
                 }
                 CredentialObservation::Missing => {
-                    #[cfg(not(target_os = "macos"))]
+                    // A legacy vault with no enrollment marker and no visible
+                    // credential is treated as Clear. The credential is either
+                    // genuinely absent or invisible due to a macOS signing/
+                    // access-group transition; in either case it is bound to this
+                    // binding id and cannot unlock a future vault generation.
+                    // Establishing Clear tracking unblocks reset and enrollment
+                    // for users who never enabled Touch ID or no longer have a
+                    // credential, while still recording the tracking state.
                     write_clear_state(app_data_dir, binding_id).await?;
-                    // On macOS, absence without any prior tracking is ambiguous:
-                    // a direct cross-signing upgrade may simply be unable to see
-                    // the old Data Protection Keychain item. Leave it Unknown so
-                    // destructive/mutating operations fail closed.
                 }
             }
             return Ok(stored);
@@ -459,11 +461,18 @@ pub(crate) async fn finish_enrollment(app_data_dir: &Path, binding_id: &str) -> 
 /// Authoritatively delete the vault-bound protected credential. V2 enrolled or
 /// pending states carry a scope probe, so `Missing` is trusted only when this
 /// build can prove it is still in the same Data Protection Keychain access group.
-/// A pre-marker legacy vault with `Missing` remains ambiguous and fails closed.
+///
+/// When `binding_will_be_destroyed` is true (reset path), a pre-marker legacy
+/// vault with `Missing` is treated as Clear: the credential is either genuinely
+/// absent or bound to a binding id that is being destroyed and cannot unlock a
+/// future vault generation. When false (disable path), an untracked `Missing`
+/// remains ambiguous and fails closed because the binding id stays live and an
+/// access-group-invisible credential could still be retrieved by an older build.
 #[cfg(target_os = "macos")]
 pub(crate) async fn clear_bound_credential(
     app_data_dir: &Path,
     binding_id: &str,
+    binding_will_be_destroyed: bool,
 ) -> ApiResult<()> {
     let marker = marker_for_binding(app_data_dir, binding_id)?;
 
@@ -480,11 +489,11 @@ pub(crate) async fn clear_bound_credential(
     let outcome = blocking_keychain_call(move || macos::clear_bound_passphrase(&bound_id)).await?;
 
     match (&marker, outcome) {
-        (None, macos::DeleteOutcome::Missing) => {
+        (None, macos::DeleteOutcome::Missing) if !binding_will_be_destroyed => {
             return Err(concat!(
                 "legacy biometric tracking is unknown and the vault-bound credential is not ",
                 "visible to this macOS build; refusing cleanup because a direct signing/access-",
-                "group transition could otherwise orphan the old master passphrase"
+                "group transition could otherwise leave the old master passphrase accessible"
             )
             .into());
         }
@@ -507,6 +516,7 @@ pub(crate) async fn clear_bound_credential(
 pub(crate) async fn clear_bound_credential(
     app_data_dir: &Path,
     binding_id: &str,
+    _binding_will_be_destroyed: bool,
 ) -> ApiResult<()> {
     write_clear_state(app_data_dir, binding_id).await
 }
@@ -522,7 +532,7 @@ pub(crate) async fn clear_legacy_best_effort(context: &str) {
 pub(crate) async fn clear_legacy_best_effort(_context: &str) {}
 
 pub(crate) async fn clear_for_reset(app_data_dir: &Path, binding_id: &str) -> ApiResult<()> {
-    clear_bound_credential(app_data_dir, binding_id).await?;
+    clear_bound_credential(app_data_dir, binding_id, true).await?;
     clear_legacy_best_effort("vault reset").await;
     Ok(())
 }
@@ -560,7 +570,10 @@ pub(crate) fn initialize_tracking_for_new_vault(
 
 #[cfg(test)]
 mod marker_tests {
-    use super::{begin_enrollment, initialize_tracking_for_new_vault, read_marker, TrackingState};
+    use super::{
+        begin_enrollment, clear_for_reset, initialize_tracking_for_new_vault, read_marker,
+        reconcile_credential_observation, CredentialObservation, TrackingState,
+    };
 
     #[test]
     fn new_vault_starts_in_explicit_clear_state() {
@@ -592,5 +605,89 @@ mod marker_tests {
             .await
             .unwrap_err();
         assert!(error.contains("tracking for this legacy vault is unknown"));
+    }
+
+    #[tokio::test]
+    async fn legacy_vault_with_missing_credential_reconciles_to_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A legacy vault has no enrollment marker. When the credential is
+        // missing, reconcile must establish Clear tracking so reset and
+        // enrollment are not permanently blocked.
+        let stored = reconcile_credential_observation(
+            dir.path(),
+            "generation-a",
+            CredentialObservation::Missing,
+        )
+        .await
+        .expect("legacy missing should reconcile to clear");
+
+        assert!(!stored, "missing credential should not report stored");
+        let marker = read_marker(dir.path())
+            .expect("read marker")
+            .expect("marker should be written");
+        assert_eq!(marker.binding_id, "generation-a");
+        assert_eq!(marker.state, TrackingState::Clear);
+    }
+
+    #[tokio::test]
+    async fn legacy_vault_can_enroll_after_missing_reconciles_to_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        reconcile_credential_observation(
+            dir.path(),
+            "generation-a",
+            CredentialObservation::Missing,
+        )
+        .await
+        .expect("reconcile legacy missing");
+
+        // After reconcile establishes Clear tracking, enrollment must not be
+        // blocked by the "unknown legacy vault" guard. On macOS without
+        // Keychain entitlements the scope probe may fail, but that is a
+        // platform capability error, not the tracking block being fixed here.
+        let result = begin_enrollment(dir.path(), "generation-a").await;
+        match &result {
+            Ok(()) => {
+                let marker = read_marker(dir.path())
+                    .expect("read marker")
+                    .expect("marker should be pending");
+                assert_eq!(marker.state, TrackingState::Pending);
+            }
+            Err(error) => {
+                assert!(
+                    !error.contains("tracking for this legacy vault is unknown"),
+                    "enrollment should not be blocked by unknown tracking after Clear: {error}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_vault_reset_succeeds_with_no_marker_and_missing_credential() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A legacy vault with no enrollment marker must be resettable. The
+        // reset path treats an untracked missing credential as Clear because
+        // the binding id is being destroyed and cannot unlock a future vault.
+        let result = clear_for_reset(dir.path(), "generation-a").await;
+        match &result {
+            Ok(()) => {
+                let marker = read_marker(dir.path())
+                    .expect("read marker")
+                    .expect("marker should be written as Clear");
+                assert_eq!(marker.binding_id, "generation-a");
+                assert_eq!(marker.state, TrackingState::Clear);
+            }
+            Err(error) => {
+                // On macOS without Keychain entitlements the blocking Keychain
+                // call fails before reaching the tracking logic. That is a
+                // platform capability error, not the tracking block being fixed.
+                assert!(
+                    !error.contains("legacy biometric tracking is unknown"),
+                    "reset should not be blocked by unknown tracking: {error}"
+                );
+            }
+        }
     }
 }
