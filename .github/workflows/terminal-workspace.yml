@@ -44,10 +44,11 @@ jobs:
           npm run build 2>&1 | tee ui-test-results/build.log
       - name: Install isolated, pinned browser tooling
         run: |
-          # Remove only the Google apt source lines/stanzas that can suffer
-          # transient metadata mismatches. Keep unrelated repositories even if
-          # a runner stores multiple sources in the same file.
-          sudo python3 - <<'PY'
+          # Work around the transient Google Chrome apt metadata issue only on
+          # ephemeral GitHub-hosted images. Persistent self-hosted package-source
+          # configuration belongs to the runner administrator, not a CI job.
+          if [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
+            sudo python3 - <<'PY'
           from pathlib import Path
 
           paths = [Path('/etc/apt/sources.list')]
@@ -75,6 +76,7 @@ jobs:
                   updated = '\n'.join(kept).rstrip()
               path.write_text(updated + ('\n' if updated else ''))
           PY
+          fi
           npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
           # Retry browser install as a safety net — the --with-deps flag runs
           # apt-get update internally, which can still transiently fail on
