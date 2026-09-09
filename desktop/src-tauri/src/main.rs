@@ -1,10 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod biometric;
+mod biometric_commands;
 mod commands;
 mod sftp_transfer;
 mod state;
 mod vault_commands;
+mod vault_initialize;
 mod vault_keychain_cleanup;
 
 use state::AppState;
@@ -58,16 +60,16 @@ fn main() {
             commands::update_identity,
             commands::delete_identity,
             commands::vault_is_initialized,
-            vault_commands::secure_initialize_vault,
+            vault_initialize::secure_initialize_vault,
             vault_commands::secure_unlock_vault,
             vault_commands::secure_lock_vault,
             vault_commands::secure_reset_vault,
             commands::is_vault_unlocked,
             biometric::biometric_available,
-            biometric::biometric_passphrase_stored,
-            biometric::store_biometric_passphrase,
+            biometric_commands::biometric_passphrase_stored,
+            biometric_commands::store_biometric_passphrase,
             biometric::unlock_with_biometric,
-            biometric::clear_biometric_passphrase,
+            biometric_commands::clear_biometric_passphrase,
             commands::list_keys,
             commands::generate_key,
             commands::import_key,
