@@ -31,19 +31,36 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     }
 }
 
+/// Result of unlinking a private file. A directory-sync failure is reported
+/// separately because the irreversible unlink has already happened and callers
+/// must still clear any in-memory state that could authorize the deleted data.
+pub(crate) struct RemovePrivateOutcome {
+    pub(crate) durability_error: Option<std::io::Error>,
+}
+
 /// Remove an atomically-written private file and any crash-leftover sibling
 /// temporary copy. The temporary copy is deleted first so a failure there never
 /// destroys the authoritative file while leaving an older encrypted snapshot
-/// behind. When something was actually unlinked, the containing directory is
-/// synced on Unix before success is reported so the deletion survives a crash or
-/// power loss after a destructive vault reset.
-pub(crate) fn remove_private(path: &Path) -> Result<()> {
+/// behind. Once unlinking succeeds, a containing-directory sync failure is
+/// returned in the outcome rather than rewinding the operation: the target is
+/// already gone and higher layers must cross their destructive reset boundary.
+pub(crate) fn remove_private(path: &Path) -> Result<RemovePrivateOutcome> {
+    remove_private_with_sync(path, sync_parent_directory)
+}
+
+fn remove_private_with_sync<F>(path: &Path, sync_parent: F) -> Result<RemovePrivateOutcome>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
     let removed_tmp = remove_if_present(&temp_path(path))?;
     let removed_target = remove_if_present(path)?;
-    if removed_tmp || removed_target {
-        sync_parent_directory(path)?;
-    }
-    Ok(())
+    let durability_error = if removed_tmp || removed_target {
+        sync_parent(path).err()
+    } else {
+        None
+    };
+
+    Ok(RemovePrivateOutcome { durability_error })
 }
 
 fn remove_if_present(path: &Path) -> std::io::Result<bool> {
@@ -93,7 +110,7 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_private, write_private};
+    use super::{remove_private, remove_private_with_sync, write_private};
 
     #[test]
     fn writes_and_then_replaces_the_target() {
@@ -142,6 +159,24 @@ mod tests {
 
         assert!(!path.exists());
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn remove_private_reports_sync_failure_after_unlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, "ciphertext").expect("seed vault");
+
+        let outcome = remove_private_with_sync(&path, |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "directory sync failed",
+            ))
+        })
+        .expect("unlink stage");
+
+        assert!(!path.exists());
+        assert!(outcome.durability_error.is_some());
     }
 
     #[test]
