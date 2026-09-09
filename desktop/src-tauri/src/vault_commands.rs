@@ -16,6 +16,10 @@ fn ensure_vault_uninitialized(vault: &Vault) -> ApiResult<()> {
     Ok(())
 }
 
+fn reset_crossed_destructive_boundary(reset_result: &ApiResult<()>, vault: &Vault) -> bool {
+    reset_result.is_ok() || !vault.is_initialized()
+}
+
 /// Commit the passphrase produced by vault initialization only if no newer
 /// authentication transition (most importantly a lock) has happened since the
 /// initialization request started. A successful commit advances the generation
@@ -135,19 +139,26 @@ pub async fn secure_reset_vault(
 
     // Delete the authoritative vault-bound Keychain item before erasing the
     // binding id needed to address it. If deletion fails, abort with the vault
-    // intact so the user can retry safely. Legacy-account cleanup remains
-    // best-effort inside clear_for_reset().
+    // intact so the user can retry safely. On macOS the cleanup implementation
+    // is compiled independently of Touch ID support so a downgraded build can
+    // still remove credentials created by an earlier biometric-enabled build.
     let binding_id = vault
         .binding_id()
         .ok_or_else(|| "vault binding is unavailable".to_string())?
         .to_owned();
+    #[cfg(target_os = "macos")]
+    crate::vault_keychain_cleanup::clear_for_reset(&binding_id).await?;
+    #[cfg(not(target_os = "macos"))]
     crate::biometric::clear_for_reset(&binding_id).await?;
 
-    vault.reset().map_err(err)?;
+    let reset_result = vault.reset().map_err(err);
+    if !reset_crossed_destructive_boundary(&reset_result, &vault) {
+        return reset_result;
+    }
 
-    // File deletion is the irreversible reset boundary. Invalidate the auth
-    // generation while we still own the vault lock, before an older unlock can
-    // make progress and before waiting for the passphrase mutex.
+    // Once the authoritative file has been unlinked, invalidate authentication
+    // even if the subsequent directory fsync reported a durability error. The
+    // process must never keep an in-memory passphrase for a vault that is gone.
     state.auth_generation.invalidate();
     drop(vault);
     drop(passphrase);
@@ -155,13 +166,14 @@ pub async fn secure_reset_vault(
     let mut pw = state.passphrase.lock().await;
     *pw = None;
 
-    Ok(())
+    reset_result
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         commit_initialized_passphrase_if_current, ensure_vault_uninitialized,
+        reset_crossed_destructive_boundary,
     };
     use crate::state::AuthGeneration;
     use clavyn_core::vault::Vault;
@@ -234,5 +246,27 @@ mod tests {
         slot = None;
 
         assert!(slot.is_none());
+    }
+
+    #[test]
+    fn reset_error_after_destructive_boundary_still_requires_auth_cleanup() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
+        let reset_result = Err::<(), String>("directory sync failed".into());
+
+        assert!(reset_crossed_destructive_boundary(&reset_result, &vault));
+    }
+
+    #[test]
+    fn reset_error_before_destructive_boundary_keeps_auth_state_retryable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path).expect("open vault");
+        vault
+            .initialize("correct horse battery staple")
+            .expect("initialize vault");
+        let reset_result = Err::<(), String>("unlink failed".into());
+
+        assert!(!reset_crossed_destructive_boundary(&reset_result, &vault));
     }
 }
