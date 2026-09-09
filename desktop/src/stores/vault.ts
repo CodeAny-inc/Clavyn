@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
+import { useKeysStore } from "./keys";
 
 const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
 
@@ -10,6 +11,7 @@ export const useVaultStore = defineStore("vault", () => {
   const error = ref<string | null>(null);
   const biometricAvailable = ref(false);
   const biometricEnabled = ref(false);
+  const keysStore = useKeysStore();
 
   const needsSetup = computed(() => !initialized.value);
   const needsUnlock = computed(
@@ -18,6 +20,17 @@ export const useVaultStore = defineStore("vault", () => {
 
   let biometricStateRevision = 0;
   let biometricMutationTail: Promise<void> = Promise.resolve();
+
+  function publishDestroyedVaultState() {
+    ++biometricStateRevision;
+    initialized.value = false;
+    unlocked.value = false;
+    biometricEnabled.value = false;
+    // Key metadata is derived from the encrypted vault. Once reset crosses the
+    // destructive boundary, retaining it would let host/identity forms offer
+    // key IDs that no longer exist in the backend.
+    keysStore.clear();
+  }
 
   function mutateBiometricState(operation: () => Promise<void>): Promise<void> {
     // Invalidate in-flight snapshots immediately, not only after the write.
@@ -194,11 +207,7 @@ export const useVaultStore = defineStore("vault", () => {
       error.value = null;
       try {
         await api.resetVault(passphrase);
-        // Discard any snapshot started while reset was pending.
-        ++biometricStateRevision;
-        initialized.value = false;
-        unlocked.value = false;
-        biometricEnabled.value = false;
+        publishDestroyedVaultState();
       } catch (e) {
         const resetError = String(e);
         if (resetError.includes(RESET_DURABILITY_ERROR_MARKER)) {
@@ -207,10 +216,7 @@ export const useVaultStore = defineStore("vault", () => {
           // though directory durability could not be confirmed, the renderer
           // must treat the old vault as destroyed rather than showing stale
           // unlocked state.
-          ++biometricStateRevision;
-          initialized.value = false;
-          unlocked.value = false;
-          biometricEnabled.value = false;
+          publishDestroyedVaultState();
         } else {
           // Failures before the destructive boundary preserve the vault. A
           // credential may still have been removed before a later unlink error,
