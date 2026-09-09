@@ -49,6 +49,10 @@ pub struct AppState {
     pub known_hosts: Arc<Mutex<KnownHosts>>,
     pub passphrase: Mutex<Option<zeroize::Zeroizing<String>>>,
     pub auth_generation: AuthGeneration,
+    /// Serializes Keychain credential creation/deletion with destructive vault
+    /// reset. This ensures reset can authoritatively remove the old vault-bound
+    /// credential before destroying the binding id needed to address it.
+    pub biometric_mutation: Mutex<()>,
     pub sessions: Arc<SessionManager>,
     pub sftp: Arc<SftpManager>,
     pub local_terminals: Mutex<std::collections::HashMap<String, LocalTerminal>>,
@@ -103,6 +107,7 @@ impl AppState {
             known_hosts: Arc::new(Mutex::new(known_hosts)),
             passphrase: Mutex::new(None),
             auth_generation: AuthGeneration::new(),
+            biometric_mutation: Mutex::new(()),
             sessions,
             sftp,
             local_terminals: Mutex::new(std::collections::HashMap::new()),
