@@ -35,3 +35,4 @@ vault.json
 # Agent verification harness — transient session + screenshots
 scripts/verify/.session.json
 scripts/verify/screenshot-*.png
+desktop/e2e/ui-test-results/
