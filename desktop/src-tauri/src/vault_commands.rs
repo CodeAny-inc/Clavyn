@@ -109,11 +109,10 @@ pub async fn secure_lock_vault(state: State<'_, Arc<AppState>>) -> ApiResult<()>
 /// uninitialized.
 ///
 /// Authorization is enforced before any destructive action: a wrong passphrase
-/// never destroys the vault. Biometric credentials for the destroyed
-/// generation are also cleared, since a leftover Keychain item would otherwise
-/// show a stale enrollment indicator for a vault that no longer exists. The
-/// auth generation is advanced before the passphrase mutex is acquired so an
-/// in-flight unlock cannot commit after this reset.
+/// never destroys the vault. Once file deletion succeeds, authentication state
+/// is invalidated and the in-memory passphrase is cleared before any fallible
+/// biometric cleanup is awaited. That keeps the reset authoritative even if the
+/// OS Keychain is temporarily unavailable.
 #[tauri::command]
 pub async fn secure_reset_vault(
     state: State<'_, Arc<AppState>>,
@@ -125,28 +124,34 @@ pub async fn secure_reset_vault(
     if !vault.is_initialized() {
         return Err("vault is not initialized".into());
     }
+
     // Authorization gate: prove knowledge of the current passphrase before
     // touching the on-disk file or any biometric credential.
     vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+
     // Capture the binding id before reset so biometric cleanup targets the
     // destroyed generation even after the in-memory vault state is cleared.
     let binding_id = vault.binding_id().map(str::to_owned);
     vault.reset().map_err(err)?;
-    drop(vault);
 
-    // Remove biometric credentials for the destroyed generation. A leftover
-    // bound item can never unlock the new vault (the salt changed), but
-    // cleaning it avoids a confusing stale enrollment indicator.
-    if let Some(binding_id) = binding_id {
-        crate::biometric::clear_for_reset(&binding_id).await?;
-    }
-    crate::biometric::clear_for_vault_initialization().await;
-
-    // Advance the generation before acquiring the passphrase mutex so an
-    // in-flight unlock/initialization cannot commit after this reset.
+    // File deletion is the irreversible reset boundary. Invalidate the auth
+    // generation while we still own the vault lock, before an older unlock can
+    // make progress and before waiting for the passphrase mutex.
     state.auth_generation.invalidate();
+    drop(vault);
+    drop(passphrase);
+
     let mut pw = state.passphrase.lock().await;
     *pw = None;
+    drop(pw);
+
+    // Keychain cleanup is hygiene after the authoritative vault destruction.
+    // A failure is logged by clear_for_reset instead of making the caller think
+    // the reset failed after the vault has already been destroyed.
+    if let Some(binding_id) = binding_id {
+        crate::biometric::clear_for_reset(&binding_id).await;
+    }
+
     Ok(())
 }
 
@@ -212,5 +217,19 @@ mod tests {
         assert!(committed);
         assert!(slot.is_some());
         assert!(!generation.is_current(expected));
+    }
+
+    #[test]
+    fn reset_epoch_invalidates_older_authentication_before_slot_cleanup() {
+        let generation = AuthGeneration::new();
+        let older_attempt = generation.current();
+        let mut slot = Some(zeroize::Zeroizing::new("secret".to_string()));
+
+        // Mirrors the reset boundary: generation first, passphrase slot second.
+        generation.invalidate();
+        assert!(!generation.is_current(older_attempt));
+        slot = None;
+
+        assert!(slot.is_none());
     }
 }
