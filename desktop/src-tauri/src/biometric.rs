@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, AuthGeneration};
 use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
@@ -28,6 +28,16 @@ fn vault_binding_id(vault: &Vault) -> ApiResult<String> {
         .binding_id()
         .map(str::to_owned)
         .ok_or_else(|| "vault not initialized".to_string())
+}
+
+fn biometric_enrollment_is_current(
+    auth_generation: &AuthGeneration,
+    expected_generation: u64,
+    vault: &Vault,
+    binding_id: &str,
+) -> bool {
+    auth_generation.is_current(expected_generation)
+        && vault.binding_id() == Some(binding_id)
 }
 
 // ============================================================
@@ -343,18 +353,22 @@ pub(crate) async fn clear_for_vault_initialization() {
     let _ = finish_with_best_effort_legacy_cleanup("vault initialization", result);
 }
 
-/// Remove the biometric passphrase bound to a specific vault generation during
-/// a vault reset. The bound account is authoritative for the destroyed
-/// generation, so a deletion failure is surfaced to the caller rather than
-/// swallowed: leaving the credential behind would show a stale enrollment
-/// indicator for a vault that no longer exists. The legacy static account is
-/// cleaned up best-effort afterward.
-pub(crate) async fn clear_for_reset(binding_id: &str) -> ApiResult<()> {
-    let binding_id = binding_id.to_owned();
-    blocking_platform_call(move || platform::clear_passphrase(&binding_id)).await?;
+/// Remove biometric credentials belonging to a vault generation that has
+/// already been destroyed. At this point the encrypted vault file is gone and
+/// the in-memory auth state has been invalidated, so cleanup failures are logged
+/// instead of being returned as an apparent reset failure. A leftover item is
+/// still cryptographically bound to the destroyed generation and cannot unlock a
+/// newly initialized vault.
+pub(crate) async fn clear_for_reset(binding_id: &str) {
+    let bound_id = binding_id.to_owned();
+    if let Err(error) = blocking_platform_call(move || platform::clear_passphrase(&bound_id)).await {
+        tracing::warn!(
+            "failed to clean vault-bound biometric credential during vault reset: {error}"
+        );
+    }
+
     let result = blocking_platform_call(platform::clear_legacy_passphrase).await;
     let _ = finish_with_best_effort_legacy_cleanup("vault reset", result);
-    Ok(())
 }
 
 // ============================================================
@@ -387,12 +401,15 @@ pub async fn biometric_passphrase_stored(
 
 /// Store the vault passphrase in the OS keychain, protected by Touch ID.
 /// The passphrase is verified against the vault before storing to prevent
-/// saving an incorrect passphrase.
+/// saving an incorrect passphrase. The vault/auth generation is checked again
+/// after the blocking Keychain write so a concurrent reset cannot recreate a
+/// credential for a vault generation that has already been destroyed.
 #[tauri::command]
 pub async fn store_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
     passphrase: String,
 ) -> ApiResult<()> {
+    let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
     let binding_id = {
@@ -403,10 +420,35 @@ pub async fn store_biometric_passphrase(
         vault_binding_id(&vault)?
     };
 
+    let stored_binding_id = binding_id.clone();
     blocking_platform_call(move || {
-        platform::store_passphrase(&binding_id, passphrase.as_str())
+        platform::store_passphrase(&stored_binding_id, passphrase.as_str())
     })
-    .await
+    .await?;
+
+    let still_current = {
+        let vault = state.vault.lock().await;
+        biometric_enrollment_is_current(
+            &state.auth_generation,
+            generation,
+            &vault,
+            &binding_id,
+        )
+    };
+
+    if !still_current {
+        let stale_binding_id = binding_id.clone();
+        if let Err(error) =
+            blocking_platform_call(move || platform::clear_passphrase(&stale_binding_id)).await
+        {
+            tracing::warn!(
+                "failed to clean superseded biometric enrollment for destroyed vault: {error}"
+            );
+        }
+        return Err("biometric enrollment was superseded by a newer vault state".into());
+    }
+
+    Ok(())
 }
 
 /// Unlock the vault by retrieving the passphrase from the Keychain item bound
@@ -467,7 +509,9 @@ pub async fn clear_biometric_passphrase(
 
 #[cfg(test)]
 mod cleanup_tests {
-    use super::finish_with_best_effort_legacy_cleanup;
+    use super::{biometric_enrollment_is_current, finish_with_best_effort_legacy_cleanup};
+    use crate::state::AuthGeneration;
+    use clavyn_core::vault::Vault;
 
     #[test]
     fn legacy_cleanup_failure_does_not_fail_authoritative_disable() {
@@ -477,5 +521,58 @@ mod cleanup_tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn enrollment_is_rejected_after_auth_generation_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path).expect("open vault");
+        vault
+            .initialize("correct horse battery staple")
+            .expect("initialize vault");
+        let binding_id = vault.binding_id().expect("binding id").to_string();
+        let generation = AuthGeneration::new();
+        let expected = generation.current();
+
+        assert!(biometric_enrollment_is_current(
+            &generation,
+            expected,
+            &vault,
+            &binding_id,
+        ));
+
+        generation.invalidate();
+        assert!(!biometric_enrollment_is_current(
+            &generation,
+            expected,
+            &vault,
+            &binding_id,
+        ));
+    }
+
+    #[test]
+    fn enrollment_is_rejected_after_vault_generation_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path).expect("open vault");
+        vault
+            .initialize("first passphrase")
+            .expect("initialize first vault");
+        let first_binding = vault.binding_id().expect("first binding").to_string();
+        let generation = AuthGeneration::new();
+        let expected = generation.current();
+
+        vault.reset().expect("reset vault");
+        vault
+            .initialize("second passphrase")
+            .expect("initialize second vault");
+
+        assert!(!biometric_enrollment_is_current(
+            &generation,
+            expected,
+            &vault,
+            &first_binding,
+        ));
     }
 }
