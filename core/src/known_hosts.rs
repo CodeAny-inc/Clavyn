@@ -36,12 +36,8 @@ impl KnownHosts {
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let data = serde_json::to_string_pretty(&self.entries)?;
-        std::fs::write(&self.path, data)?;
-        Ok(())
+        crate::fs_util::write_private(&self.path, &data)
     }
 
     /// Returns Ok(true) if trusted (matches or first-seen + recorded).

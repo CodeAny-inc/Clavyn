@@ -48,12 +48,8 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let raw = serde_json::to_string_pretty(&self.data)?;
-        std::fs::write(&self.path, raw)?;
-        Ok(())
+        crate::fs_util::write_private(&self.path, &raw)
     }
 
     // --- hosts ---

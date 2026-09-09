@@ -12,10 +12,12 @@
 //! Security rules enforced here, not in the UI layer:
 //! - private key material is zeroized on drop
 //! - vault ciphertext is the only thing ever persisted to disk
+//! - state files are written atomically and owner-only
 //! - host key mismatches never auto-accept
 
 pub mod connection;
 pub mod error;
+mod fs_util;
 pub mod host;
 pub mod identity;
 pub mod keys;
