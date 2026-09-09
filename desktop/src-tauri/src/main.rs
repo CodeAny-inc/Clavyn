@@ -5,6 +5,7 @@ mod commands;
 mod sftp_transfer;
 mod state;
 mod vault_commands;
+mod vault_keychain_cleanup;
 
 use state::AppState;
 use tauri::Manager;
