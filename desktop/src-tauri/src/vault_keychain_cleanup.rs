@@ -157,28 +157,6 @@ fn write_state(
     )
 }
 
-/// Compatibility helper retained for the older biometric implementation that
-/// still compiles in this crate. New command registration uses the v2 tracking
-/// flow in `biometric_commands`.
-pub(crate) fn marker_tracks_binding(app_data_dir: &Path, binding_id: &str) -> ApiResult<bool> {
-    Ok(marker_for_binding(app_data_dir, binding_id)?.is_some())
-}
-
-/// Compatibility helper for the first marker implementation. It deliberately
-/// writes an enrolled marker without a scope token; the v2 reconciler upgrades
-/// it only after it has positively observed the credential in the current
-/// Keychain access group.
-pub(crate) fn record_enrollment_marker(app_data_dir: &Path, binding_id: &str) -> ApiResult<()> {
-    write_state(app_data_dir, binding_id, TrackingState::Enrolled, None)
-}
-
-pub(crate) fn clear_enrollment_marker(app_data_dir: &Path, binding_id: &str) -> ApiResult<()> {
-    if marker_for_binding(app_data_dir, binding_id)?.is_none() {
-        return Ok(());
-    }
-    remove_marker_file(app_data_dir)
-}
-
 #[cfg(target_os = "macos")]
 mod macos {
     use security_framework::passwords::{self, PasswordOptions};
@@ -207,10 +185,6 @@ mod macos {
         let mut options = PasswordOptions::new_generic_password(service, account);
         options.use_protected_keychain();
         options
-    }
-
-    fn password_options_for_account(account: &str) -> PasswordOptions {
-        protected_options(SERVICE, account)
     }
 
     fn scope_options(binding_id: &str) -> PasswordOptions {
@@ -391,7 +365,7 @@ pub(crate) async fn reconcile_credential_observation(
             }
             return Ok(stored);
         }
-        Some(mut marker) if marker.state == TrackingState::Clear => {
+        Some(marker) if marker.state == TrackingState::Clear => {
             match observation {
                 CredentialObservation::Missing => return Ok(false),
                 CredentialObservation::Stored | CredentialObservation::Invalidated => {
@@ -586,10 +560,7 @@ pub(crate) fn initialize_tracking_for_new_vault(
 
 #[cfg(test)]
 mod marker_tests {
-    use super::{
-        begin_enrollment, initialize_tracking_for_new_vault, marker_tracks_binding,
-        read_marker, record_enrollment_marker, TrackingState,
-    };
+    use super::{begin_enrollment, initialize_tracking_for_new_vault, read_marker, TrackingState};
 
     #[test]
     fn new_vault_starts_in_explicit_clear_state() {
@@ -611,16 +582,7 @@ mod marker_tests {
         let marker = read_marker(dir.path()).unwrap().unwrap();
         assert_eq!(marker.state, TrackingState::Enrolled);
         assert!(marker.scope_token.is_none());
-        assert!(marker_tracks_binding(dir.path(), "generation-a").unwrap());
-    }
-
-    #[test]
-    fn compatibility_enrollment_marker_is_fail_closed_without_scope() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        record_enrollment_marker(dir.path(), "generation-a").expect("record marker");
-        let marker = read_marker(dir.path()).unwrap().unwrap();
-        assert_eq!(marker.state, TrackingState::Enrolled);
-        assert!(marker.scope_token.is_none());
+        assert!(marker.binding_id == "generation-a");
     }
 
     #[tokio::test]
