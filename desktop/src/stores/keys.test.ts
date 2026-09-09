@@ -105,4 +105,16 @@ describe("keys store", () => {
       expect(store.keys.find((k) => k.id === "key-1")).toBeUndefined();
     });
   });
+
+  describe("clear", () => {
+    it("drops cached metadata for keys destroyed with the vault", async () => {
+      const store = useKeysStore();
+      await store.load();
+      expect(store.keys).toHaveLength(2);
+
+      store.clear();
+
+      expect(store.keys).toEqual([]);
+    });
+  });
 });
