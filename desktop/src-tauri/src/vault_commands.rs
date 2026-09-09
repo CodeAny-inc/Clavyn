@@ -1,5 +1,5 @@
 use crate::state::{AppState, AuthGeneration};
-use clavyn_core::vault::Vault;
+use clavyn_core::{vault::Vault, CoreError};
 use std::sync::Arc;
 use tauri::State;
 
@@ -18,6 +18,20 @@ fn ensure_vault_uninitialized(vault: &Vault) -> ApiResult<()> {
 
 fn reset_crossed_destructive_boundary(reset_result: &ApiResult<()>, vault: &Vault) -> bool {
     reset_result.is_ok() || !vault.is_initialized()
+}
+
+fn normalize_reset_result(
+    reset_result: clavyn_core::Result<()>,
+    vault: &Vault,
+) -> ApiResult<()> {
+    match reset_result {
+        Ok(()) => Ok(()),
+        Err(error) if !vault.is_initialized() => Err(CoreError::VaultResetDurability(
+            error.to_string(),
+        )
+        .to_string()),
+        Err(error) => Err(err(error)),
+    }
 }
 
 /// Commit the passphrase produced by vault initialization only if no newer
@@ -151,7 +165,8 @@ pub async fn secure_reset_vault(
     #[cfg(not(target_os = "macos"))]
     crate::biometric::clear_for_reset(&binding_id).await?;
 
-    let reset_result = vault.reset().map_err(err);
+    let core_reset_result = vault.reset();
+    let reset_result = normalize_reset_result(core_reset_result, &vault);
     if !reset_crossed_destructive_boundary(&reset_result, &vault) {
         return reset_result;
     }
@@ -173,10 +188,10 @@ pub async fn secure_reset_vault(
 mod tests {
     use super::{
         commit_initialized_passphrase_if_current, ensure_vault_uninitialized,
-        reset_crossed_destructive_boundary,
+        normalize_reset_result, reset_crossed_destructive_boundary,
     };
     use crate::state::AuthGeneration;
-    use clavyn_core::vault::Vault;
+    use clavyn_core::{vault::Vault, CoreError};
 
     #[test]
     fn rejects_initialization_when_a_vault_already_exists() {
@@ -268,5 +283,18 @@ mod tests {
         let reset_result = Err::<(), String>("unlink failed".into());
 
         assert!(!reset_crossed_destructive_boundary(&reset_result, &vault));
+    }
+
+    #[test]
+    fn post_delete_reset_errors_are_tagged_for_frontend_reconciliation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
+        let result = normalize_reset_result(
+            Err(CoreError::Io(std::io::Error::other("directory sync failed"))),
+            &vault,
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("[vault-reset-durability]"));
     }
 }
