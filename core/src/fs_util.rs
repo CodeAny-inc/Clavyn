@@ -34,19 +34,41 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
 /// Remove an atomically-written private file and any crash-leftover sibling
 /// temporary copy. The temporary copy is deleted first so a failure there never
 /// destroys the authoritative file while leaving an older encrypted snapshot
-/// behind.
+/// behind. When something was actually unlinked, the containing directory is
+/// synced on Unix before success is reported so the deletion survives a crash or
+/// power loss after a destructive vault reset.
 pub(crate) fn remove_private(path: &Path) -> Result<()> {
-    remove_if_present(&temp_path(path))?;
-    remove_if_present(path)?;
+    let removed_tmp = remove_if_present(&temp_path(path))?;
+    let removed_target = remove_if_present(path)?;
+    if removed_tmp || removed_target {
+        sync_parent_directory(path)?;
+    }
     Ok(())
 }
 
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
+fn remove_if_present(path: &Path) -> std::io::Result<bool> {
     match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::File::open(parent)?.sync_all()
+}
+
+// Rust's standard library does not expose a portable directory fsync primitive
+// on Windows. Keep the unlink behavior unchanged there rather than pretending a
+// file handle sync makes the parent directory entry durable.
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn temp_path(path: &Path) -> PathBuf {
@@ -126,6 +148,14 @@ mod tests {
     fn remove_private_is_idempotent_when_files_are_missing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.json");
+
+        remove_private(&path).expect("remove missing private file");
+    }
+
+    #[test]
+    fn remove_private_is_idempotent_when_parent_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing").join("vault.json");
 
         remove_private(&path).expect("remove missing private file");
     }
