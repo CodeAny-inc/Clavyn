@@ -48,6 +48,24 @@ jobs:
       - name: Cargo test (macOS biometric implementation)
         run: cargo test -p clavyn-desktop --features macos-biometric
 
+  security-audit:
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit Rust dependencies
+        run: cargo audit
+      - name: Audit npm production dependencies
+        working-directory: desktop
+        run: npm audit --omit=dev --audit-level=high
+
   frontend-build:
     runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-latest"') }}
     steps:
