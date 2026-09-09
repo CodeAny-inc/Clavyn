@@ -42,6 +42,9 @@ export const useTabsStore = defineStore("tabs", () => {
   const draggedPaneId = ref<string | null>(null);
   const dragOverPaneId = ref<string | null>(null);
   const dragOverPosition = ref<DropPosition | null>(null);
+  // Highlighted tab while a pane is dragged over it, so the tab strip can show
+  // a "drop here to add as a split" affordance like Termius workspaces.
+  const dragOverTabId = ref<string | null>(null);
   const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) ?? null);
   const activePane = computed(() => activeTab.value && activePaneId.value
     ? findPane(activeTab.value.tree, activePaneId.value) : null);
@@ -134,13 +137,19 @@ export const useTabsStore = defineStore("tabs", () => {
     }
   }
   function startDrag(id: string) { draggedPaneId.value = id; }
-  function clearDragOver() { dragOverPaneId.value = null; dragOverPosition.value = null; }
+  function clearDragOver() { dragOverPaneId.value = null; dragOverPosition.value = null; dragOverTabId.value = null; }
   function endDrag() { draggedPaneId.value = null; clearDragOver(); }
   function setDragOver(id: string, position: DropPosition) {
     if (draggedPaneId.value === id) return;
     dragOverPaneId.value = id;
     dragOverPosition.value = position;
   }
+  // Highlight a tab as a pane-drop target. Only meaningful while a pane is dragged.
+  function setDragOverTab(id: string) {
+    if (!draggedPaneId.value) return;
+    dragOverTabId.value = id;
+  }
+  function clearDragOverTab() { dragOverTabId.value = null; }
   function dropPane(targetId: string, position: DropPosition) {
     const id = draggedPaneId.value;
     const tab = id ? owningTab(id) : undefined;
@@ -175,6 +184,30 @@ export const useTabsStore = defineStore("tabs", () => {
     }
     target.tree = { id: paneId(), direction: "horizontal", ratio: 0.5, first: target.tree, second: pane };
     setActivePane(id);
+    endDrag();
+    paneFocusRequest.value = { paneId: id };
+  }
+  // Pull a pane out of its current tab into a fresh tab of its own. The inverse
+  // of movePaneToTab: a Termius "move a session back to a separate tab" gesture.
+  // The pane object (and its live session) travels intact, so the connection is
+  // never interrupted. The new tab is inserted after the source tab.
+  function extractPaneToNewTab(id: string) {
+    const source = owningTab(id);
+    if (!source) return;
+    const pane = findPane(source.tree, id);
+    if (!pane) return;
+    const insertAt = tabs.value.findIndex(t => t.id === source.id) + 1;
+    if (isPane(source.tree)) {
+      tabs.value = tabs.value.filter(t => t.id !== source.id);
+      focusedPanes.delete(source.id);
+    } else {
+      source.tree = detach(source.tree, id);
+      if (focusedPanes.get(source.id) === id) focusedPanes.set(source.id, firstPane(source.tree).id);
+    }
+    const tab = { id: paneId(), title: pane.title, tree: pane as PaneTree };
+    tabs.value.splice(Math.min(insertAt, tabs.value.length), 0, tab);
+    setActivePane(id);
+    endDrag();
     paneFocusRequest.value = { paneId: id };
   }
   function navigatePane(direction: "up" | "down" | "left" | "right") {
@@ -190,10 +223,11 @@ export const useTabsStore = defineStore("tabs", () => {
     tabs.value.splice(to, 0, tab);
   }
   return { tabs, activeTabId, activePaneId, activeTab, activePane, paneFocusRequest,
-    draggedPaneId, dragOverPaneId, dragOverPosition,
+    draggedPaneId, dragOverPaneId, dragOverPosition, dragOverTabId,
     newTab, closeTab, setActiveTab, setActivePane, splitPane, closePane,
     setPaneConnected, setPaneDisconnected, setPaneTitle, setRatio, firstPane,
-    startDrag, endDrag, setDragOver, clearDragOver, dropPane, movePaneToTab, navigatePane, reorderTab };
+    startDrag, endDrag, setDragOver, clearDragOver, setDragOverTab, clearDragOverTab,
+    dropPane, movePaneToTab, extractPaneToNewTab, navigatePane, reorderTab };
 });
 function replace(tree: PaneTree, id: string, change: (pane: Pane) => PaneTree): PaneTree {
   if (isPane(tree)) return tree.id === id ? change(tree) : tree;

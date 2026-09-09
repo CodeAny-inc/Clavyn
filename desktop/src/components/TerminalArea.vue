@@ -36,6 +36,12 @@ function tabDrag(event: DragEvent, id: string) {
     event.dataTransfer.setData("text/plain", id);
   }
 }
+function tabDragOver(event: DragEvent, id: string) {
+  if (!tabs.draggedPaneId) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  tabs.setDragOverTab(id);
+}
 function tabDrop(event: DragEvent, target: string) {
   event.preventDefault();
   if (tabs.draggedPaneId) {
@@ -46,6 +52,20 @@ function tabDrop(event: DragEvent, target: string) {
     tabs.reorderTab(tabs.tabs.findIndex(t => t.id === draggedTabId.value), tabs.tabs.findIndex(t => t.id === target));
   }
   draggedTabId.value = null;
+}
+// Dropping a dragged pane on the empty strip / New-session area extracts it
+// into its own tab — the inverse of dropping onto an existing tab's split.
+function stripDragOver(event: DragEvent) {
+  if (!tabs.draggedPaneId) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  tabs.clearDragOverTab();
+}
+function stripDrop(event: DragEvent) {
+  if (!tabs.draggedPaneId) return;
+  event.preventDefault();
+  tabs.extractPaneToNewTab(tabs.draggedPaneId);
+  emit("activate");
 }
 function focusTab(event: KeyboardEvent, index: number) {
   let target: number;
@@ -77,12 +97,19 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 <template>
   <section class="flex min-h-0 min-w-0 flex-col" :class="visible ? 'flex-1' : 'shrink-0'" aria-label="Terminal sessions">
     <!-- One navigation row. Session creation lives here; pane actions live in each pane's menu. -->
-    <div v-show="!ui.fullscreenPaneId" class="session-strip" data-testid="session-strip">
-      <nav class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="Open terminal tabs">
+    <div class="session-strip" data-testid="session-strip"
+      @dragover="tabs.draggedPaneId ? stripDragOver($event) : undefined"
+      @drop="stripDrop($event)" @dragleave="tabs.draggedPaneId ? tabs.clearDragOverTab() : undefined">
+      <nav class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="Open terminal tabs"
+        :class="{ 'pane-drag-active': !!tabs.draggedPaneId }">
         <div v-for="(tab, index) in tabs.tabs" :key="tab.id" class="session-tab"
-          :class="{ 'session-tab-active': visible && tab.id === tabs.activeTabId }"
-          draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="draggedTabId = null"
-          @dragover.prevent @drop="tabDrop($event, tab.id)" @auxclick.middle.prevent="tabs.closeTab(tab.id)">
+          :class="{
+            'session-tab-active': visible && tab.id === tabs.activeTabId,
+            'session-tab-drop-target': tabs.dragOverTabId === tab.id && tabs.draggedPaneId,
+          }"
+          draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="draggedTabId = null; tabs.endDrag()"
+          @dragover="tabDragOver($event, tab.id)" @dragleave="tabs.dragOverTabId === tab.id && tabs.clearDragOverTab()"
+          @drop="tabDrop($event, tab.id)" @auxclick.middle.prevent="tabs.closeTab(tab.id)">
           <button class="session-tab-select" :aria-pressed="visible && tab.id === tabs.activeTabId" :data-tab-id="tab.id"
             :title="`Show ${tab.title} terminal · ${connected(tab.id)} connected`"
             @click="activate(tab.id)" @keydown="focusTab($event, index)">
@@ -95,8 +122,11 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
         </div>
         <span v-if="!tabs.tabs.length" class="px-2 text-xs text-muted-foreground">No open sessions</span>
       </nav>
-      <button class="new-session" aria-label="New session" title="New session: host or local shell" @click="picker?.show()">
-        <Plus class="size-4" :stroke-width="1.75" /><span class="hidden sm:inline">New session</span>
+      <button class="new-session" :class="{ 'new-session-drop-target': !!tabs.draggedPaneId }"
+        :aria-label="tabs.draggedPaneId ? 'Drop here for a new tab' : 'New session'"
+        :title="tabs.draggedPaneId ? 'Drop to move pane into its own tab' : 'New session: host or local shell'"
+        @click="picker?.show()">
+        <Plus class="size-4" :stroke-width="1.75" /><span class="hidden sm:inline">{{ tabs.draggedPaneId ? 'New tab' : 'New session' }}</span>
       </button>
     </div>
     <TerminalWorkspace v-show="visible && tabs.tabs.length > 0" :visible="visible" @request-session="requestSession" />
@@ -118,4 +148,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 .session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring; }
 .new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .terminal-empty { @apply flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center; background: var(--terminal-background); }
+/* Pane-drag affordances in the tab strip, mirroring Termius workspaces. */
+.pane-drag-active .session-tab { @apply transition-colors duration-100; }
+.session-tab-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
+.new-session-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
 </style>
