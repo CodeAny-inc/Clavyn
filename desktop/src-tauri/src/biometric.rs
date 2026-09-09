@@ -353,7 +353,9 @@ pub async fn biometric_available() -> ApiResult<bool> {
 }
 
 /// Checks whether a protected biometric passphrase is stored for the current
-/// vault generation without showing an authentication prompt.
+/// vault generation without showing an authentication prompt. A visible
+/// pre-marker credential is migrated into durable tracking here so upgrades
+/// establish the fail-closed reset invariant before any later build change.
 #[tauri::command]
 pub async fn biometric_passphrase_stored(
     state: State<'_, Arc<AppState>>,
@@ -366,7 +368,21 @@ pub async fn biometric_passphrase_stored(
         }
     };
 
-    blocking_platform_call(move || platform::passphrase_stored(&binding_id)).await
+    let marker_was_present = crate::vault_keychain_cleanup::marker_tracks_binding(
+        &state.app_data_dir,
+        &binding_id,
+    )?;
+    let probe_binding_id = binding_id.clone();
+    let stored =
+        blocking_platform_call(move || platform::passphrase_stored(&probe_binding_id)).await?;
+
+    if stored && !marker_was_present {
+        crate::vault_keychain_cleanup::record_enrollment_marker(
+            &state.app_data_dir,
+            &binding_id,
+        )?;
+    }
+    Ok(stored)
 }
 
 /// Store the vault passphrase in the OS keychain, protected by Touch ID.
