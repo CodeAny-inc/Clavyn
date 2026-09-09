@@ -186,9 +186,8 @@ export const useVaultStore = defineStore("vault", () => {
 
   async function reset(passphrase: string) {
     // Serialize reset behind any credential write already in flight. The backend
-    // still independently rejects stale enrollment, so direct IPC callers are
-    // safe too; this queue keeps ordinary UI state deterministic and avoids a
-    // successful enable operation publishing after reset has completed.
+    // independently serializes direct IPC mutations too; this queue keeps
+    // ordinary UI state deterministic.
     return mutateBiometricState(async () => {
       error.value = null;
       try {
@@ -199,7 +198,15 @@ export const useVaultStore = defineStore("vault", () => {
         unlocked.value = false;
         biometricEnabled.value = false;
       } catch (e) {
-        error.value = String(e);
+        // A reset may authoritatively delete the biometric credential before a
+        // later filesystem deletion fails. Reconcile that state, but keep this
+        // confirmation-form error local to the component instead of persisting
+        // it as a global vault runtime error after the form is dismissed.
+        try {
+          await reconcileBiometricState();
+        } catch {
+          // Reconciliation fails closed; preserve the original reset error.
+        }
         throw e;
       }
     });
