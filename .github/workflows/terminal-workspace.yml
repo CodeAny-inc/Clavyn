@@ -45,7 +45,17 @@ jobs:
       - name: Install isolated, pinned browser tooling
         run: |
           npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
-          desktop/e2e/node_modules/.bin/playwright install --with-deps chromium
+          # Retry browser install — the --with-deps flag runs apt-get update
+          # internally, which can transiently fail on hash mismatches from
+          # upstream apt mirrors (e.g. Google Chrome repo).
+          for attempt in 1 2 3; do
+            if desktop/e2e/node_modules/.bin/playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       - name: Start application
         run: |
           (cd desktop && npm run dev -- --host 127.0.0.1 > "$RUNNER_TEMP/terminal-vite.log" 2>&1) &
