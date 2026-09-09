@@ -1,7 +1,7 @@
 use crate::host::{Host, HostGroup};
 use crate::identity::Identity;
 use crate::workspace::Workspace;
-use crate::Result;
+use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -30,7 +30,13 @@ impl Store {
     pub fn load(path: PathBuf) -> Result<Self> {
         let data = if path.exists() {
             let raw = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&raw).unwrap_or_default()
+            // Fail closed. Falling back to an empty store would drop every host,
+            // identity and workspace, and the next save() would overwrite the
+            // file that still holds them.
+            serde_json::from_str(&raw).map_err(|e| CoreError::CorruptState {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?
         } else {
             StoreData::default()
         };
@@ -158,5 +164,46 @@ impl Store {
     pub fn set_active_workspace(&mut self, id: uuid::Uuid) -> Result<()> {
         self.data.active_workspace_id = Some(id);
         self.save()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Store;
+    use crate::host::HostGroup;
+
+    const ONE_HOST: &str = r#"{"hosts":[{"id":"11111111-1111-1111-1111-111111111111","label":"prod","hostname":"prod.example.com","port":22,"username":"deploy","auth":"publickey","tags":[]}],"host_groups":[],"identities":[],"workspaces":[]}"#;
+
+    #[test]
+    fn corrupt_file_is_rejected_instead_of_being_overwritten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        std::fs::write(&path, ONE_HOST).expect("seed store");
+        assert_eq!(Store::load(path.clone()).expect("load").hosts().len(), 1);
+
+        std::fs::write(&path, r#"{"hosts":[{"id":"11111111-1111-"#).expect("truncate");
+        let error = match Store::load(path.clone()) {
+            Ok(_) => panic!("a corrupt store unexpectedly loaded as empty"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("is corrupt"), "unexpected error: {error}");
+
+        // The unreadable bytes are still on disk, so the data stays recoverable.
+        let on_disk = std::fs::read_to_string(&path).expect("read back");
+        assert!(on_disk.starts_with(r#"{"hosts":[{"id":"11111111-1111-"#));
+    }
+
+    #[test]
+    fn a_loaded_store_still_saves_normally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        std::fs::write(&path, ONE_HOST).expect("seed store");
+
+        let mut store = Store::load(path.clone()).expect("load");
+        store.add_group(HostGroup::new("group")).expect("save");
+
+        let reloaded = Store::load(path).expect("reload");
+        assert_eq!(reloaded.hosts().len(), 1);
+        assert_eq!(reloaded.groups().len(), 1);
     }
 }
