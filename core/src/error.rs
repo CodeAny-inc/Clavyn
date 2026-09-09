@@ -22,6 +22,9 @@ pub enum CoreError {
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
+    #[error("{path} is corrupt and was not loaded: {reason}")]
+    CorruptState { path: String, reason: String },
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 

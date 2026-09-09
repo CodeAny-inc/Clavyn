@@ -23,7 +23,12 @@ impl KnownHosts {
     pub fn load(path: PathBuf) -> Result<Self> {
         let entries = if path.exists() {
             let data = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&data).unwrap_or_default()
+            // Fail closed. Treating an unreadable file as "no known hosts" would
+            // silently downgrade every pinned host back to trust-on-first-use.
+            serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?
         } else {
             HashMap::new()
         };
@@ -110,4 +115,46 @@ impl KnownHosts {
 
 fn key_path(host: &str, port: u16) -> String {
     format!("{host}:{port}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::KnownHosts;
+
+    fn pinned_store(dir: &std::path::Path) -> std::path::PathBuf {
+        let path = dir.join("known_hosts.json");
+        std::fs::write(
+            &path,
+            r#"{"prod.example.com:22":{"key_type":"ssh-ed25519","key_base64":"AAAApinned","fingerprint":"SHA256:pinned"}}"#,
+        )
+        .expect("write known hosts");
+        path
+    }
+
+    #[test]
+    fn loads_pinned_entries() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hosts = KnownHosts::load(pinned_store(dir.path())).expect("load");
+        assert_eq!(hosts.list().len(), 1);
+    }
+
+    #[test]
+    fn corrupt_file_is_rejected_instead_of_dropping_pinned_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = pinned_store(dir.path());
+        std::fs::write(&path, r#"{"prod.example.com:22":{"key_type":"ssh-ed2"#).expect("truncate");
+
+        let error = match KnownHosts::load(path) {
+            Ok(_) => panic!("a corrupt known_hosts file unexpectedly loaded as empty"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("is corrupt"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn missing_file_starts_empty() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hosts = KnownHosts::load(dir.path().join("absent.json")).expect("load");
+        assert!(hosts.list().is_empty());
+    }
 }

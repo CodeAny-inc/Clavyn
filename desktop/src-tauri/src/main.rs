@@ -30,7 +30,7 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("no app data dir");
-            let state = AppState::init(app.handle(), app_data);
+            let state = AppState::init(app.handle(), app_data)?;
             app.manage(state);
 
             #[cfg(not(debug_assertions))]

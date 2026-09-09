@@ -3,6 +3,7 @@ use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
 use clavyn_core::store::Store;
 use clavyn_core::vault::Vault;
+use clavyn_core::Result;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -62,12 +63,14 @@ pub struct LocalTerminal {
 }
 
 impl AppState {
-    pub fn init(app: &AppHandle, app_data: PathBuf) -> Arc<Self> {
+    /// Load persisted state. A file that exists but cannot be parsed is an
+    /// error: starting with empty state would discard the user's hosts and, for
+    /// known_hosts, silently drop every pinned server key.
+    pub fn init(app: &AppHandle, app_data: PathBuf) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&app_data).ok();
-        let store = Store::load(app_data.join("store.json")).expect("load store");
-        let vault = Vault::open(app_data.join("vault.json")).expect("open vault");
-        let known_hosts =
-            KnownHosts::load(app_data.join("known_hosts.json")).expect("open known_hosts");
+        let store = Store::load(app_data.join("store.json"))?;
+        let vault = Vault::open(app_data.join("vault.json"))?;
+        let known_hosts = KnownHosts::load(app_data.join("known_hosts.json"))?;
 
         let app_handle = app.clone();
         let data_callback = Arc::new(move |sid: &str, data: &[u8]| {
@@ -94,7 +97,7 @@ impl AppState {
         let sessions = Arc::new(SessionManager::new(data_callback, close_callback));
         let sftp = Arc::new(SftpManager::new());
 
-        Arc::new(Self {
+        Ok(Arc::new(Self {
             store: Mutex::new(store),
             vault: Mutex::new(vault),
             known_hosts: Arc::new(Mutex::new(known_hosts)),
@@ -104,7 +107,7 @@ impl AppState {
             sftp,
             local_terminals: Mutex::new(std::collections::HashMap::new()),
             app_data_dir: app_data,
-        })
+        }))
     }
 }
 
