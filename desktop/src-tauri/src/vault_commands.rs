@@ -109,10 +109,10 @@ pub async fn secure_lock_vault(state: State<'_, Arc<AppState>>) -> ApiResult<()>
 /// uninitialized.
 ///
 /// Authorization is enforced before any destructive action: a wrong passphrase
-/// never destroys the vault. Once file deletion succeeds, authentication state
-/// is invalidated and the in-memory passphrase is cleared before any fallible
-/// biometric cleanup is awaited. That keeps the reset authoritative even if the
-/// OS Keychain is temporarily unavailable.
+/// never destroys the vault. The current vault-bound biometric credential is
+/// then deleted authoritatively while its binding id still exists. Only after
+/// that cleanup succeeds is the vault file destroyed and authentication state
+/// invalidated.
 #[tauri::command]
 pub async fn secure_reset_vault(
     state: State<'_, Arc<AppState>>,
@@ -120,6 +120,10 @@ pub async fn secure_reset_vault(
 ) -> ApiResult<()> {
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
+    // Use the same mutation boundary as biometric enable/disable so no direct
+    // IPC caller can recreate the old vault-bound credential between cleanup
+    // and destruction.
+    let _biometric_mutation = state.biometric_mutation.lock().await;
     let mut vault = state.vault.lock().await;
     if !vault.is_initialized() {
         return Err("vault is not initialized".into());
@@ -129,9 +133,16 @@ pub async fn secure_reset_vault(
     // touching the on-disk file or any biometric credential.
     vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
 
-    // Capture the binding id before reset so biometric cleanup targets the
-    // destroyed generation even after the in-memory vault state is cleared.
-    let binding_id = vault.binding_id().map(str::to_owned);
+    // Delete the authoritative vault-bound Keychain item before erasing the
+    // binding id needed to address it. If deletion fails, abort with the vault
+    // intact so the user can retry safely. Legacy-account cleanup remains
+    // best-effort inside clear_for_reset().
+    let binding_id = vault
+        .binding_id()
+        .ok_or_else(|| "vault binding is unavailable".to_string())?
+        .to_owned();
+    crate::biometric::clear_for_reset(&binding_id).await?;
+
     vault.reset().map_err(err)?;
 
     // File deletion is the irreversible reset boundary. Invalidate the auth
@@ -143,14 +154,6 @@ pub async fn secure_reset_vault(
 
     let mut pw = state.passphrase.lock().await;
     *pw = None;
-    drop(pw);
-
-    // Keychain cleanup is hygiene after the authoritative vault destruction.
-    // A failure is logged by clear_for_reset instead of making the caller think
-    // the reset failed after the vault has already been destroyed.
-    if let Some(binding_id) = binding_id {
-        crate::biometric::clear_for_reset(&binding_id).await;
-    }
 
     Ok(())
 }
