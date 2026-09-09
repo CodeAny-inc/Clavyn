@@ -31,6 +31,24 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     }
 }
 
+/// Remove an atomically-written private file and any crash-leftover sibling
+/// temporary copy. The temporary copy is deleted first so a failure there never
+/// destroys the authoritative file while leaving an older encrypted snapshot
+/// behind.
+pub(crate) fn remove_private(path: &Path) -> Result<()> {
+    remove_if_present(&temp_path(path))?;
+    remove_if_present(path)?;
+    Ok(())
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".tmp");
@@ -53,7 +71,7 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::write_private;
+    use super::{remove_private, write_private};
 
     #[test]
     fn writes_and_then_replaces_the_target() {
@@ -88,6 +106,28 @@ mod tests {
             .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, vec!["state.json".to_string()]);
+    }
+
+    #[test]
+    fn remove_private_deletes_authoritative_and_crash_temp_copies() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let tmp = dir.path().join("vault.json.tmp");
+        std::fs::write(&path, "current ciphertext").expect("seed vault");
+        std::fs::write(&tmp, "older ciphertext").expect("seed temp");
+
+        remove_private(&path).expect("remove private file");
+
+        assert!(!path.exists());
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn remove_private_is_idempotent_when_files_are_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+
+        remove_private(&path).expect("remove missing private file");
     }
 
     #[cfg(unix)]
