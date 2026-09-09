@@ -152,18 +152,14 @@ pub async fn secure_reset_vault(
     vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
 
     // Delete the authoritative vault-bound Keychain item before erasing the
-    // binding id needed to address it. If deletion fails, abort with the vault
-    // intact so the user can retry safely. On macOS the cleanup implementation
-    // is compiled independently of Touch ID support so a downgraded build can
-    // still remove credentials created by an earlier biometric-enabled build.
+    // binding id needed to address it. The durable enrollment marker prevents a
+    // differently signed macOS build from treating an access-group-invisible
+    // credential as already missing. Any uncertainty aborts with the vault intact.
     let binding_id = vault
         .binding_id()
         .ok_or_else(|| "vault binding is unavailable".to_string())?
         .to_owned();
-    #[cfg(target_os = "macos")]
-    crate::vault_keychain_cleanup::clear_for_reset(&binding_id).await?;
-    #[cfg(not(target_os = "macos"))]
-    crate::biometric::clear_for_reset(&binding_id).await?;
+    crate::vault_keychain_cleanup::clear_for_reset(&state.app_data_dir, &binding_id).await?;
 
     let core_reset_result = vault.reset();
     let reset_result = normalize_reset_result(core_reset_result, &vault);
