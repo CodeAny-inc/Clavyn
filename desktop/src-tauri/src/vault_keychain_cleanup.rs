@@ -99,6 +99,18 @@ pub(crate) fn clear_enrollment_marker(app_data_dir: &Path, binding_id: &str) -> 
     Ok(())
 }
 
+fn ensure_tracked_delete_is_visible(tracked: bool, missing: bool) -> ApiResult<()> {
+    if tracked && missing {
+        return Err(concat!(
+            "tracked biometric credential is not visible to this macOS build; ",
+            "refusing to destroy the vault because the current code-signing ",
+            "identity may not have the original Data Protection Keychain access group"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 mod macos {
     use security_framework::passwords::{self, PasswordOptions};
@@ -187,14 +199,7 @@ pub(crate) async fn clear_bound_credential(
     let bound_id = binding_id.to_owned();
     let outcome = blocking_keychain_call(move || macos::clear_bound_passphrase(&bound_id)).await?;
 
-    if tracked && outcome == macos::DeleteOutcome::Missing {
-        return Err(concat!(
-            "tracked biometric credential is not visible to this macOS build; ",
-            "refusing to destroy the vault because the current code-signing ",
-            "identity may not have the original Data Protection Keychain access group"
-        )
-        .into());
-    }
+    ensure_tracked_delete_is_visible(tracked, outcome == macos::DeleteOutcome::Missing)?;
 
     if tracked {
         clear_enrollment_marker(app_data_dir, binding_id)?;
@@ -233,7 +238,8 @@ pub(crate) async fn clear_for_reset(app_data_dir: &Path, binding_id: &str) -> Ap
 #[cfg(test)]
 mod marker_tests {
     use super::{
-        clear_enrollment_marker, marker_tracks_binding, record_enrollment_marker,
+        clear_enrollment_marker, ensure_tracked_delete_is_visible, marker_tracks_binding,
+        record_enrollment_marker,
     };
 
     #[test]
@@ -247,5 +253,12 @@ mod marker_tests {
 
         clear_enrollment_marker(dir.path(), "generation-a").expect("clear marker");
         assert!(!marker_tracks_binding(dir.path(), "generation-a").unwrap());
+    }
+
+    #[test]
+    fn tracked_but_invisible_credential_fails_closed() {
+        assert!(ensure_tracked_delete_is_visible(true, true).is_err());
+        assert!(ensure_tracked_delete_is_visible(true, false).is_ok());
+        assert!(ensure_tracked_delete_is_visible(false, true).is_ok());
     }
 }
