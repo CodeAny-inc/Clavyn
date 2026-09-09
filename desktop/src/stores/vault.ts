@@ -19,7 +19,8 @@ export const useVaultStore = defineStore("vault", () => {
 
   function mutateBiometricState(operation: () => Promise<void>): Promise<void> {
     // Invalidate in-flight snapshots immediately, not only after the write.
-    // Serialize writes across components so their backend and UI order agree.
+    // Serialize credential writes and destructive reset across components so
+    // their backend and UI order agree.
     ++biometricStateRevision;
     const result = biometricMutationTail.then(operation);
     // A failed write must not poison the queue for subsequent operations.
@@ -184,22 +185,24 @@ export const useVaultStore = defineStore("vault", () => {
   }
 
   async function reset(passphrase: string) {
-    // Invalidate old biometric snapshots without queueing authentication behind
-    // credential writes. The backend owns the entire reset boundary: it verifies
-    // the passphrase, destroys the vault, and clears biometric credentials.
-    ++biometricStateRevision;
-    error.value = null;
-    try {
-      await api.resetVault(passphrase);
-      // Discard any snapshot started while reset was pending.
-      ++biometricStateRevision;
-      initialized.value = false;
-      unlocked.value = false;
-      biometricEnabled.value = false;
-    } catch (e) {
-      error.value = String(e);
-      throw e;
-    }
+    // Serialize reset behind any credential write already in flight. The backend
+    // still independently rejects stale enrollment, so direct IPC callers are
+    // safe too; this queue keeps ordinary UI state deterministic and avoids a
+    // successful enable operation publishing after reset has completed.
+    return mutateBiometricState(async () => {
+      error.value = null;
+      try {
+        await api.resetVault(passphrase);
+        // Discard any snapshot started while reset was pending.
+        ++biometricStateRevision;
+        initialized.value = false;
+        unlocked.value = false;
+        biometricEnabled.value = false;
+      } catch (e) {
+        error.value = String(e);
+        throw e;
+      }
+    });
   }
 
   return {
