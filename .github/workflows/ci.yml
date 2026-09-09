@@ -25,6 +25,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux dependencies
         run: |
+          # The Google Chrome apt repo pre-installed on GitHub runners can
+          # transiently fail with hash sum mismatches during metadata refreshes.
+          # Remove it before apt-get update — none of these Rust dependencies
+          # come from Google's repo.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Cargo check

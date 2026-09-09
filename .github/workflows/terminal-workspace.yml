@@ -44,10 +44,14 @@ jobs:
           npm run build 2>&1 | tee ui-test-results/build.log
       - name: Install isolated, pinned browser tooling
         run: |
+          # Remove the Google Chrome apt repo pre-installed on GitHub runners
+          # to avoid transient hash sum mismatches during apt-get update.
+          # Playwright installs its own Chromium, not Google Chrome.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
           npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
-          # Retry browser install — the --with-deps flag runs apt-get update
-          # internally, which can transiently fail on hash mismatches from
-          # upstream apt mirrors (e.g. Google Chrome repo).
+          # Retry browser install as a safety net — the --with-deps flag runs
+          # apt-get update internally, which can still transiently fail on
+          # other upstream apt mirrors.
           for attempt in 1 2 3; do
             if desktop/e2e/node_modules/.bin/playwright install --with-deps chromium; then
               exit 0
