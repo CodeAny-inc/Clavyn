@@ -16,6 +16,13 @@ pub enum CoreError {
     #[error("vault error: {0}")]
     Vault(String),
 
+    /// The destructive vault unlink has already completed, but flushing the
+    /// containing directory failed. Callers must treat the vault as destroyed
+    /// and clear authentication state even though durability could not be
+    /// confirmed to the storage device.
+    #[error("[vault-reset-durability] vault was deleted but directory sync failed: {0}")]
+    VaultResetDurability(String),
+
     #[error("host key verification failed for {host}: {reason}")]
     HostKeyMismatch { host: String, reason: String },
 
