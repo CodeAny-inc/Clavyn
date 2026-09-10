@@ -19,7 +19,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-vue-next";
-import type { SftpEntry } from "../api";
+import { sftpCanonicalize, type SftpEntry } from "../api";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useSftpStore } from "../stores/sftp";
@@ -220,8 +220,7 @@ async function navigateToSegment(index: number) {
 
 async function navigateHome() {
   if (!sftp.sessionId) return;
-  const api = await import("../api");
-  const home = await api.sftpCanonicalize(sftp.sessionId, "~");
+  const home = await sftpCanonicalize(sftp.sessionId, "~");
   await sftp.listDir(home);
 }
 

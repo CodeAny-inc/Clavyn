@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
+import type { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { useTabsStore, isPane, type Pane, type DropPosition } from "../stores/tabs";
 import { setDragImageChip } from "../lib/dragChip";
@@ -46,6 +46,7 @@ const connectedEndpoint = ref<string | null>(props.pane.terminalType === "local"
 let term: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let searchAddon: SearchAddon | null = null;
+let searchAddonPending: Promise<SearchAddon | null> | null = null;
 let observer: ResizeObserver | null = null;
 const listeners: UnlistenFn[] = [];
 let listenerSetup: Promise<boolean> | null = null;
@@ -309,13 +310,7 @@ onMounted(async () => {
     theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
     cursorBlink: true, scrollback: 10000, allowProposedApi: true });
   fitAddon = new FitAddon();
-  searchAddon = new SearchAddon();
   term.loadAddon(fitAddon);
-  term.loadAddon(searchAddon);
-  searchAddon.onDidChangeResults(event => {
-    searchResultIndex.value = event.resultIndex;
-    searchResultCount.value = event.resultCount;
-  });
   term.attachCustomKeyEventHandler(event => {
     // xterm calls stopPropagation() for Escape by default, which prevents the
     // window-level Escape handler in App.vue from firing. Return false while
@@ -367,9 +362,36 @@ onBeforeUnmount(() => {
   if (currentSessionId && (!props.pane.closing || props.pane.sessionId !== currentSessionId))
     void api.closeSession(currentSessionId).catch(() => {});
 });
+// Search is reachable only through Ctrl/Cmd+F or the toolbar button, so the
+// addon is fetched on first use. The result is cached per pane; a failed fetch
+// clears the cache so the next attempt retries.
+function ensureSearchAddon(): Promise<SearchAddon | null> {
+  if (searchAddon) return Promise.resolve(searchAddon);
+  if (!searchAddonPending) {
+    searchAddonPending = import("@xterm/addon-search")
+      .then(({ SearchAddon }) => {
+        const terminal = term;
+        if (!terminal) return null;
+        const addon = new SearchAddon();
+        terminal.loadAddon(addon);
+        addon.onDidChangeResults(event => {
+          searchResultIndex.value = event.resultIndex;
+          searchResultCount.value = event.resultCount;
+        });
+        searchAddon = addon;
+        return addon;
+      })
+      .catch(() => {
+        searchAddonPending = null;
+        return null;
+      });
+  }
+  return searchAddonPending;
+}
 function openSearch() {
   activatePane();
   showSearch.value = true;
+  void ensureSearchAddon();
   const current = captureFocusIntent();
   nextTick(() => {
     if (!current()) return;
@@ -389,18 +411,20 @@ function toggleFullscreen() {
   activatePane();
   ui.toggleFullscreen(props.pane.id);
 }
-function doSearch(previous = false) {
+async function doSearch(previous = false) {
   if (!searchQuery.value) {
     searchAddon?.clearDecorations();
     searchResultIndex.value = -1;
     searchResultCount.value = 0;
     return;
   }
+  const addon = await ensureSearchAddon();
+  if (!addon) return;
   const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
     decorations: { matchOverviewRuler: "#4f9cf9", activeMatchColorOverviewRuler: "#f59e0b", matchBackground: "#264f78", activeMatchBackground: "#f59e0b80" } };
   try {
-    if (previous) searchAddon?.findPrevious(searchQuery.value, options);
-    else searchAddon?.findNext(searchQuery.value, options);
+    if (previous) addon.findPrevious(searchQuery.value, options);
+    else addon.findNext(searchQuery.value, options);
   } catch { /* An incomplete regular expression should not break the terminal. */ }
 }
 function searchKey(event: KeyboardEvent) {
