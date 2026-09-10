@@ -128,6 +128,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
             'session-tab-reorder-before': tabs.draggedTabId && tabs.dragOverTabId === tab.id && tabDropSide === 'before',
             'session-tab-reorder-after': tabs.draggedTabId && tabs.dragOverTabId === tab.id && tabDropSide === 'after',
           }"
+          :data-host-ids="collectPanes(tab.tree).map(pane => pane.hostId ?? 'local').join(' ')"
           draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="tabDropSide = null; tabs.endDrag()"
           @dragover="tabDragOver($event, tab.id)" @dragleave="tabDragLeave(tab.id)"
           @drop="tabDrop($event, tab.id)" @auxclick.middle.prevent="tabs.closeTab(tab.id)">

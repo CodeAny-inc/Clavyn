@@ -261,9 +261,9 @@ describe("drag a tab onto a terminal pane (Termius-style tab drop)", () => {
     expect(collectPanes(tree).map(p => p.id)).toEqual([targetPane, first, second.id]);
     expect(closes()).toEqual([]);
   });
-  it("keeps tab titles naming the first pane after structural moves", () => {
+  it("renames a tab only when the pane it names leaves", () => {
     const store = useTabsStore();
-    // closePane: removing the first of two panes renames the tab.
+    // closePane: removing the named pane renames the tab.
     const single = store.newTab(host("atlas"));
     const first = store.activePaneId!;
     store.splitPane(first, "horizontal", host("orion"));
@@ -276,13 +276,13 @@ describe("drag a tab onto a terminal pane (Termius-style tab drop)", () => {
     const dest = store.newTab(host("local"));
     store.movePaneToTab(movedOut, dest.id);
     expect(store.tabs.find(t => t.id === multi.id)!.title).toBe("orion");
-    // dropPane edge drop: landing before the first pane renames the tab.
+    // Same-tab rearrangement keeps every pane, so the title stays.
     const swapTab = store.newTab(host("atlas"));
     const a = store.activePaneId!;
     const b = store.splitPane(a, "horizontal", host("orion"))!;
     store.startDrag(b.id);
     store.dropPane(a, "left");
-    expect(store.tabs.find(t => t.id === swapTab.id)!.title).toBe("orion");
+    expect(store.tabs.find(t => t.id === swapTab.id)!.title).toBe("atlas");
   });
   it("ignores a tab dropped onto a pane of its own tab", () => {
     const store = useTabsStore();

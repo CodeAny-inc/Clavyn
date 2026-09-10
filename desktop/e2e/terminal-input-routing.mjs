@@ -146,7 +146,7 @@ try {
     await page.getByRole("button", { name: "New session", exact: true }).click();
     await page.getByRole("combobox", { name: "Open session in" }).selectOption("tab");
     await page.getByRole("button", { name: "Open local shell", exact: true }).click();
-    await page.locator('[title^="Show Atlas Production terminal"]').click();
+    await page.locator('.session-tab[data-host-ids~="atlas"] .session-tab-select').click();
     await focusIs(page, "atlas", true);
     await clearWrites(page);
     await page.keyboard.type("SEARCH_AFTER_TAB_SWITCH");

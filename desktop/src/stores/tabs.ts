@@ -53,10 +53,15 @@ export const useTabsStore = defineStore("tabs", () => {
     ? findPane(activeTab.value.tree, activePaneId.value) : null);
   function owningTab(id: string) { return tabs.value.find(t => findPane(t.tree, id)); }
   function firstPane(tree: PaneTree): Pane { return isPane(tree) ? tree : firstPane(tree.first); }
-  // A tab is named after its first pane; re-sync the title after any tree
-  // change so tooltips, close labels and "Move to…" entries keep identifying
-  // the terminal the tab actually shows.
-  function syncTabTitle(tab: Tab) { tab.title = firstPane(tab.tree).title; }
+  // A tab's title names a terminal the tab contains; re-sync it when a pane
+  // can leave the tab (moves, closes, cross-tab swaps) so tooltips, close
+  // labels and "Move to…" entries keep identifying the right terminal.
+  // Same-tab rearrangements keep every pane, so they keep the title.
+  // Mirrors newTab's naming: host label for SSH panes, "Local" for shells.
+  function syncTabTitle(tab: Tab) {
+    const pane = firstPane(tab.tree);
+    tab.title = pane.terminalType === "local" ? "Local" : pane.title;
+  }
   function setActivePane(id: string) {
     const tab = owningTab(id);
     if (!tab) return;
@@ -179,7 +184,6 @@ export const useTabsStore = defineStore("tabs", () => {
         first: before ? source : old, second: before ? old : source,
       }));
     }
-    syncTabTitle(tab);
     setActivePane(source.id);
     endDrag();
     paneFocusRequest.value = { paneId: source.id };
@@ -217,7 +221,6 @@ export const useTabsStore = defineStore("tabs", () => {
           first: before ? moved : old, second: before ? old : moved,
         }));
       }
-      syncTabTitle(target);
       const focus = firstPane(moved).id;
       setActivePane(focus);
       paneFocusRequest.value = { paneId: focus };
