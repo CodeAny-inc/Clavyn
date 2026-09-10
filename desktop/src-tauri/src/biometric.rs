@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, VaultSession};
 use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
@@ -176,22 +176,30 @@ pub async fn unlock_with_biometric(state: State<'_, Arc<AppState>>) -> ApiResult
         vault_binding_id(&vault)?
     };
 
-    let passphrase = blocking_platform_call(move || {
-        platform::retrieve_passphrase(&binding_id)
+    let passphrase = blocking_platform_call({
+        let binding_id = binding_id.clone();
+        move || platform::retrieve_passphrase(&binding_id)
     })
     .await?;
 
     let vault = state.vault.lock().await;
-    vault
+    let key = vault
         .verify_passphrase(passphrase.as_str())
+        .await
         .map_err(|e| e.to_string())?;
     drop(vault);
 
-    let mut pw = state.passphrase.lock().await;
-    if !state.auth_generation.is_current(generation) {
+    if !state
+        .vault_session
+        .unlock_if_current(
+            &state.auth_generation,
+            generation,
+            VaultSession::new(passphrase, key, binding_id),
+        )
+        .await
+    {
         return Err("biometric unlock was superseded by a newer vault lock".into());
     }
-    *pw = Some(passphrase);
 
     Ok(true)
 }

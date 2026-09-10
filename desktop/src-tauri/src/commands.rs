@@ -134,8 +134,7 @@ pub async fn vault_is_initialized(state: State<'_, Arc<AppState>>) -> ApiResult<
 
 #[tauri::command]
 pub async fn is_vault_unlocked(state: State<'_, Arc<AppState>>) -> ApiResult<bool> {
-    let pw = state.passphrase.lock().await;
-    Ok(pw.is_some())
+    Ok(state.vault_session.is_unlocked().await)
 }
 
 // ============================================================
@@ -156,16 +155,8 @@ pub async fn generate_key(
     let (private, _public) = generate_ed25519().map_err(err)?;
     let (mut meta, _pair) = parse_openssh_private(&private, None).map_err(err)?;
     meta.label = label;
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
-    vault
-        .add_key(&passphrase, meta.clone(), &private)
-        .map_err(err)?;
+    let (key, mut vault) = state.unlocked_vault().await?;
+    vault.add_key(&key, meta.clone(), &private).map_err(err)?;
     Ok(meta)
 }
 
@@ -179,15 +170,9 @@ pub async fn import_key(
     let (mut meta, _pair) =
         parse_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
     meta.label = label;
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
+    let (key, mut vault) = state.unlocked_vault().await?;
     vault
-        .add_key(&passphrase, meta.clone(), &openssh_private)
+        .add_key(&key, meta.clone(), &openssh_private)
         .map_err(err)?;
     Ok(meta)
 }
@@ -197,16 +182,8 @@ pub async fn delete_key(
     state: State<'_, Arc<AppState>>,
     key_id: Uuid,
 ) -> ApiResult<()> {
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
-    vault
-        .remove_key(&passphrase, &key_id.to_string())
-        .map_err(err)
+    let (key, mut vault) = state.unlocked_vault().await?;
+    vault.remove_key(&key, &key_id.to_string()).map_err(err)
 }
 
 // ============================================================
@@ -327,7 +304,6 @@ fn ssh_connection_info(
 #[tauri::command]
 pub async fn connect_ssh(
     state: State<'_, Arc<AppState>>,
-    _app: AppHandle,
     session_id: String,
     host: Host,
     password: Option<String>,
@@ -337,10 +313,7 @@ pub async fn connect_ssh(
 ) -> ApiResult<SshConnectionInfo> {
     // The owned input is transient and wiped on every exit; never persist or log it.
     let password = password.map(zeroize::Zeroizing::new);
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref().map(|p| p.to_string())
-    };
+    let passphrase = state.vault_session.passphrase().await;
 
     // Resolve identity if the host references one
     let identity = if let Some(identity_id) = host.identity_id {
@@ -361,8 +334,16 @@ pub async fn connect_ssh(
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
         None => matches!(host.auth, AuthMethod::PublicKey),
     };
-    let vault = state.vault.lock().await;
-    let vault_ref = if needs_vault { Some(&*vault) } else { None };
+    // Read the key material out under the lock and release it before the
+    // network call. Holding the vault mutex across a connect lets one
+    // unresponsive host block every other vault operation — unlock, reset, and
+    // all key management — for as long as it stays unresponsive.
+    let vault = if needs_vault {
+        let (key, vault) = state.unlocked_vault().await?;
+        Some(vault.snapshot(key))
+    } else {
+        None
+    };
     let known_hosts = state.known_hosts.clone();
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
@@ -374,8 +355,8 @@ pub async fn connect_ssh(
             &host,
             identity.as_ref(),
             known_hosts,
-            vault_ref,
-            passphrase.as_deref(),
+            vault.as_ref(),
+            passphrase.as_ref().map(|value| value.as_str()),
             password.as_ref().map(|value| value.as_str()),
             cols,
             rows,
@@ -572,10 +553,7 @@ pub async fn sftp_connect(
 ) -> ApiResult<()> {
     // Match terminal SSH: do not retain the owned password after this command exits.
     let password = password.map(zeroize::Zeroizing::new);
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref().map(|p| p.to_string())
-    };
+    let passphrase = state.vault_session.passphrase().await;
 
     let identity = if let Some(identity_id) = host.identity_id {
         let store = state.store.lock().await;
@@ -597,8 +575,14 @@ pub async fn sftp_connect(
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
         None => matches!(host.auth, AuthMethod::PublicKey),
     };
-    let vault = state.vault.lock().await;
-    let vault_ref = if needs_vault { Some(&*vault) } else { None };
+    // As in `connect_ssh`: take the key material, then drop the vault lock so a
+    // stalled SFTP host cannot wedge every other vault operation.
+    let vault = if needs_vault {
+        let (key, vault) = state.unlocked_vault().await?;
+        Some(vault.snapshot(key))
+    } else {
+        None
+    };
     let known_hosts = state.known_hosts.clone();
 
     state
@@ -608,8 +592,8 @@ pub async fn sftp_connect(
             &host,
             identity.as_ref(),
             known_hosts,
-            vault_ref,
-            passphrase.as_deref(),
+            vault.as_ref(),
+            passphrase.as_ref().map(|value| value.as_str()),
             password.as_ref().map(|value| value.as_str()),
         )
         .await
@@ -1011,5 +995,95 @@ mod ssh_connection_info_tests {
     fn rejects_changed_identity_before_a_network_connection_can_start() {
         let result = ssh_connection_info(&host(), Some(&identity()), Some("deploy"));
         assert!(result.unwrap_err().contains("SSH identity changed"));
+    }
+}
+
+#[cfg(test)]
+mod connect_lock_tests {
+    use super::*;
+    use crate::state::VaultSession;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    /// A peer that completes the TCP handshake and then says nothing, which is
+    /// how a half-dead host or a dropped VPN looks to the client.
+    async fn silent_peer() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted.push(stream);
+            }
+        });
+        addr
+    }
+
+    /// A connect to an unresponsive host must not keep the vault mutex, or the
+    /// whole key store — unlock, reset, and every key operation — stays blocked
+    /// until the process is restarted.
+    #[tokio::test]
+    async fn a_stalled_connect_leaves_the_vault_usable() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let (private, _public) = generate_ed25519().expect("generate");
+        let (meta, _) = parse_openssh_private(&private, None).expect("parse");
+        let key_id = meta.id;
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            vault.add_key(&master, meta, &private).expect("add key");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+
+        let addr = silent_peer().await;
+        let mut host = Host::new("stalled", addr.ip().to_string(), addr.port(), "deploy");
+        host.auth = AuthMethod::PublicKey;
+        host.key_id = Some(key_id);
+
+        app.manage(state);
+        let connecting = connect_ssh(
+            app.state(),
+            "session".to_string(),
+            host,
+            None,
+            None,
+            None,
+            None,
+        );
+
+        let vault_stays_available = async {
+            // Give the connect long enough to reach the network before asking
+            // the vault a question it can only answer with the mutex free.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::timeout(Duration::from_secs(5), list_keys(app.state())).await
+        };
+
+        tokio::select! {
+            keys = vault_stays_available => {
+                assert_eq!(keys.expect("vault answered while a connect was in flight")
+                    .expect("list keys")
+                    .len(), 1);
+            }
+            connected = connecting => {
+                panic!("the silent peer unexpectedly finished a connection: {connected:?}");
+            }
+        }
     }
 }
