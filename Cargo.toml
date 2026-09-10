@@ -13,7 +13,19 @@ authors = ["Clavyn Contributors"]
 # Shared core deps
 russh = "0.46"
 russh-keys = "0.46"
-tokio = { version = "1", features = ["full"] }
+# Enumerate the runtime pieces Clavyn and its dependencies actually use. `full`
+# additionally compiles the process, signal and io-std drivers, none of which
+# any crate in this workspace requires. `net` is listed explicitly because
+# russh drives TCP through tokio without declaring the feature itself.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "time",
+    "net",
+    "io-util",
+    "fs",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
@@ -23,7 +35,6 @@ zeroize = { version = "1", features = ["derive"] }
 argon2 = "0.5"
 aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
 
 [profile.release]
 codegen-units = 1
