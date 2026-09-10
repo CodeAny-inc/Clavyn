@@ -19,21 +19,30 @@ jobs:
   # To switch to self-hosted fallback (e.g. during GitHub infrastructure
   # issues), set the CI_RUNNER_LABELS repo variable to:
   #   ["self-hosted","linux","clavyn"]
+  #
+  # The variable is honoured for pull requests raised from a branch of this
+  # repository. A pull request from a fork always lands on a GitHub-hosted
+  # runner, whatever the variable says: this job installs and runs code from
+  # the pull request (package install scripts, `vite.config.ts`, the Playwright
+  # suite). An ephemeral runner contains that; a persistent one hands the
+  # author a foothold that outlives the job.
   browser-ui:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - name: Install application dependencies
         working-directory: desktop
-        run: npm ci
+        # Matches the e2e install below: package install scripts are arbitrary
+        # code from the pull request, and nothing in this tree needs them.
+        run: npm ci --ignore-scripts
       - name: Typecheck, unit tests and production build
         working-directory: desktop
         run: |
@@ -122,7 +131,7 @@ jobs:
       - name: Upload screenshots, recordings, traces and test logs
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: terminal-workspace-ui-${{ github.run_id }}
           retention-days: 14
