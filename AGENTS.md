@@ -160,6 +160,25 @@ and that the sidebar, terminal, and xterm all render.
 
 ## Release automation
 
+**Agents MUST use the `release-clavyn` skill for every release.** It lives at
+`.agents/skills/release-clavyn/SKILL.md` (agentskills.io standard) with
+pointers at `.devin/skills/release-clavyn/`, `.claude/commands/release-clavyn.md`,
+and `.cursor/rules/release-clavyn.mdc`. It covers: maintaining `CHANGELOG.md`
+(Keep a Changelog format — every release gets an entry), choosing between the
+CI tag-push path (preferred — signs with the `TAURI_SIGNING_PRIVATE_KEY`
+GitHub secret and builds all platforms) and `scripts/release.sh` (local macOS
+build, requires a local key), the verification suite, the moving-main rebase
+dance, and replacing the workflow's placeholder release notes with real
+changelog content via `gh release edit`.
+
+| Agent | Pointer | Convention |
+|-------|---------|------------|
+| **All agentskills.io-compatible** | `.agents/skills/release-clavyn/SKILL.md` | Standard Agent Skills (agentskills.io) |
+| Universal / Codex | `AGENTS.md` (this file) | De facto standard |
+| Devin | `.devin/skills/release-clavyn/SKILL.md` | Devin skills |
+| Claude Code | `.claude/commands/release-clavyn.md` | Slash commands |
+| Cursor | `.cursor/rules/release-clavyn.mdc` | Rules |
+
 ### Local release script: `scripts/release.sh`
 Automates the entire local release process for macOS (current platform):
 ```bash
