@@ -125,9 +125,13 @@ pub async fn connect(
     .map_err(|_| timed_out("connect", &addr))?
     .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
 
-    // Authentication is bounded separately: russh completes the key exchange
-    // lazily, so a peer that answers the TCP handshake and then goes silent
-    // stalls here rather than in `client::connect`.
+    // Authentication is bounded separately, and the two bounds cover disjoint
+    // stages. `client::connect` does not return until russh has read the
+    // server's banner and the key exchange has completed, so a peer that
+    // answers the TCP handshake and then goes silent trips the connect timeout
+    // above and never reaches this point. What is left for this bound is a
+    // server that finishes the key exchange and then stalls while answering an
+    // authentication request. Neither timeout subsumes the other.
     let auth_ok = tokio::time::timeout(CONNECT_TIMEOUT, async {
         let outcome = match auth {
             AuthMethod::Agent => {

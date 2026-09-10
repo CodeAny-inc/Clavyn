@@ -238,8 +238,10 @@ impl Vault {
         self.seal_and_persist(key, salt, epoch, keys_meta, &payload)
     }
 
-    /// Decrypt and return a single key's private material. Caller is responsible
-    /// for the `PrivateKeyMaterial` (it zeroizes on drop).
+    /// Decrypt and return a single key's private material as raw OpenSSH PEM
+    /// bytes. The returned `Vec<u8>` does not wipe itself on drop: the caller
+    /// owns zeroizing it, and anything it is copied into, once the key material
+    /// is no longer needed.
     ///
     /// A snapshot taken from an unlocked vault already carries the master key
     /// and answers from a single AES-GCM decrypt; otherwise the key is derived
@@ -253,9 +255,11 @@ impl Vault {
     }
 
     /// Decrypt a single key's private material with an already-derived key.
+    /// The returned bytes carry the same caller obligation as [`Vault::get_key`].
     pub fn get_key_with(&self, key: &VaultKey, key_id: &str) -> Result<Vec<u8>> {
         let plaintext = self.decrypt(key)?;
         let payload: VaultPayload = serde_json::from_slice(&plaintext)?;
+        drop(plaintext);
         payload
             .keys
             .into_iter()
