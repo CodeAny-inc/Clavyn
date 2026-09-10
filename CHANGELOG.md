@@ -15,6 +15,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "Forgot passphrase? Reset vault" link that opens the same
   passphrase-gated confirmation form; cancelling returns to the normal
   unlock form. (#26)
+- **Tab drag-and-drop** now follows the Termius model: dropping a tab onto
+  a terminal splits the pane, dragging across tabs swaps them, and the tab
+  strip supports reordering. (#27)
 
 ### Changed
 
