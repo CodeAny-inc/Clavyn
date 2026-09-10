@@ -13,6 +13,7 @@ import { useUiStore } from "../stores/ui";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
+import { acquireWebglRenderer, releaseWebglRenderer } from "../lib/terminalRenderer";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
@@ -349,6 +350,7 @@ onMounted(async () => {
   observer = new ResizeObserver(() => fit());
   observer.observe(containerRef.value);
   fit();
+  if (props.visible) void acquireWebglRenderer(props.pane.id, term);
   // Wait for ancestor v-show updates; the mount hook can run while still hidden.
   // This ticket belongs to creation, not to later network completion.
   queueFocus();
@@ -356,12 +358,20 @@ onMounted(async () => {
   // SSH pane out; Reconnect then initializes listeners and starts it on demand.
   if (props.pane.autoConnect !== false) await connectWhenReady();
 });
+// Claim the GPU renderer whenever this pane comes to the front, so the budget
+// tracks the terminals in use. Panes that lose the claim keep working on
+// xterm's DOM renderer.
+watch([() => props.visible, isActive], ([visible, active], [wasVisible, wasActive]) => {
+  if (term && ((visible && !wasVisible) || (active && !wasActive))) void acquireWebglRenderer(props.pane.id, term);
+});
 onBeforeUnmount(() => {
   disposed = true;
   pendingOutput = null;
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();
+  // Hand back the slot while the terminal can still be reverted to its DOM renderer.
+  releaseWebglRenderer(props.pane.id);
   term?.dispose();
   term = null;
   if (currentSessionId && (!props.pane.closing || props.pane.sessionId !== currentSessionId))
