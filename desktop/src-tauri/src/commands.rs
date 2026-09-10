@@ -392,13 +392,18 @@ const MAX_LOCAL_TERMINALS: usize = 16;
 
 /// Decide whether a new local terminal may take `session_id`.
 ///
-/// A session id names exactly one live session for the whole lifetime of that
-/// session: `session_write`, `session_resize` and the `session-data` event
-/// stream all address sessions by id alone. Handing a live id to a second
-/// session silently repoints one of those channels at the other session — for a
-/// local id the old shell is dropped and killed, and for an SSH id writes keep
-/// going to SSH while the new PTY's output is rendered in the SSH pane. Reject
-/// the collision instead of resolving it arbitrarily.
+/// `session_write`, `session_resize` and the `session-data` event stream all
+/// address sessions by id alone, so a second session on a live id silently
+/// repoints one of those channels at the other session — for a local id the
+/// previous entry is dropped, hanging up its shell, and for an SSH id writes
+/// keep going to SSH while the new PTY's output is rendered in the SSH pane.
+/// Refuse the collision here instead of resolving it arbitrarily.
+///
+/// This guards local-terminal creation only. `connect_ssh` performs no such
+/// check and `SessionManager::create_ssh_session` inserts unconditionally, so
+/// an SSH session can still be opened on an id a local terminal already holds,
+/// or on top of another SSH session. Uniqueness is therefore a property of this
+/// entry point, not an invariant of session ids in general.
 fn admit_local_terminal(
     session_id: &str,
     local_terminal_ids: &[String],
@@ -418,6 +423,33 @@ fn admit_local_terminal(
     Ok(())
 }
 
+/// Whether a local terminal's shell has finished, given the result of
+/// `Child::try_wait`.
+///
+/// A child whose status cannot be read counts as live. A failed read is not
+/// evidence that the shell exited, and treating it as one would discard a
+/// terminal the user is still typing into.
+fn local_shell_exited(status: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
+    matches!(status, Ok(Some(_)))
+}
+
+/// Take the terminals whose shell has already exited out of `locals` and hand
+/// them to the caller.
+///
+/// They are returned rather than dropped in place because dropping one closes
+/// its PTY — on Windows `ClosePseudoConsole` blocks until the console has torn
+/// down — and the caller holds the lock that gates writes, resizes and closes
+/// for every other local pane.
+fn reap_exited_locals(
+    locals: &mut std::collections::HashMap<String, LocalTerminal>,
+) -> Vec<LocalTerminal> {
+    let exited: Vec<String> = locals
+        .iter_mut()
+        .filter_map(|(id, term)| local_shell_exited(term.child.try_wait()).then(|| id.clone()))
+        .collect();
+    exited.iter().filter_map(|id| locals.remove(id)).collect()
+}
+
 #[tauri::command]
 pub async fn create_local_terminal(
     state: State<'_, Arc<AppState>>,
@@ -428,17 +460,30 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
-    // The map lock is held from the admission check through the insert so two
-    // concurrent calls cannot both pass the check for the same id or slot.
+    // `SessionManager::list` takes and releases its own lock and returns a copy,
+    // so this snapshot is stale by the time the local map is locked: the guard
+    // below covers the local map and the cap, not the SSH half of the check.
+    // Taking it first is deliberate — every site that touches both maps drops
+    // the `sessions` guard before taking `local_terminals`, and nesting them
+    // here would be the only place with the opposite order.
     let ssh_session_ids = state.sessions.list().await;
-    let mut locals = state.local_terminals.lock().await;
-    // An entry outlives its shell: a pane whose shell exited keeps its entry
-    // until the pane unmounts, so reconnecting leaves the finished terminal
-    // behind. Drop those first so the limit below bounds live shells. A child
-    // whose status cannot be read is kept, since that is not evidence it exited.
-    locals.retain(|_, term| !matches!(term.child.try_wait(), Ok(Some(_))));
-    let local_terminal_ids: Vec<String> = locals.keys().cloned().collect();
-    admit_local_terminal(&session_id, &local_terminal_ids, &ssh_session_ids)?;
+    let (dead, admission) = {
+        let mut locals = state.local_terminals.lock().await;
+        // An entry outlives its shell: nothing removes it before `close_session`
+        // or the pane unmounting, so panes left sitting disconnected keep their
+        // slots. Reaping first makes the cap bound live shells rather than map
+        // entries.
+        let dead = reap_exited_locals(&mut locals);
+        let local_terminal_ids: Vec<String> = locals.keys().cloned().collect();
+        (
+            dead,
+            admit_local_terminal(&session_id, &local_terminal_ids, &ssh_session_ids),
+        )
+    };
+    // Tearing down the reaped PTYs can block, so it happens with the lock
+    // released rather than in front of every other pane's keystrokes.
+    drop(dead);
+    admission?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -482,9 +527,46 @@ pub async fn create_local_terminal(
     // On Unix this is the correct pattern — the child has its own copy.
     drop(pair.slave);
 
-    // Spawn a reading thread that emits data events
+    // The lock is taken again only for the check-and-insert, so the blocking PTY
+    // work above runs without it. The check is repeated because the lock was not
+    // held throughout: another call may have taken this id or the last free slot
+    // in the meantime, and the pair here is what makes admission atomic.
+    let ssh_session_ids = state.sessions.list().await;
+    let admission = {
+        let mut locals = state.local_terminals.lock().await;
+        let local_terminal_ids: Vec<String> = locals.keys().cloned().collect();
+        match admit_local_terminal(&session_id, &local_terminal_ids, &ssh_session_ids) {
+            Ok(()) => {
+                locals.insert(
+                    session_id.clone(),
+                    LocalTerminal {
+                        writer,
+                        master,
+                        child,
+                    },
+                );
+                Ok(())
+            }
+            Err(error) => Err((
+                error,
+                LocalTerminal {
+                    writer,
+                    master,
+                    child,
+                },
+            )),
+        }
+    };
+    if let Err((error, _refused)) = admission {
+        // Torn down with the lock released, for the same reason the reaped
+        // entries are.
+        return Err(error);
+    }
+
+    // Started after the insert: a terminal refused above must not emit
+    // `session-closed` for an id that belongs to another session.
     let app_handle = app.clone();
-    let sid = session_id.clone();
+    let sid = session_id;
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 8192];
@@ -515,17 +597,6 @@ pub async fn create_local_terminal(
             },
         );
     });
-
-    // Store the master and child for writing, resizing, and keeping
-    // the child process alive.
-    locals.insert(
-        session_id,
-        LocalTerminal {
-            writer,
-            master,
-            child,
-        },
-    );
 
     Ok(())
 }
@@ -1054,6 +1125,29 @@ mod admit_local_terminal_tests {
         let full = ids(MAX_LOCAL_TERMINALS);
         let error = admit_local_terminal("local-0", &full, &[]).unwrap_err();
         assert!(error.contains("local terminal"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod local_terminal_reaping_tests {
+    use super::*;
+    use portable_pty::ExitStatus;
+
+    #[test]
+    fn a_child_that_reported_an_exit_is_finished() {
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(0)))));
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(1)))));
+    }
+
+    #[test]
+    fn a_child_that_has_not_exited_is_live() {
+        assert!(!local_shell_exited(Ok(None)));
+    }
+
+    #[test]
+    fn a_child_whose_status_cannot_be_read_is_live() {
+        let unreadable = std::io::Error::new(std::io::ErrorKind::Other, "status unavailable");
+        assert!(!local_shell_exited(Err(unreadable)));
     }
 }
 
