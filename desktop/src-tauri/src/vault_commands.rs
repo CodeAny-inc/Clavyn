@@ -38,7 +38,7 @@ pub async fn secure_unlock_vault(
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
-    let vault = state.vault.lock().await;
+    let mut vault = state.vault.lock().await;
     // Verification derives the master key; keep it for the unlocked session so
     // later vault operations do not each repeat the Argon2 work.
     let key = vault
@@ -49,6 +49,13 @@ pub async fn secure_unlock_vault(
         .binding_id()
         .ok_or_else(|| "vault binding is unavailable".to_string())?
         .to_owned();
+    // A vault stored in an older on-disk format is rewritten in the
+    // authenticated one here, the one moment the master key is available. The
+    // rewrite is atomic and preserves the salt, so a failure leaves the file and
+    // any bound Keychain credential intact and must not fail the unlock.
+    if let Err(error) = vault.migrate_to_current_format(&key) {
+        tracing::warn!("vault format upgrade deferred: {error}");
+    }
     drop(vault);
 
     let session = VaultSession::new(passphrase, key, binding_id);
