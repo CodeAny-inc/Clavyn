@@ -94,8 +94,13 @@ now just tell your OS it's fine to open Clavyn. :)
 | Host passwords       | OS keychain only                | never in core state      |
 | known_hosts          | plaintext JSON (public keys)    | n/a                      |
 
-Host-key mismatches raise `CoreError::HostKeyMismatch` and are surfaced to
-the user for explicit confirmation before any replacement.
+A server key that differs from the pinned one fails the connection with
+`CoreError::HostKeyMismatch`, which carries the pinned and the presented
+fingerprint. The presented key is held in memory and listed under Known Hosts,
+where replacing the pin requires confirming the fingerprint that was shown.
+Removing a host hides it from the list but keeps its key as a tombstone, so the
+next connection with a different key is still reported as a change rather than
+accepted as a first contact.
 
 ## Contributing
 

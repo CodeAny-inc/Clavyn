@@ -31,9 +31,14 @@ shell.
   material is wrapped in `PrivateKeyMaterial` which `Zeroize`s on drop.
 - `vault` — Argon2id(passphrase, salt) -> AES-256-GCM. The only thing
   written to disk is ciphertext + salt + public metadata.
-- `known_hosts` — TOFU. `verify()` records on first sight, compares
-  thereafter, returns `HostKeyMismatch` on divergence. `replace()` is the
-  only way to overwrite, and is called only after user confirmation.
+- `known_hosts` — TOFU. `verify()` records on first sight and compares
+  thereafter; `check_mismatch()` returns `HostKeyMismatch` with both
+  fingerprints and runs first, so the connection handler fails with that error
+  rather than a generic unknown-key rejection. The presented key is held in
+  memory and `trust_presented_key()` — the only caller of `replace()` — pins it
+  after the user confirms the fingerprint that was displayed. `remove()`
+  tombstones an entry instead of deleting it, so unpinning cannot silently
+  downgrade a host back to first-use.
 - `connection` — `russh` async client. Auth resolved from `AuthMethod` +
   vault + (optional) password. The returned `Handle` is owned by the shell,
   which streams channel data to the UI.

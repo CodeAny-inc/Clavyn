@@ -23,8 +23,15 @@ pub enum CoreError {
     #[error("[vault-reset-durability] vault was deleted but directory sync failed: {0}")]
     VaultResetDurability(String),
 
-    #[error("host key verification failed for {host}: {reason}")]
-    HostKeyMismatch { host: String, reason: String },
+    /// The server presented a key that differs from the pinned one. Both
+    /// fingerprints travel with the error so the user can compare them before
+    /// deciding whether the change is a rotation or an interception.
+    #[error("host key for {host} changed: pinned {pinned}, presented {presented}")]
+    HostKeyMismatch {
+        host: String,
+        pinned: String,
+        presented: String,
+    },
 
     #[error("session not found: {0}")]
     SessionNotFound(String),

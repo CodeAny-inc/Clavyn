@@ -246,6 +246,46 @@ pub async fn remove_known_host(
     kh.remove(&host, port).map_err(err)
 }
 
+#[derive(serde::Serialize)]
+pub struct PendingHostKeyChange {
+    pub host: String,
+    pub key_type: String,
+    pub pinned_fingerprint: String,
+    pub presented_fingerprint: String,
+}
+
+#[tauri::command]
+pub async fn list_host_key_changes(
+    state: State<'_, Arc<AppState>>,
+) -> ApiResult<Vec<PendingHostKeyChange>> {
+    let kh = state.known_hosts.lock().await;
+    Ok(kh
+        .pending_changes()
+        .into_iter()
+        .map(|change| PendingHostKeyChange {
+            host: change.host,
+            key_type: change.key_type,
+            pinned_fingerprint: change.pinned_fingerprint,
+            presented_fingerprint: change.presented_fingerprint,
+        })
+        .collect())
+}
+
+/// Pin the key a server presented in place of the recorded one. `fingerprint`
+/// is the value the caller displayed: it is checked against the held key so a
+/// view rendered before another key arrived cannot trust an unreviewed one.
+#[tauri::command]
+pub async fn replace_known_host(
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> ApiResult<()> {
+    let mut kh = state.known_hosts.lock().await;
+    kh.trust_presented_key(&host, port, &fingerprint)
+        .map_err(err)
+}
+
 // ============================================================
 // Workspaces
 // ============================================================

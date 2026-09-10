@@ -10,7 +10,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 /// Handler that verifies the server key against the known_hosts store (TOFU).
-/// On first sight: record + accept. On match: accept. On mismatch: reject.
+/// On first sight: record + accept. On match: accept. On mismatch: reject with
+/// `CoreError::HostKeyMismatch`, which russh propagates out of `connect` as the
+/// handler's own error type instead of the generic "unknown key" failure.
 pub struct SshHandler {
     host: String,
     port: u16,
@@ -26,15 +28,18 @@ impl client::Handler for SshHandler {
         server_public_key: &key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
         let mut kh = self.known_hosts.lock().await;
-        let trusted = kh.verify(&self.host, self.port, server_public_key)?;
-        if !trusted {
+        if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, server_public_key) {
+            // Hold the key so the user can accept this exact one after comparing
+            // fingerprints; unpinning the host would trust whatever answers next.
+            kh.hold_presented_key(&self.host, self.port, server_public_key);
             tracing::warn!(
                 "host key mismatch for {}:{} — rejecting",
                 self.host,
                 self.port
             );
+            return Err(mismatch);
         }
-        Ok(trusted)
+        kh.verify(&self.host, self.port, server_public_key)
     }
 }
 
@@ -83,9 +88,14 @@ pub async fn connect(
     };
 
     let addr = format!("{}:{}", host.hostname, host.port);
+    // A changed host key keeps its own error variant: wrapping it in a generic
+    // connect failure would hide the fingerprints the user needs to compare.
     let mut session = client::connect(config, &addr, handler)
         .await
-        .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
+        .map_err(|e| match e {
+            CoreError::HostKeyMismatch { .. } => e,
+            other => CoreError::Ssh(format!("connect {addr}: {other}")),
+        })?;
 
     let auth_ok = match auth {
         AuthMethod::Agent => unreachable!("agent auth is rejected before network connection"),

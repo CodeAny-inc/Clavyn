@@ -34,7 +34,7 @@
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "list_hosts") return structuredClone(hosts);
-      if (["list_groups", "list_identities", "list_keys", "list_workspaces", "list_known_hosts"].includes(command)) return [];
+      if (["list_groups", "list_identities", "list_keys", "list_workspaces", "list_known_hosts", "list_host_key_changes"].includes(command)) return [];
       if (["vault_is_initialized"].includes(command)) return vaultInitialized;
       if (["is_vault_unlocked"].includes(command)) return vaultUnlocked;
       if (["biometric_available", "biometric_passphrase_stored"].includes(command)) return false;

@@ -4,15 +4,18 @@ import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
+import Button from "./ui/Button.vue";
 import {
   ShieldCheck,
+  ShieldAlert,
   Trash2,
   Search,
   Fingerprint,
 } from "lucide-vue-next";
-import type { KnownHostEntry } from "../types";
+import type { KnownHostEntry, PendingHostKeyChange } from "../types";
 
 const hosts = ref<KnownHostEntry[]>([]);
+const changes = ref<PendingHostKeyChange[]>([]);
 const search = ref("");
 const loading = ref(false);
 const { maskAddress } = useMaskedAddress();
@@ -24,7 +27,12 @@ onMounted(async () => {
 async function load() {
   loading.value = true;
   try {
-    hosts.value = await api.listKnownHosts();
+    const [known, pending] = await Promise.all([
+      api.listKnownHosts(),
+      api.listHostKeyChanges(),
+    ]);
+    hosts.value = known;
+    changes.value = pending;
   } finally {
     loading.value = false;
   }
@@ -58,6 +66,28 @@ async function remove(entry: KnownHostEntry) {
     await load();
   }
 }
+
+const trustError = ref("");
+
+async function trust(change: PendingHostKeyChange) {
+  const [host, port] = parseHostPort(change.host);
+  const confirmed = confirm(
+    `The host key for "${change.host}" changed.\n\n` +
+      `Pinned:    ${change.pinned_fingerprint}\n` +
+      `Presented: ${change.presented_fingerprint}\n\n` +
+      "Trust the presented key only if you can confirm the change with the server's operator.",
+  );
+  if (!confirmed) return;
+  trustError.value = "";
+  try {
+    // Send back the fingerprint that was shown, so a key that arrived after this
+    // view rendered cannot be trusted on the strength of the old one.
+    await api.replaceKnownHost(host, port, change.presented_fingerprint);
+  } catch (cause) {
+    trustError.value = String(cause);
+  }
+  await load();
+}
 </script>
 
 <template>
@@ -80,6 +110,42 @@ async function remove(entry: KnownHostEntry) {
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
+      <!-- Key changes awaiting review. A host listed here is refusing to connect
+           until the presented key is trusted or the server is fixed. -->
+      <div v-if="changes.length" class="mb-3 flex flex-col gap-1.5">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Host key changes
+        </div>
+        <div
+          v-for="change in changes"
+          :key="change.host"
+          class="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+          data-testid="host-key-change"
+        >
+          <div class="flex h-9 w-9 items-center justify-center rounded-md shrink-0 bg-destructive/10">
+            <ShieldAlert class="size-4 text-destructive" :stroke-width="1.75" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-medium truncate font-mono">{{ maskAddress(change.host) }}</span>
+              <Badge>{{ change.key_type }}</Badge>
+            </div>
+            <p class="mt-1 text-[12px] text-foreground">
+              The key this host presents is not the pinned one. Connections stay
+              blocked until you confirm the change with whoever runs the server.
+            </p>
+            <div class="mt-1.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+              <span class="font-mono truncate">Pinned: {{ change.pinned_fingerprint }}</span>
+              <span class="font-mono truncate">Presented: {{ change.presented_fingerprint }}</span>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" @click="trust(change)">
+            Trust new key
+          </Button>
+        </div>
+        <p v-if="trustError" class="text-[12px] text-destructive">{{ trustError }}</p>
+      </div>
+
       <div v-if="loading" class="py-12 text-center text-[13px] text-muted-foreground">Loading...</div>
 
       <div v-else-if="filteredHosts.length" class="flex flex-col gap-1.5">
