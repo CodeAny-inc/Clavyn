@@ -9,8 +9,8 @@ allowed-tools: Bash Read Grep Glob Edit
 The canonical skill lives at `.agents/skills/native-e2e/SKILL.md` (the
 standard Agent Skills location from agentskills.io, supported by Claude Code,
 Cursor, Codex, VS Code, Copilot, Gemini CLI, Goose, OpenHands, and more).
-This file exists so Devin's own discovery (`.devin/skills/`) finds it; the
-content is identical.
+This file exists so Devin's own discovery (`.devin/skills/`) finds it; this
+file is a condensed pointer to the canonical instructions.
 
 ## Quick reference
 

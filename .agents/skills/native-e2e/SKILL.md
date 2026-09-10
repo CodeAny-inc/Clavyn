@@ -1,7 +1,7 @@
 ---
 name: native-e2e
 description: End-to-end test and debug functionality in the real packaged Clavyn app (tauri dev or release binary) on macOS, Linux, and Windows. Use when a feature crosses the webview↔OS boundary — drag-and-drop, file drop, clipboard, native dialogs/menus, shortcuts, window management, tray, updater — or when the mocked Chromium harness can't reproduce a bug. Covers OS-level input/synthesis, accessibility-tree inspection, DOM event instrumentation, and per-platform toolkits.
-license: Proprietary. LICENSE.txt has complete terms
+license: GPL-3.0-or-later. LICENSE has complete terms
 compatibility: Requires the platform's native input/inspection tools (see per-OS recipes). Designed for any Agent Skills-compatible agent (VS Code, Copilot, Claude Code, Codex, Cursor, Gemini CLI, Goose, OpenHands, Devin, etc.).
 metadata:
   author: CodeAny-inc
