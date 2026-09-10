@@ -219,6 +219,7 @@ describe("drag a tab onto a terminal pane (Termius-style tab drop)", () => {
     expect(store.tabs).toHaveLength(2);
     expect(collectPanes(store.tabs[0].tree).map(p => [p.id, p.sessionId])).toEqual([[sourcePane, "orion-session"]]);
     expect(collectPanes(store.tabs[1].tree).map(p => [p.id, p.sessionId])).toEqual([[targetPane, "atlas-session"]]);
+    expect(store.tabs[0].title).toBe("orion");
     expect(store.tabs[1].title).toBe("atlas");
     expect(store.activeTabId).toBe(store.tabs[0].id);
     expect(store.activePaneId).toBe(sourcePane);
@@ -259,6 +260,29 @@ describe("drag a tab onto a terminal pane (Termius-style tab drop)", () => {
     expect(tree.direction).toBe("horizontal");
     expect(collectPanes(tree).map(p => p.id)).toEqual([targetPane, first, second.id]);
     expect(closes()).toEqual([]);
+  });
+  it("keeps tab titles naming the first pane after structural moves", () => {
+    const store = useTabsStore();
+    // closePane: removing the first of two panes renames the tab.
+    const single = store.newTab(host("atlas"));
+    const first = store.activePaneId!;
+    store.splitPane(first, "horizontal", host("orion"));
+    store.closePane(first);
+    expect(store.tabs.find(t => t.id === single.id)!.title).toBe("orion");
+    // movePaneToTab: the source tab keeps the pane that stays behind.
+    const multi = store.newTab(host("atlas"));
+    const movedOut = store.activePaneId!;
+    store.splitPane(movedOut, "horizontal", host("orion"));
+    const dest = store.newTab(host("local"));
+    store.movePaneToTab(movedOut, dest.id);
+    expect(store.tabs.find(t => t.id === multi.id)!.title).toBe("orion");
+    // dropPane edge drop: landing before the first pane renames the tab.
+    const swapTab = store.newTab(host("atlas"));
+    const a = store.activePaneId!;
+    const b = store.splitPane(a, "horizontal", host("orion"))!;
+    store.startDrag(b.id);
+    store.dropPane(a, "left");
+    expect(store.tabs.find(t => t.id === swapTab.id)!.title).toBe("orion");
   });
   it("ignores a tab dropped onto a pane of its own tab", () => {
     const store = useTabsStore();

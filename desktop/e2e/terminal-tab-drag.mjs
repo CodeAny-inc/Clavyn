@@ -181,6 +181,10 @@ try {
     assert.equal(visible[0].host, "orion", "Dragged terminal took the visible tab");
     assert.equal(visible[0].session, orionSession, "Orion session intact");
     assert.ok(state.panes.some(p => p.host === "atlas" && p.session === atlasSession), "Atlas session intact in background tab");
+    const closeLabels = await page.evaluate(() =>
+      [...document.querySelectorAll(".session-tab-close")].map(b => b.getAttribute("aria-label")));
+    assert.equal(closeLabels[0], "Close tab Orion Staging", "Swapped-in tab's a11y label names its new terminal");
+    assert.equal(closeLabels[1], "Close tab Atlas Production", "Receiving tab's a11y label names its new terminal");
     await typeCommand(page, "echo SWAPPED");
     const state2 = await inspect(page);
     assert.ok(state2.writes.every(write => write.id === orionSession));

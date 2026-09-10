@@ -53,6 +53,10 @@ export const useTabsStore = defineStore("tabs", () => {
     ? findPane(activeTab.value.tree, activePaneId.value) : null);
   function owningTab(id: string) { return tabs.value.find(t => findPane(t.tree, id)); }
   function firstPane(tree: PaneTree): Pane { return isPane(tree) ? tree : firstPane(tree.first); }
+  // A tab is named after its first pane; re-sync the title after any tree
+  // change so tooltips, close labels and "Move to…" entries keep identifying
+  // the terminal the tab actually shows.
+  function syncTabTitle(tab: Tab) { tab.title = firstPane(tab.tree).title; }
   function setActivePane(id: string) {
     const tab = owningTab(id);
     if (!tab) return;
@@ -105,6 +109,7 @@ export const useTabsStore = defineStore("tabs", () => {
     const sibling = findSibling(tab.tree, id);
     closeSession(pane);
     tab.tree = detach(tab.tree, id);
+    syncTabTitle(tab);
     if (focusedPanes.get(tab.id) === id) {
       const next = firstPane(sibling ?? tab.tree).id;
       focusedPanes.set(tab.id, next);
@@ -174,6 +179,7 @@ export const useTabsStore = defineStore("tabs", () => {
         first: before ? source : old, second: before ? old : source,
       }));
     }
+    syncTabTitle(tab);
     setActivePane(source.id);
     endDrag();
     paneFocusRequest.value = { paneId: source.id };
@@ -191,7 +197,8 @@ export const useTabsStore = defineStore("tabs", () => {
       const moved = source.tree;
       target.tree = replace(target.tree, targetPaneId, () => moved);
       source.tree = targetPane;
-      source.title = targetPane.title;
+      syncTabTitle(source);
+      syncTabTitle(target);
       focusedPanes.set(source.id, targetPane.id);
       setActivePane(moved.id);
       paneFocusRequest.value = { paneId: moved.id };
@@ -210,6 +217,7 @@ export const useTabsStore = defineStore("tabs", () => {
           first: before ? moved : old, second: before ? old : moved,
         }));
       }
+      syncTabTitle(target);
       const focus = firstPane(moved).id;
       setActivePane(focus);
       paneFocusRequest.value = { paneId: focus };
@@ -226,9 +234,11 @@ export const useTabsStore = defineStore("tabs", () => {
       focusedPanes.delete(source.id);
     } else {
       source.tree = detach(source.tree, id);
+      syncTabTitle(source);
       if (focusedPanes.get(source.id) === id) focusedPanes.set(source.id, firstPane(source.tree).id);
     }
     target.tree = { id: paneId(), direction: "horizontal", ratio: 0.5, first: target.tree, second: pane };
+    syncTabTitle(target);
     setActivePane(id);
     endDrag();
     paneFocusRequest.value = { paneId: id };
@@ -248,6 +258,7 @@ export const useTabsStore = defineStore("tabs", () => {
       focusedPanes.delete(source.id);
     } else {
       source.tree = detach(source.tree, id);
+      syncTabTitle(source);
       if (focusedPanes.get(source.id) === id) focusedPanes.set(source.id, firstPane(source.tree).id);
     }
     const tab = { id: paneId(), title: pane.title, tree: pane as PaneTree };
