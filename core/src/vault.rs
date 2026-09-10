@@ -5,7 +5,7 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Master key for a vault, derived from the user passphrase with Argon2id and
 /// zeroized on drop. It is the only value that unlocks the payload; the
@@ -92,7 +92,25 @@ pub struct Vault {
 
 #[derive(Serialize, Deserialize)]
 struct VaultPayload {
-    keys: Vec<(String, String)>, // (key_id, openssh private)
+    keys: Vec<(String, SecretText)>, // (key_id, openssh private)
+}
+
+/// An OpenSSH private key as it sits in a decrypted payload.
+///
+/// The decrypted plaintext is held in a `Zeroizing<Vec<u8>>` and wiped, but
+/// deserializing it hands every private key to a fresh `String` on the heap
+/// that the plaintext's own wipe does not reach. A `String` also cannot be
+/// wiped through the shared reference the seal path holds, so the wipe lives on
+/// the value itself: any payload that goes out of scope takes its key material
+/// with it, on the success path and on every `?` alike.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+struct SecretText(String);
+
+impl Drop for SecretText {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
 }
 
 impl Vault {
@@ -203,6 +221,7 @@ impl Vault {
 
         let plaintext = self.decrypt(key)?;
         let payload: VaultPayload = serde_json::from_slice(&plaintext)?;
+        drop(plaintext);
         let salt = self.file.salt.clone();
         let epoch = self.next_epoch()?;
         let keys_meta = self.file.keys_meta.clone();
@@ -216,7 +235,7 @@ impl Vault {
         drop(plaintext);
         payload
             .keys
-            .push((meta.id.to_string(), private_openssh.to_string()));
+            .push((meta.id.to_string(), SecretText(private_openssh.to_string())));
 
         let mut keys_meta = self.file.keys_meta.clone();
         keys_meta.push(meta);
@@ -264,7 +283,9 @@ impl Vault {
             .keys
             .into_iter()
             .find(|(id, _)| id == key_id)
-            .map(|(_, k)| k.into_bytes())
+            // Copied out rather than moved out: `k` stays owned here so it is
+            // wiped when this scope ends. The copy is the caller's to zeroize.
+            .map(|(_, k)| k.0.as_bytes().to_vec())
             .ok_or_else(|| CoreError::Vault(format!("key {key_id} not found")))
     }
 
@@ -314,12 +335,7 @@ impl Vault {
             0 => open_unbound(key, &ciphertext),
             VAULT_FORMAT_VERSION => {
                 let nonce = unbase64(&self.file.nonce)?;
-                let aad = associated_data(
-                    self.file.version,
-                    &self.file.salt,
-                    self.file.epoch,
-                    &self.file.keys_meta,
-                )?;
+                let aad = associated_data(&self.file)?;
                 open_sealed(key, &nonce, &aad, &ciphertext)
             }
             other => Err(CoreError::Vault(format!(
@@ -344,16 +360,22 @@ impl Vault {
         self.ensure_writable()?;
 
         let plaintext = Zeroizing::new(serde_json::to_vec(payload)?);
-        let aad = associated_data(VAULT_FORMAT_VERSION, &salt, epoch, &keys_meta)?;
-        let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
-        let candidate = VaultFile {
+        // The header is built first and the tag computed from that exact value,
+        // so what is authenticated and what is written cannot drift apart. The
+        // two fields left empty here are filled in below; neither belongs in the
+        // associated data.
+        let mut candidate = VaultFile {
             version: VAULT_FORMAT_VERSION,
             salt,
-            nonce: base64(nonce),
+            nonce: String::new(),
             epoch,
             keys_meta,
-            ciphertext: base64(ciphertext),
+            ciphertext: String::new(),
         };
+        let aad = associated_data(&candidate)?;
+        let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
+        candidate.nonce = base64(nonce);
+        candidate.ciphertext = base64(ciphertext);
 
         persist(&self.path, &candidate)?;
         self.file = candidate;
@@ -409,12 +431,25 @@ fn derive_key(passphrase: &str, salt: &[u8]) -> Result<VaultKey> {
 /// same bytes by shifting a boundary. `keys_meta` is included through its
 /// serialized form, which is what makes tampering with a stored public key or
 /// fingerprint fail the tag check.
-fn associated_data(
-    version: u32,
-    salt: &str,
-    epoch: u64,
-    keys_meta: &[KeyMeta],
-) -> Result<Vec<u8>> {
+///
+/// The header is destructured rather than read field by field, so adding a
+/// field to [`VaultFile`] stops compiling here until it is either authenticated
+/// or named as deliberately left out. Passing the fields loosely would let a new
+/// one be forgotten silently, which is the exact failure this function exists to
+/// prevent.
+fn associated_data(file: &VaultFile) -> Result<Vec<u8>> {
+    let VaultFile {
+        version,
+        salt,
+        // Not authenticated here, and neither needs to be: the nonce is an
+        // AES-GCM parameter in its own right, and the ciphertext is the message
+        // the tag already covers. Rewriting either fails the tag anyway.
+        nonce: _,
+        ciphertext: _,
+        epoch,
+        keys_meta,
+    } = file;
+
     let meta = serde_json::to_vec(keys_meta)?;
     let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + salt.len() + meta.len() + 32);
     aad.extend_from_slice(AAD_DOMAIN);
@@ -504,8 +539,8 @@ fn unbase64(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        base64, derive_key, open_unbound, seal, unbase64, Vault, VaultKey, VaultPayload,
-        VAULT_FORMAT_VERSION,
+        base64, derive_key, open_unbound, seal, unbase64, SecretText, Vault, VaultKey,
+        VaultPayload, NONCE_LEN, VAULT_FORMAT_VERSION,
     };
     use crate::keys::KeyMeta;
     use std::path::Path;
@@ -553,6 +588,7 @@ mod tests {
         use rand::RngCore;
         rand::rngs::OsRng.fill_bytes(&mut salt);
         let key = derive_key(passphrase, &salt).expect("derive");
+        let keys = keys.into_iter().map(|(id, k)| (id, SecretText(k))).collect();
         let plaintext = serde_json::to_vec(&VaultPayload { keys }).expect("serialize payload");
         let (nonce, body) = seal(&key, &[], &plaintext).expect("seal");
         let mut ciphertext = Vec::with_capacity(nonce.len() + body.len());
@@ -569,6 +605,24 @@ mod tests {
         )
         .expect("write vault");
         key
+    }
+
+    /// `SecretText` replaced a bare `String` inside the encrypted payload. That
+    /// is only safe if it serializes to exactly the same JSON, because every
+    /// vault already on disk was written with the bare string and has to keep
+    /// parsing. Pinned against a literal rather than a round trip, which would
+    /// agree with itself whatever the shape became.
+    #[test]
+    fn the_payload_shape_on_disk_is_a_plain_string() {
+        let payload = VaultPayload {
+            keys: vec![("key-id".to_string(), SecretText("PRIVATE".to_string()))],
+        };
+        let json = serde_json::to_string(&payload).expect("serialize payload");
+        assert_eq!(json, r#"{"keys":[["key-id","PRIVATE"]]}"#);
+
+        let parsed: VaultPayload = serde_json::from_str(&json).expect("parse payload");
+        assert_eq!(parsed.keys[0].0, "key-id");
+        assert_eq!(parsed.keys[0].1 .0, "PRIVATE");
     }
 
     #[tokio::test]
@@ -684,14 +738,26 @@ mod tests {
         );
     }
 
+    /// Every field the associated data covers, each edited on its own.
+    ///
+    /// `verify_key` is given the key that was derived before the edit, so the
+    /// KDF never re-runs and a changed `salt` cannot fail for the incidental
+    /// reason that it derives a different key. Each case therefore reaches the
+    /// AEAD, and asserting on the decrypt message keeps it that way: a parse or
+    /// framing error would report something else and fail the test.
     #[tokio::test]
     async fn editing_any_authenticated_header_field_is_detected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (_, private) = a_key();
+        let (other_meta, _) = a_key();
 
         for (field, value) in [
             ("epoch", serde_json::json!(99u64)),
-            ("version", serde_json::json!(0u32)),
+            ("salt", serde_json::json!(base64([0x5au8; 16]))),
+            (
+                "keys_meta",
+                serde_json::json!([serde_json::to_value(&other_meta).expect("meta to json")]),
+            ),
         ] {
             let path = dir.path().join(format!("vault-{field}.json"));
             let (mut vault, key) = initialized(path.clone(), "correct horse battery staple").await;
@@ -700,15 +766,65 @@ mod tests {
             drop(vault);
 
             let mut file = read_json(&path);
+            assert_ne!(file[field], value, "{field} must actually change");
             file[field] = value;
             write_json(&path, &file);
 
             let tampered = Vault::open(path).expect("reopen");
+            let error = match tampered.verify_key(&key) {
+                Ok(()) => panic!("editing {field} went undetected"),
+                Err(error) => error,
+            };
             assert!(
-                tampered.verify_key(&key).is_err(),
-                "editing {field} went undetected"
+                error.to_string().contains("modified outside Clavyn"),
+                "editing {field} was caught, but not by the tag: {error}"
             );
         }
+    }
+
+    /// `version` needs its own case because its value also selects how the
+    /// ciphertext is framed: simply writing `0` over it leaves the nonce in its
+    /// own field, where a version 0 reader does not look, so the vault would be
+    /// refused over the framing whether or not the tag covered `version` at all.
+    ///
+    /// So the downgrade is done properly here — the nonce is prepended to the
+    /// ciphertext, exactly the shape a version 0 file has. Framing is then no
+    /// longer the reason anything fails, and what remains is that the payload
+    /// was sealed against a version 1 header while a version 0 reader
+    /// authenticates nothing. The tag is the only thing left to catch it.
+    #[tokio::test]
+    async fn downgrading_the_version_to_the_unauthenticated_format_is_detected() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (mut vault, key) = initialized(path.clone(), "correct horse battery staple").await;
+        let (meta, private) = a_key();
+        vault.add_key(&key, meta, &private).expect("add");
+        drop(vault);
+
+        let mut file = read_json(&path);
+        let nonce = unbase64(file["nonce"].as_str().expect("nonce")).expect("b64 nonce");
+        let body = unbase64(file["ciphertext"].as_str().expect("ciphertext")).expect("b64 ct");
+        let mut reframed = nonce.clone();
+        reframed.extend_from_slice(&body);
+
+        // The reframing is sound only if the boundary a version 0 reader splits
+        // at is exactly where the nonce ends, so pin that. Otherwise the file
+        // would be rejected over a mangled nonce or body and the tag would never
+        // be reached.
+        assert_eq!(nonce.len(), NONCE_LEN, "framing would not line up");
+
+        file["version"] = serde_json::json!(0u32);
+        file["ciphertext"] = serde_json::json!(base64(&reframed));
+        write_json(&path, &file);
+
+        let tampered = Vault::open(path).expect("reopen");
+        let error = tampered
+            .verify_key(&key)
+            .expect_err("a downgraded version must not open");
+        assert!(
+            error.to_string().contains("modified outside Clavyn"),
+            "the downgrade was caught, but not by the tag: {error}"
+        );
     }
 
     #[tokio::test]
