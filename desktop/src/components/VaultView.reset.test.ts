@@ -147,3 +147,94 @@ describe("VaultView vault reset", () => {
     expect(wrapper.text()).not.toContain("Danger Zone");
   });
 });
+
+describe("VaultView reset from locked screen", () => {
+  let pinia: ReturnType<typeof createPinia>;
+  let wrapper: ReturnType<typeof mount> | undefined;
+
+  beforeEach(() => {
+    pinia = createPinia();
+    setActivePinia(pinia);
+    const vault = useVaultStore();
+    vault.initialized = true;
+    vault.unlocked = false;
+    vault.biometricAvailable = false;
+    vault.biometricEnabled = false;
+    vi.spyOn(vault, "checkStatus").mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    wrapper?.unmount();
+    wrapper = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("shows a forgot-passphrase reset link on the unlock screen", async () => {
+    wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Forgot passphrase? Reset vault");
+    // The destructive confirmation form is hidden until the link is used.
+    expect(wrapper.find("#reset-pass").exists()).toBe(false);
+  });
+
+  it("reveals the reset confirmation form when the link is clicked", async () => {
+    wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    const link = wrapper.findAll("button").find((b) =>
+      b.text().includes("Forgot passphrase"),
+    )!;
+    expect(link).toBeDefined();
+
+    await link.trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("#reset-pass").exists()).toBe(true);
+    expect(wrapper.text()).toContain("permanently deletes all stored SSH keys");
+    // The unlock form is hidden while the reset form is open.
+    expect(wrapper.find("#unlock-pass").exists()).toBe(false);
+  });
+
+  it("calls vault.reset from the locked flow and returns to setup", async () => {
+    const vault = useVaultStore();
+    const reset = vi.spyOn(vault, "reset").mockImplementation(async () => {
+      vault.initialized = false;
+      vault.unlocked = false;
+    });
+
+    wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    const link = wrapper.findAll("button").find((b) =>
+      b.text().includes("Forgot passphrase"),
+    )!;
+    await link.trigger("click");
+    await flushPromises();
+
+    await wrapper.get("#reset-pass").setValue("my-master-passphrase");
+    await buttonWithText(wrapper, "Reset Vault").trigger("click");
+    await flushPromises();
+
+    expect(reset).toHaveBeenCalledWith("my-master-passphrase");
+    expect(vault.initialized).toBe(false);
+    expect(wrapper.text()).toContain("Create Vault");
+  });
+
+  it("cancels the locked reset flow and returns to the unlock form", async () => {
+    wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    const link = wrapper.findAll("button").find((b) =>
+      b.text().includes("Forgot passphrase"),
+    )!;
+    await link.trigger("click");
+    await flushPromises();
+
+    await buttonWithText(wrapper, "Cancel").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.find("#reset-pass").exists()).toBe(false);
+    expect(wrapper.find("#unlock-pass").exists()).toBe(true);
+  });
+});
