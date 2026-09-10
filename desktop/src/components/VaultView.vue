@@ -5,6 +5,7 @@ import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
+import VaultResetForm from "./VaultResetForm.vue";
 import {
   Vault as VaultIcon,
   Lock,
@@ -247,49 +248,71 @@ const showBiometricButton = computed(
 
         <!-- Unlock mode -->
         <div v-else-if="vault.needsUnlock" class="flex flex-col gap-4">
-          <!-- Biometric unlock button -->
-          <Button
-            v-if="showBiometricButton"
-            variant="outline"
-            :disabled="unlockLoading !== null"
-            @click="tryBiometricUnlock"
-          >
-            <Loader2
-              v-if="unlockLoading === 'biometric'"
-              class="size-3.5 mr-1 animate-spin"
-              :stroke-width="1.75"
-            />
-            <Fingerprint v-else class="size-3.5" :stroke-width="1.75" />
-            {{ unlockLoading === "biometric" ? "Waiting for Touch ID..." : "Unlock with Touch ID" }}
-          </Button>
+          <!-- Reset form (reachable when locked out without the passphrase) -->
+          <VaultResetForm
+            v-if="resetMode"
+            v-model="resetPassphrase"
+            :loading="resetLoading"
+            :error="resetError"
+            @confirm="confirmReset"
+            @cancel="cancelReset"
+          />
 
-          <div v-if="showBiometricButton" class="flex items-center gap-2 text-[11px] text-muted-foreground">
-            <div class="flex-1 h-px bg-border"></div>
-            <span>or use passphrase</span>
-            <div class="flex-1 h-px bg-border"></div>
-          </div>
-
-          <FormGroup>
-            <Label for="unlock-pass">Master passphrase</Label>
-            <Input
-              id="unlock-pass"
-              v-model="passphrase"
-              type="password"
-              placeholder="Enter master passphrase"
+          <template v-else>
+            <!-- Biometric unlock button -->
+            <Button
+              v-if="showBiometricButton"
+              variant="outline"
               :disabled="unlockLoading !== null"
-              @keydown.enter="unlock"
-            />
-          </FormGroup>
-          <p v-if="displayRuntimeError" class="text-[12px] text-destructive">{{ displayRuntimeError }}</p>
-          <Button :disabled="unlockLoading !== null || !passphrase" @click="unlock">
-            <Loader2
-              v-if="unlockLoading === 'password'"
-              class="size-3.5 mr-1 animate-spin"
-              :stroke-width="1.75"
-            />
-            <Unlock v-else class="size-3.5" :stroke-width="1.75" />
-            Unlock
-          </Button>
+              @click="tryBiometricUnlock"
+            >
+              <Loader2
+                v-if="unlockLoading === 'biometric'"
+                class="size-3.5 mr-1 animate-spin"
+                :stroke-width="1.75"
+              />
+              <Fingerprint v-else class="size-3.5" :stroke-width="1.75" />
+              {{ unlockLoading === "biometric" ? "Waiting for Touch ID..." : "Unlock with Touch ID" }}
+            </Button>
+
+            <div v-if="showBiometricButton" class="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <div class="flex-1 h-px bg-border"></div>
+              <span>or use passphrase</span>
+              <div class="flex-1 h-px bg-border"></div>
+            </div>
+
+            <FormGroup>
+              <Label for="unlock-pass">Master passphrase</Label>
+              <Input
+                id="unlock-pass"
+                v-model="passphrase"
+                type="password"
+                placeholder="Enter master passphrase"
+                :disabled="unlockLoading !== null"
+                @keydown.enter="unlock"
+              />
+            </FormGroup>
+            <p v-if="displayRuntimeError" class="text-[12px] text-destructive">{{ displayRuntimeError }}</p>
+            <Button :disabled="unlockLoading !== null || !passphrase" @click="unlock">
+              <Loader2
+                v-if="unlockLoading === 'password'"
+                class="size-3.5 mr-1 animate-spin"
+                :stroke-width="1.75"
+              />
+              <Unlock v-else class="size-3.5" :stroke-width="1.75" />
+              Unlock
+            </Button>
+
+            <!-- Forgot-passphrase escape hatch. Reset only needs the master
+                 passphrase to authorize, so it is reachable without unlocking. -->
+            <button
+              type="button"
+              class="self-start text-[12px] text-muted-foreground underline-offset-2 hover:underline hover:text-destructive transition-colors"
+              @click="resetMode = true"
+            >
+              Forgot passphrase? Reset vault
+            </button>
+          </template>
         </div>
 
         <!-- Unlocked mode -->
@@ -416,51 +439,14 @@ const showBiometricButton = computed(
             </div>
 
             <!-- Reset confirmation form -->
-            <div v-if="resetMode" class="flex flex-col gap-3">
-              <div class="flex items-start gap-2.5 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                <AlertTriangle class="size-4 text-destructive shrink-0 mt-0.5" :stroke-width="1.75" />
-                <div class="text-[12px] text-muted-foreground">
-                  Resetting the vault <strong class="text-destructive">permanently deletes all stored SSH keys and credentials</strong>.
-                  This cannot be undone. Enter your master passphrase to confirm.
-                </div>
-              </div>
-              <FormGroup>
-                <Label for="reset-pass">Master passphrase</Label>
-                <Input
-                  id="reset-pass"
-                  v-model="resetPassphrase"
-                  type="password"
-                  placeholder="Enter master passphrase to confirm"
-                  :disabled="resetLoading"
-                  @keydown.enter="confirmReset"
-                />
-              </FormGroup>
-              <p v-if="resetError" class="text-[12px] text-destructive">{{ resetError }}</p>
-              <div class="flex items-center gap-2">
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  :disabled="resetLoading || !resetPassphrase"
-                  @click="confirmReset"
-                >
-                  <Loader2
-                    v-if="resetLoading"
-                    class="size-3.5 mr-1 animate-spin"
-                    :stroke-width="1.75"
-                  />
-                  <Trash2 v-else class="size-3.5" :stroke-width="1.75" />
-                  {{ resetLoading ? "Resetting..." : "Reset Vault" }}
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  :disabled="resetLoading"
-                  @click="cancelReset"
-                >
-                  Cancel
-                </Button>
-              </div>
-            </div>
+            <VaultResetForm
+              v-if="resetMode"
+              v-model="resetPassphrase"
+              :loading="resetLoading"
+              :error="resetError"
+              @confirm="confirmReset"
+              @cancel="cancelReset"
+            />
 
             <!-- Reset button -->
             <template v-else>

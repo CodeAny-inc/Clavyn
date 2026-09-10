@@ -301,9 +301,12 @@ workflow — fix every finding before considering a task done.
 - PR description must explain which changes were made and what the
   implementation solves — not just a diff summary.
 - Inline screenshots and recordings are required in the PR description for any
-  UI/UX change. Use absolute raw URLs, never relative paths — GitHub does not
-  resolve `./screenshots/foo.png` in a PR body. Use the form:
-  `https://github.com/CodeAny-inc/Clavyn/raw/<branch>/screenshots/foo.png`
+  UI/UX change. They must render as **inline images**, not plain links — use
+  Markdown image syntax `![alt text](url)` so reviewers see the image directly
+  in the PR body. Never paste a bare URL; GitHub will not auto-embed it.
+  Use absolute raw URLs, never relative paths — GitHub does not resolve
+  `./screenshots/foo.png` in a PR body. Use the form:
+  `![Vault unlocked](https://github.com/CodeAny-inc/Clavyn/raw/<branch>/screenshots/foo.png)`
 - Verify every media URL resolves to real content (HTTP 200, correct
   content-type) before considering the PR done.
 - Run the full verification suite and record the results in the
