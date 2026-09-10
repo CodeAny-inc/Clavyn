@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost https://github.com https://*.githubusercontent.com https://objects.githubusercontent.com"
+      "csp": "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; frame-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }
   },
   "bundle": {
@@ -48,6 +48,9 @@
     }
   },
   "plugins": {
+    "shell": {
+      "open": "https://github\\.com/CodeAny-inc/Clavyn(/releases)?"
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzOTFFMkUyNUVEMDI4QTgKUldTb0tOQmU0dUtSc3loK0p4Qm9xbmtWVzlBQXVaaVlNaG12Vk5mYnd4c2QyQ09LMGVtUWFoM2oK",
       "endpoints": [
