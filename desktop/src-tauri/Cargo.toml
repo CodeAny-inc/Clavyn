@@ -33,6 +33,13 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Resolves the D-Bus session address before the single-instance plugin does,
+# because the plugin resolves it with `unwrap` and `panic = "abort"` turns that
+# into a startup abort with no window. Track the version the plugin itself
+# depends on so both resolve the address the same way.
+zbus = "5.9"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep Security.framework cleanup available even when Touch ID enrollment/unlock
 # is compiled out. Data Protection Keychain visibility still depends on the

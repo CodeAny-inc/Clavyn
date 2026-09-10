@@ -689,6 +689,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "zbus",
  "zeroize",
 ]
 
