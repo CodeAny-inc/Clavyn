@@ -1,0 +1,84 @@
+name: Windows NSIS smoke test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-nsis-smoke.yml"
+      - "desktop/src-tauri/tauri.conf.json"
+      - "desktop/src-tauri/**"
+      - "desktop/src/**"
+      - "desktop/package.json"
+      - "desktop/package-lock.json"
+      - "desktop/vite.config.ts"
+      - "core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-nsis-smoke.yml"
+      - "desktop/src-tauri/tauri.conf.json"
+      - "desktop/src-tauri/**"
+      - "desktop/src/**"
+      - "desktop/package.json"
+      - "desktop/package-lock.json"
+      - "desktop/vite.config.ts"
+      - "core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-nsis-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-nsis-smoke:
+    name: Windows NSIS smoke test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The Cargo workspace root is the repository root (members: core,
+          # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
+          # at desktop/src-tauri caches a directory that never exists, which
+          # leaves every run recompiling from scratch.
+          workspaces: ". -> target"
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+      - name: Build NSIS installer
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          # Updater artifacts require release signing secrets, which are intentionally
+          # unavailable to fork pull requests. This smoke test only needs to prove
+          # that the Windows NSIS installer (including its WebView2 bootstrapper)
+          # can be bundled successfully.
+          # PowerShell strips embedded double quotes when passing arguments to
+          # native commands, so the JSON keys must be backslash-escaped to survive.
+          npx tauri build --bundles nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'
+      - name: Verify NSIS installer was produced
+        shell: pwsh
+        run: |
+          $installers = Get-ChildItem -Path "$env:GITHUB_WORKSPACE" -Recurse -File -Filter "*-setup.exe" |
+            Where-Object { $_.FullName -match '[\\/]bundle[\\/]nsis[\\/]' }
+
+          if (-not $installers) {
+            Write-Error "Tauri build completed without producing an NSIS *-setup.exe artifact."
+            exit 1
+          }
+
+          $installers | ForEach-Object { Write-Host "Produced NSIS installer: $($_.FullName)" }

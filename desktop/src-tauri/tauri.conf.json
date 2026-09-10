@@ -38,6 +38,11 @@
     "category": "DeveloperTool",
     "shortDescription": "Open-source SSH connection & key manager",
     "longDescription": "Clavyn is an open-source, cross-platform manager for SSH connections, keys, and known hosts. Secure-by-default: encrypted vault, OS keychain integration, TOFU host key verification.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
+    },
     "macOS": {
       "signingIdentity": "-"
     }
