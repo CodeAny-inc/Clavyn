@@ -176,3 +176,148 @@ describe("drag a pane between tabs (Termius-style split-on-drop)", () => {
     expect(store.dragOverTabId).toBeNull();
   });
 });
+
+describe("drag a tab onto a terminal pane (Termius-style tab drop)", () => {
+  it.each(["top", "bottom", "left", "right"] as const)("splits the target pane %s with the dragged tab", position => {
+    const store = useTabsStore();
+    const target = store.newTab(host("atlas"));
+    const targetPane = store.activePaneId!;
+    store.setPaneConnected(targetPane, "atlas-session");
+    const source = store.newTab(host("orion"));
+    const sourcePane = store.activePaneId!;
+    store.setPaneConnected(sourcePane, "orion-session");
+    store.startTabDrag(source.id);
+    store.dropTabOnPane(source.id, targetPane, position);
+    expect(store.tabs).toHaveLength(1);
+    const tree = store.tabs[0].tree;
+    expect(isSplit(tree)).toBe(true);
+    if (!isSplit(tree)) throw new Error("Expected split");
+    const horizontal = position === "left" || position === "right";
+    const before = position === "left" || position === "top";
+    expect(tree.direction).toBe(horizontal ? "horizontal" : "vertical");
+    const first = before ? sourcePane : targetPane;
+    const second = before ? targetPane : sourcePane;
+    expect(collectPanes(tree).map(p => [p.id, p.sessionId])).toEqual([
+      [first, first === sourcePane ? "orion-session" : "atlas-session"],
+      [second, second === sourcePane ? "orion-session" : "atlas-session"],
+    ]);
+    expect(store.activeTabId).toBe(store.tabs[0].id);
+    expect(store.activePaneId).toBe(sourcePane);
+    expect(closes()).toEqual([]);
+    expect(store.draggedTabId).toBeNull();
+  });
+  it("swaps two panes across tabs on a center drop", () => {
+    const store = useTabsStore();
+    const target = store.newTab(host("atlas"));
+    const targetPane = store.activePaneId!;
+    store.setPaneConnected(targetPane, "atlas-session");
+    const source = store.newTab(host("orion"));
+    const sourcePane = store.activePaneId!;
+    store.setPaneConnected(sourcePane, "orion-session");
+    store.startTabDrag(source.id);
+    store.dropTabOnPane(source.id, targetPane, "center");
+    expect(store.tabs).toHaveLength(2);
+    expect(collectPanes(store.tabs[0].tree).map(p => [p.id, p.sessionId])).toEqual([[sourcePane, "orion-session"]]);
+    expect(collectPanes(store.tabs[1].tree).map(p => [p.id, p.sessionId])).toEqual([[targetPane, "atlas-session"]]);
+    expect(store.tabs[1].title).toBe("atlas");
+    expect(store.activeTabId).toBe(store.tabs[0].id);
+    expect(store.activePaneId).toBe(sourcePane);
+    expect(closes()).toEqual([]);
+  });
+  it("moves a multi-pane tab's whole split tree on an edge drop", () => {
+    const store = useTabsStore();
+    const target = store.newTab(host("atlas"));
+    const targetPane = store.activePaneId!;
+    const source = store.newTab();
+    const first = store.activePaneId!;
+    store.setPaneConnected(first, "keep-a");
+    const second = store.splitPane(first, "horizontal", host("orion"))!;
+    store.setPaneConnected(second.id, "keep-b");
+    store.startTabDrag(source.id);
+    store.dropTabOnPane(source.id, targetPane, "left");
+    expect(store.tabs).toHaveLength(1);
+    const tree = store.tabs[0].tree;
+    if (!isSplit(tree)) throw new Error("Expected split");
+    expect(tree.direction).toBe("horizontal");
+    expect(collectPanes(tree).map(p => p.sessionId)).toEqual(["keep-a", "keep-b", null]);
+    expect(collectPanes(tree).map(p => p.id)).toEqual([first, second.id, targetPane]);
+    expect(store.activePaneId).toBe(first);
+    expect(closes()).toEqual([]);
+  });
+  it("merges a multi-pane tab at the root on a center drop", () => {
+    const store = useTabsStore();
+    const target = store.newTab(host("atlas"));
+    const targetPane = store.activePaneId!;
+    const source = store.newTab();
+    const first = store.activePaneId!;
+    const second = store.splitPane(first, "vertical")!;
+    store.startTabDrag(source.id);
+    store.dropTabOnPane(source.id, targetPane, "center");
+    expect(store.tabs).toHaveLength(1);
+    const tree = store.tabs[0].tree;
+    if (!isSplit(tree)) throw new Error("Expected split");
+    expect(tree.direction).toBe("horizontal");
+    expect(collectPanes(tree).map(p => p.id)).toEqual([targetPane, first, second.id]);
+    expect(closes()).toEqual([]);
+  });
+  it("ignores a tab dropped onto a pane of its own tab", () => {
+    const store = useTabsStore();
+    const tab = store.newTab();
+    const pane = store.activePaneId!;
+    store.splitPane(pane, "horizontal");
+    const before = JSON.stringify(store.tabs);
+    store.startTabDrag(tab.id);
+    store.dropTabOnPane(tab.id, pane, "left");
+    store.dropTabOnPane(tab.id, pane, "center");
+    expect(JSON.stringify(store.tabs)).toBe(before);
+    expect(store.draggedTabId).toBeNull();
+    expect(closes()).toEqual([]);
+  });
+  it("ignores unknown tab or pane ids", () => {
+    const store = useTabsStore();
+    store.newTab();
+    const pane = store.activePaneId!;
+    const before = JSON.stringify(store.tabs);
+    store.startTabDrag("missing-tab");
+    store.dropTabOnPane("missing-tab", pane, "left");
+    store.startTabDrag(store.tabs[0].id);
+    store.dropTabOnPane(store.tabs[0].id, "missing-pane", "left");
+    expect(JSON.stringify(store.tabs)).toBe(before);
+    expect(closes()).toEqual([]);
+  });
+  it("does not highlight panes owned by the dragged tab", () => {
+    const store = useTabsStore();
+    const tab = store.newTab();
+    const own = store.activePaneId!;
+    const other = store.newTab();
+    const otherPane = store.activePaneId!;
+    store.startTabDrag(tab.id);
+    store.setDragOver(own, "left");
+    expect(store.dragOverPaneId).toBeNull();
+    store.setDragOver(otherPane, "right");
+    expect(store.dragOverPaneId).toBe(otherPane);
+    expect(store.dragOverPosition).toBe("right");
+    store.setDragOverTab(other.id);
+    expect(store.dragOverTabId).toBe(other.id);
+    store.setDragOverTab(tab.id);
+    expect(store.dragOverTabId).toBe(other.id);
+    store.endDrag();
+    expect(store.draggedTabId).toBeNull();
+    expect(store.dragOverPaneId).toBeNull();
+    expect(store.dragOverTabId).toBeNull();
+  });
+  it("reorders tabs by dragged index and target index", () => {
+    const store = useTabsStore();
+    const a = store.newTab();
+    const b = store.newTab();
+    const c = store.newTab();
+    store.reorderTab(0, 2);
+    expect(store.tabs.map(t => t.id)).toEqual([b.id, c.id, a.id]);
+    store.reorderTab(2, 0);
+    expect(store.tabs.map(t => t.id)).toEqual([a.id, b.id, c.id]);
+    store.reorderTab(0, 0);
+    store.reorderTab(-1, 1);
+    store.reorderTab(0, 9);
+    expect(store.tabs.map(t => t.id)).toEqual([a.id, b.id, c.id]);
+  });
+});

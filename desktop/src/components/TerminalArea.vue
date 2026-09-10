@@ -11,7 +11,9 @@ const emit = defineEmits<{ activate: [] }>();
 const tabs = useTabsStore();
 const ui = useUiStore();
 const picker = ref<InstanceType<typeof SessionPicker> | null>(null);
-const draggedTabId = ref<string | null>(null);
+// Which edge of the hovered tab a tab drag will insert at — the strip shows an
+// insertion bar on that side, like reordering tabs in Termius or a browser.
+const tabDropSide = ref<"before" | "after" | null>(null);
 function activate(id: string) { tabs.setActiveTab(id); emit("activate"); }
 function requestSession(paneId: string, direction: SessionPlacement) {
   ui.exitFullscreen();
@@ -30,17 +32,25 @@ function tabLabel(id: string) {
   return panes.length === 1 ? panes[0].title : panes.map(pane => pane.title).join(" + ");
 }
 function tabDrag(event: DragEvent, id: string) {
-  draggedTabId.value = id;
+  tabs.startTabDrag(id);
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", id);
   }
 }
 function tabDragOver(event: DragEvent, id: string) {
-  if (!tabs.draggedPaneId) return;
+  if (!tabs.draggedPaneId && !tabs.draggedTabId) return;
+  if (tabs.draggedTabId === id) return;
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
   tabs.setDragOverTab(id);
+  if (tabs.draggedTabId) {
+    const bounds = (event.currentTarget as HTMLElement).getBoundingClientRect();
+    tabDropSide.value = event.clientX < bounds.left + bounds.width / 2 ? "before" : "after";
+  }
+}
+function tabDragLeave(id: string) {
+  if (tabs.dragOverTabId === id) { tabs.clearDragOverTab(); tabDropSide.value = null; }
 }
 function tabDrop(event: DragEvent, target: string) {
   event.preventDefault();
@@ -48,10 +58,14 @@ function tabDrop(event: DragEvent, target: string) {
     tabs.movePaneToTab(tabs.draggedPaneId, target);
     tabs.endDrag();
     emit("activate");
-  } else if (draggedTabId.value) {
-    tabs.reorderTab(tabs.tabs.findIndex(t => t.id === draggedTabId.value), tabs.tabs.findIndex(t => t.id === target));
+  } else if (tabs.draggedTabId && tabs.draggedTabId !== target) {
+    const from = tabs.tabs.findIndex(t => t.id === tabs.draggedTabId);
+    let to = tabs.tabs.findIndex(t => t.id === target) + (tabDropSide.value === "after" ? 1 : 0);
+    // The removal of the dragged tab shifts later indexes down by one.
+    if (from >= 0 && from < to) to -= 1;
+    tabs.reorderTab(from, to);
   }
-  draggedTabId.value = null;
+  tabDropSide.value = null;
 }
 // Dropping a dragged pane on the empty strip / New-session area extracts it
 // into its own tab — the inverse of dropping onto an existing tab's split.
@@ -59,7 +73,9 @@ function stripDragOver(event: DragEvent) {
   if (!tabs.draggedPaneId) return;
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
-  tabs.clearDragOverTab();
+  // Dragover bubbles up from the tab buttons; keep the per-tab highlight and
+  // only clear it when hovering strip chrome outside any tab.
+  if (!(event.target instanceof HTMLElement) || !event.target.closest(".session-tab")) tabs.clearDragOverTab();
 }
 function stripDrop(event: DragEvent) {
   if (!tabs.draggedPaneId) return;
@@ -101,14 +117,17 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
       @dragover="tabs.draggedPaneId ? stripDragOver($event) : undefined"
       @drop="stripDrop($event)" @dragleave="tabs.draggedPaneId ? tabs.clearDragOverTab() : undefined">
       <nav class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" aria-label="Open terminal tabs"
-        :class="{ 'pane-drag-active': !!tabs.draggedPaneId }">
+        :class="{ 'pane-drag-active': !!tabs.draggedPaneId || !!tabs.draggedTabId }">
         <div v-for="(tab, index) in tabs.tabs" :key="tab.id" class="session-tab"
           :class="{
             'session-tab-active': visible && tab.id === tabs.activeTabId,
             'session-tab-drop-target': tabs.dragOverTabId === tab.id && tabs.draggedPaneId,
+            'session-tab-dragging': tabs.draggedTabId === tab.id,
+            'session-tab-reorder-before': tabs.draggedTabId && tabs.dragOverTabId === tab.id && tabDropSide === 'before',
+            'session-tab-reorder-after': tabs.draggedTabId && tabs.dragOverTabId === tab.id && tabDropSide === 'after',
           }"
-          draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="draggedTabId = null; tabs.endDrag()"
-          @dragover="tabDragOver($event, tab.id)" @dragleave="tabs.dragOverTabId === tab.id && tabs.clearDragOverTab()"
+          draggable="true" @dragstart="tabDrag($event, tab.id)" @dragend="tabDropSide = null; tabs.endDrag()"
+          @dragover="tabDragOver($event, tab.id)" @dragleave="tabDragLeave(tab.id)"
           @drop="tabDrop($event, tab.id)" @auxclick.middle.prevent="tabs.closeTab(tab.id)">
           <button class="session-tab-select" :aria-pressed="visible && tab.id === tabs.activeTabId" :data-tab-id="tab.id"
             :title="`Show ${tab.title} terminal · ${connected(tab.id)} connected`"
@@ -152,4 +171,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 .pane-drag-active .session-tab { @apply transition-colors duration-100; }
 .session-tab-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
 .new-session-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
+/* Tab-drag affordances: the dragged tab dims and the hovered neighbour shows
+   an insertion bar on the side the tab will land on. */
+.session-tab-dragging { @apply opacity-50; }
+.session-tab-reorder-before { box-shadow: inset 3px 0 0 var(--workspace-accent); }
+.session-tab-reorder-after { box-shadow: inset -3px 0 0 var(--workspace-accent); }
 </style>

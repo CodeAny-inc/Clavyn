@@ -65,6 +65,43 @@ it("preserves both terminal elements on center-swap and edge-drop", async () => 
   expect(lifecycle.mounted).toHaveLength(2);
   expect(lifecycle.destroyed).toEqual([]);
 });
+it("preserves terminal elements when a tab drops onto another tab's pane", async () => {
+  const store = useTabsStore();
+  const target = store.newTab();
+  const targetPane = store.activePaneId!;
+  const source = store.newTab();
+  const sourcePane = store.activePaneId!;
+  wrapper = mount(TerminalWorkspace, { props: { visible: true } });
+  await nextTick();
+  const sourceElement = wrapper.get(`[data-terminal="${sourcePane}"]`).element;
+  const targetElement = wrapper.get(`[data-terminal="${targetPane}"]`).element;
+  store.startTabDrag(source.id);
+  store.dropTabOnPane(source.id, targetPane, "right");
+  await nextTick();
+  expect(store.tabs).toHaveLength(1);
+  expect(wrapper.get(`[data-terminal="${sourcePane}"]`).element).toBe(sourceElement);
+  expect(wrapper.get(`[data-terminal="${targetPane}"]`).element).toBe(targetElement);
+  expect(lifecycle.mounted).toHaveLength(2);
+  expect(lifecycle.destroyed).toEqual([]);
+});
+it("preserves both terminal elements on a cross-tab center swap", async () => {
+  const store = useTabsStore();
+  const target = store.newTab();
+  const targetPane = store.activePaneId!;
+  const source = store.newTab();
+  const sourcePane = store.activePaneId!;
+  wrapper = mount(TerminalWorkspace, { props: { visible: true } });
+  await nextTick();
+  const sourceElement = wrapper.get(`[data-terminal="${sourcePane}"]`).element;
+  const targetElement = wrapper.get(`[data-terminal="${targetPane}"]`).element;
+  store.startTabDrag(source.id);
+  store.dropTabOnPane(source.id, targetPane, "center");
+  await nextTick();
+  expect(store.tabs).toHaveLength(2);
+  expect(wrapper.get(`[data-terminal="${sourcePane}"]`).element).toBe(sourceElement);
+  expect(wrapper.get(`[data-terminal="${targetPane}"]`).element).toBe(targetElement);
+  expect(lifecycle.destroyed).toEqual([]);
+});
 it("allows keyboard resize and equal-size reset", async () => {
   const store = useTabsStore();
   store.newTab();

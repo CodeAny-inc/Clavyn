@@ -4,7 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import { useTabsStore, type Pane, type DropPosition } from "../stores/tabs";
+import { useTabsStore, isPane, type Pane, type DropPosition } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
@@ -420,15 +420,26 @@ function dropPosition(event: DragEvent): DropPosition {
   const edges: [DropPosition, number][] = [["left", x], ["right", 1 - x], ["top", y], ["bottom", 1 - y]];
   return edges.sort((a, b) => a[1] - b[1])[0][0];
 }
+// A dragged tab merges its tree into the hovered pane; a single-pane tab can
+// also swap with it. The center label reflects which will happen.
+const centerDropLabel = computed(() => {
+  const tab = tabs.tabs.find(t => t.id === tabs.draggedTabId);
+  return tab && !isPane(tab.tree) ? "Merge" : "Swap";
+});
 function dragOver(event: DragEvent) {
-  if (!tabs.draggedPaneId || isDragging.value || !paneRef.value) return;
+  if ((!tabs.draggedPaneId && !tabs.draggedTabId) || isDragging.value || !paneRef.value) return;
+  // A tab cannot be dropped onto one of its own panes.
+  if (tabs.draggedTabId && tabs.owningTab(props.pane.id)?.id === tabs.draggedTabId) return;
   event.preventDefault();
   tabs.setDragOver(props.pane.id, dropPosition(event));
 }
 function drop(event: DragEvent) {
-  if (!tabs.draggedPaneId || !paneRef.value) return;
+  if ((!tabs.draggedPaneId && !tabs.draggedTabId) || !paneRef.value) return;
   event.preventDefault();
-  tabs.dropPane(props.pane.id, dropPosition(event));
+  // Reveal the resulting split instead of keeping the old pane fullscreened.
+  ui.exitFullscreen();
+  if (tabs.draggedTabId) tabs.dropTabOnPane(tabs.draggedTabId, props.pane.id, dropPosition(event));
+  else tabs.dropPane(props.pane.id, dropPosition(event));
 }
 const actions = computed<MenuAction[]>(() => [
   { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
@@ -492,12 +503,12 @@ function selectAction(id: string) {
       <button class="pane-button" aria-label="Next match" @click="doSearch()"><ChevronDown class="size-3.5" /></button>
       <button class="pane-button" aria-label="Close search" @click="closeSearch"><X class="size-3.5" /></button>
     </div>
-    <div v-if="isDragOver && tabs.draggedPaneId && !isDragging" class="drop-overlay" aria-hidden="true">
+    <div v-if="isDragOver && (tabs.draggedPaneId || tabs.draggedTabId) && !isDragging" class="drop-overlay" aria-hidden="true">
       <div class="drop-zone drop-zone-top" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'top' }"><span>Split above</span></div>
       <div class="drop-zone drop-zone-bottom" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'bottom' }"><span>Split below</span></div>
       <div class="drop-zone drop-zone-left" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'left' }"><span>Split left</span></div>
       <div class="drop-zone drop-zone-right" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'right' }"><span>Split right</span></div>
-      <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>Swap</span></div>
+      <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>{{ centerDropLabel }}</span></div>
     </div>
   </div>
   </Teleport>
