@@ -6,7 +6,7 @@ import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionOutput, emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
 const terminals = vi.hoisted(() => ({ instances: [] as Array<{
@@ -52,7 +52,7 @@ function render() {
   return view;
 }
 function output(id: string, text: string) {
-  emitTauriEvent("session-data", { session_id: id, data: Array.from(new TextEncoder().encode(text)) });
+  emitSessionOutput(id, text);
 }
 function closed(id: string) {
   emitTauriEvent("session-closed", { session_id: id, reason: "fixture EOF" });

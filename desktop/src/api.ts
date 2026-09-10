@@ -1,5 +1,5 @@
 // Tauri command wrappers — thin typed layer over `invoke`.
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   Host,
@@ -8,7 +8,6 @@ import type {
   KeyMeta,
   KnownHostEntry,
   Workspace,
-  SessionDataEvent,
   SessionClosedEvent,
 } from "./types";
 
@@ -51,18 +50,27 @@ export const deleteWorkspace = (id: string) => invoke<void>("delete_workspace", 
 export const setActiveWorkspace = (id: string) => invoke<void>("set_active_workspace", { id });
 export const readKeyFile = (path: string) => invoke<string>("read_key_file", { path });
 
+/**
+ * Sink a session's terminal output arrives on. Bytes travel as a binary IPC
+ * payload, so they never pass through JSON, and each session has its own sink
+ * instead of every pane receiving every session's output.
+ */
+export type SessionOutput = Channel<ArrayBuffer>;
+
+export function sessionOutput(onData: (bytes: Uint8Array) => void): SessionOutput {
+  const channel: SessionOutput = new Channel();
+  channel.onmessage = (message) => onData(new Uint8Array(message));
+  return channel;
+}
+
 export interface SshConnectionInfo { username: string; hostname: string; port: number }
-export const connectSsh = (sessionId: string, host: Host, password: string | null, cols: number, rows: number, expectedUsername?: string) =>
-  invoke<SshConnectionInfo>("connect_ssh", { sessionId, host, password, cols, rows, expectedUsername });
-export const createLocalTerminal = (sessionId: string, cols: number, rows: number) =>
-  invoke<void>("create_local_terminal", { sessionId, cols, rows });
+export const connectSsh = (sessionId: string, host: Host, password: string | null, cols: number, rows: number, onOutput: SessionOutput, expectedUsername?: string) =>
+  invoke<SshConnectionInfo>("connect_ssh", { sessionId, host, password, cols, rows, expectedUsername, onOutput });
+export const createLocalTerminal = (sessionId: string, cols: number, rows: number, onOutput: SessionOutput) =>
+  invoke<void>("create_local_terminal", { sessionId, cols, rows, onOutput });
 export const sessionWrite = (sessionId: string, data: number[]) => invoke<void>("session_write", { sessionId, data });
 export const sessionResize = (sessionId: string, cols: number, rows: number) => invoke<void>("session_resize", { sessionId, cols, rows });
 export const closeSession = (sessionId: string) => invoke<void>("close_session", { sessionId });
-
-export function onSessionData(cb: (e: SessionDataEvent) => void): Promise<UnlistenFn> {
-  return listen<SessionDataEvent>("session-data", (event) => cb(event.payload));
-}
 export function onSessionClosed(cb: (e: SessionClosedEvent) => void): Promise<UnlistenFn> {
   return listen<SessionClosedEvent>("session-closed", (event) => cb(event.payload));
 }

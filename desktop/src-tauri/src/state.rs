@@ -4,11 +4,28 @@ use clavyn_core::sftp::SftpManager;
 use clavyn_core::store::Store;
 use clavyn_core::vault::Vault;
 use clavyn_core::Result;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+
+/// Sink a session's terminal output is delivered to.
+///
+/// Bytes travel as a raw IPC payload rather than a serialized event: a JSON
+/// array of decimal numbers costs roughly three times the wire size and is
+/// parsed as JavaScript source, which dominates the cost of bulk output. One
+/// sink per session also keeps a pane from receiving every other session's
+/// bytes only to discard them.
+pub type OutputSink = Channel<InvokeResponseBody>;
+
+/// Registry of live output sinks, keyed by session id.
+///
+/// Guarded by a blocking mutex because the core data callback is synchronous.
+/// It is only ever held long enough to look a sink up, never across delivery.
+pub type OutputSinks = Arc<std::sync::Mutex<HashMap<String, OutputSink>>>;
 
 /// Monotonic generation used to invalidate unlock attempts that started before
 /// a newer lock (or vault initialization) operation. The passphrase mutex still
@@ -55,7 +72,8 @@ pub struct AppState {
     pub biometric_mutation: Mutex<()>,
     pub sessions: Arc<SessionManager>,
     pub sftp: Arc<SftpManager>,
-    pub local_terminals: Mutex<std::collections::HashMap<String, LocalTerminal>>,
+    pub output_sinks: OutputSinks,
+    pub local_terminals: Mutex<HashMap<String, LocalTerminal>>,
     pub app_data_dir: PathBuf,
 }
 
@@ -76,20 +94,25 @@ impl AppState {
         let vault = Vault::open(app_data.join("vault.json"))?;
         let known_hosts = KnownHosts::load(app_data.join("known_hosts.json"))?;
 
-        let app_handle = app.clone();
+        let output_sinks: OutputSinks = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let sinks = output_sinks.clone();
         let data_callback = Arc::new(move |sid: &str, data: &[u8]| {
-            let _ = app_handle.emit(
-                "session-data",
-                SessionDataEvent {
-                    session_id: sid.to_string(),
-                    data: data.to_vec(),
-                },
-            );
+            let sink = sinks.lock().ok().and_then(|map| map.get(sid).cloned());
+            if let Some(sink) = sink {
+                let _ = sink.send(InvokeResponseBody::Raw(data.to_vec()));
+            }
         });
 
-        let app_handle2 = app.clone();
+        let sinks = output_sinks.clone();
+        let app_handle = app.clone();
         let close_callback = Arc::new(move |sid: &str, reason: &str| {
-            let _ = app_handle2.emit(
+            // Drop the sink first: the frontend stops accepting output for a
+            // session the moment it is told the session ended.
+            if let Ok(mut map) = sinks.lock() {
+                map.remove(sid);
+            }
+            let _ = app_handle.emit(
                 "session-closed",
                 SessionClosedEvent {
                     session_id: sid.to_string(),
@@ -110,16 +133,26 @@ impl AppState {
             biometric_mutation: Mutex::new(()),
             sessions,
             sftp,
-            local_terminals: Mutex::new(std::collections::HashMap::new()),
+            output_sinks,
+            local_terminals: Mutex::new(HashMap::new()),
             app_data_dir: app_data,
         }))
     }
-}
 
-#[derive(Clone, serde::Serialize)]
-pub struct SessionDataEvent {
-    pub session_id: String,
-    pub data: Vec<u8>,
+    /// Routes a session's output to `sink` until the session ends.
+    pub fn register_output(&self, session_id: String, sink: OutputSink) {
+        if let Ok(mut map) = self.output_sinks.lock() {
+            map.insert(session_id, sink);
+        }
+    }
+
+    /// Stops routing output for a session. Safe to call for a session that was
+    /// never registered.
+    pub fn release_output(&self, session_id: &str) {
+        if let Ok(mut map) = self.output_sinks.lock() {
+            map.remove(session_id);
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize)]

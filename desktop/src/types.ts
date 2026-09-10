@@ -80,11 +80,6 @@ export type PaneLayout =
       second: PaneLayout;
     };
 
-export interface SessionDataEvent {
-  session_id: string;
-  data: number[];
-}
-
 export interface SessionClosedEvent {
   session_id: string;
   reason: string;

@@ -29,7 +29,14 @@ if (!globalThis.crypto.randomUUID) {
 // so individual tests can override the return value for specific commands.
 const mockInvokeHandlers = new Map<string, (...args: any[]) => any>();
 
+// Output sinks handed to the session-creating commands, so tests can deliver
+// terminal output the way the backend does.
+const sessionSinks = new Map<string, { onmessage: (message: ArrayBuffer) => void }>();
+
 const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
+  if (args?.onOutput && typeof args.sessionId === "string") {
+    sessionSinks.set(args.sessionId, args.onOutput);
+  }
   if (mockInvokeHandlers.has(cmd)) {
     return mockInvokeHandlers.get(cmd)!(args);
   }
@@ -42,8 +49,16 @@ const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
   return undefined;
 });
 
+// Stand-in for the real IPC channel: the application only ever assigns
+// `onmessage` and hands the instance to `invoke`, so tests deliver output by
+// calling that handler with an ArrayBuffer.
+class MockChannel<T> {
+  onmessage: (message: T) => void = () => {};
+}
+
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: defaultInvoke,
+  Channel: MockChannel,
 }));
 
 // --- Mock @tauri-apps/api/event listen ---
@@ -91,10 +106,19 @@ export function emitTauriEvent(event: string, payload: any) {
   if (arr) arr.forEach((h) => h({ event, payload }));
 }
 
+// --- Helper to deliver terminal output on a session's sink ---
+export function emitSessionOutput(sessionId: string, text: string) {
+  const bytes = new TextEncoder().encode(text);
+  // Copy into a standalone buffer: the sink receives an ArrayBuffer, matching
+  // the binary payload the backend sends.
+  sessionSinks.get(sessionId)?.onmessage(bytes.slice().buffer);
+}
+
 // --- Cleanup after each test ---
 afterEach(() => {
   clearInvokeHandlers();
   mockListeners.clear();
+  sessionSinks.clear();
   defaultInvoke.mockClear();
 });
 

@@ -8,6 +8,10 @@
   let sequence = 0;
   const callbacks = new Map();
   const listeners = new Map();
+  // Output sinks handed to the session-creating commands, keyed by session id.
+  // Kept past disconnect so a test can drive a closed session and assert that
+  // its bytes are rejected.
+  const sinks = new Map();
   let vaultInitialized = true;
   let vaultUnlocked = true;
   const state = {
@@ -17,7 +21,14 @@
       for (const [id, entry] of listeners) if (entry.event === event)
         callbacks.get(entry.handler)?.({ event, id, payload });
     },
-    output(id, text) { state.emit("session-data", { session_id: id, data: Array.from(new TextEncoder().encode(text)) }); },
+    output(id, text) {
+      const sink = sinks.get(id);
+      const deliver = sink && callbacks.get(sink.id);
+      if (!deliver) return;
+      // Matches the backend payload: raw bytes, carrying the ordering index the
+      // channel uses to reassemble them.
+      deliver({ message: new TextEncoder().encode(text).buffer, index: sink.index++ });
+    },
     release() { state.pending.splice(0).forEach(resolve => resolve()); },
     disconnect(id) { delete state.live[id]; state.emit("session-closed", { session_id: id, reason: "Fixture disconnect" }); },
   };
@@ -43,6 +54,8 @@
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;
         const host = args.host;
+        // Register before any await so held connections can still be driven.
+        if (args.onOutput) sinks.set(id, { id: args.onOutput.id, index: 0 });
         state.connects.push({ id, host: host?.id ?? "local" });
         if (state.holdNext) {
           state.holdNext = false;

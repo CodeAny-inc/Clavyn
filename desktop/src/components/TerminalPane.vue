@@ -147,14 +147,6 @@ async function ensureListeners(): Promise<boolean> {
   listenerSetup = (async () => {
     const staged: UnlistenFn[] = [];
     try {
-      const dataListener = await api.onSessionData(event => {
-        if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
-        const data = new Uint8Array(event.data);
-        if (pendingOutput) pendingOutput.push(data);
-        else if (props.pane.connected) term?.write(data);
-      });
-      staged.push(dataListener);
-      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
       const closeListener = await api.onSessionClosed(event => {
         if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
           sessionEnded = true;
@@ -199,6 +191,13 @@ async function connectSession() {
   currentSessionId = sessionId;
   sessionEnded = false;
   pendingOutput = [];
+  // The sink belongs to this attempt, so a superseded attempt's output can
+  // never reach the emulator even before its session is torn down.
+  const outputSink = api.sessionOutput(data => {
+    if (disposed || props.pane.closing || sessionEnded || currentSessionId !== sessionId) return;
+    if (pendingOutput) pendingOutput.push(data);
+    else if (props.pane.connected) term?.write(data);
+  });
   let endpointForAttempt = "Local shell";
   try {
     if (previous) await api.closeSession(previous).catch(() => {});
@@ -214,7 +213,7 @@ async function connectSession() {
     }
     fit();
     if (props.pane.terminalType === "local") {
-      await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
+      await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows, outputSink);
     } else {
       // Direct hosts do not depend on the identity list. Linked hosts still fail
       // closed, and every async boundary re-reads configuration before dispatch.
@@ -258,7 +257,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
-          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, effective.username);
+          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
           const connected = await request;

@@ -1,6 +1,7 @@
 use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
+use crate::output::{OutputBatcher, FINAL_PIECE};
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
@@ -8,14 +9,23 @@ use russh::ChannelMsg;
 use russh_cryptovec::CryptoVec;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
 
 /// Callback invoked when a session receives data from the remote end.
-/// The Tauri layer uses this to emit events to the frontend.
+/// The Tauri layer uses this to forward a batch of output to the frontend.
 pub type DataCallback = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 /// Callback invoked when a session closes.
 pub type CloseCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Resolves at `deadline`, or never when there is nothing to wait for.
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
 
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {
@@ -115,17 +125,33 @@ impl SessionManager {
 
         tokio::spawn(async move {
             let mut pending_resize: Option<(u32, u32)> = None;
+            let mut batcher = OutputBatcher::new(Instant::now());
+            let flush = |batcher: &mut OutputBatcher| {
+                if !batcher.is_empty() {
+                    data_cb(&sid, batcher.batch());
+                    batcher.mark_flushed(Instant::now());
+                }
+            };
             loop {
+                // Read the deadline before the select so no branch borrows the
+                // batcher while another branch's handler mutates it.
+                let flush_at = batcher.deadline();
                 tokio::select! {
                     msg = channel.wait() => {
                         match msg {
-                            Some(ChannelMsg::Data { data }) => {
-                                data_cb(&sid, &data);
-                            }
-                            Some(ChannelMsg::ExtendedData { data, .. }) => {
-                                data_cb(&sid, &data);
+                            Some(ChannelMsg::Data { data })
+                            | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                                if batcher.push(&data, Instant::now()) {
+                                    flush(&mut batcher);
+                                }
                             }
                             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                                // Trailing output belongs to this session, and
+                                // must reach the UI ahead of the close.
+                                for piece in batcher.batch().chunks(FINAL_PIECE) {
+                                    data_cb(&sid, piece);
+                                }
+                                batcher.mark_flushed(Instant::now());
                                 close_cb(&sid, "session closed");
                                 break;
                             }
@@ -134,6 +160,9 @@ impl SessionManager {
                     }
                     resize = resize_rx.recv() => {
                         pending_resize = resize;
+                    }
+                    () = sleep_until(flush_at) => {
+                        flush(&mut batcher);
                     }
                 }
                 if let Some((c, r)) = pending_resize.take() {
