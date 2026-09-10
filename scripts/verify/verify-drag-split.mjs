@@ -143,6 +143,47 @@ async function main() {
   check("extract: one pane per tab", s.paneCount === 2, `panes=${s.paneCount}`);
   check("extract: both still connected", s.connected.every(c => c === "true"), `connected=${JSON.stringify(s.connected)}`);
 
+  // Tab swap: drag the second tab onto the center of the visible pane — the
+  // two single-pane tabs trade terminals while both keep their sessions.
+  await tabButtons.nth(0).click();
+  await sleep(500);
+  await html5DragDrop(page,
+    "[data-testid='session-strip'] .session-tab:nth-of-type(2)",
+    ".terminal-pane", { x: 0.5, y: 0.5 });
+  await sleep(800);
+  s = await state(page);
+  check("tab swap: still two tabs, one pane each", s.tabCount === 2 && s.paneCount === 2, `tabs=${s.tabCount} panes=${s.paneCount}`);
+  check("tab swap: both still connected", s.connected.every(c => c === "true"), `connected=${JSON.stringify(s.connected)}`);
+
+  // Tab drop: dropping the second tab onto the visible pane's edge splits it.
+  await tabButtons.nth(0).click();
+  await sleep(500);
+  await html5DragDrop(page,
+    "[data-testid='session-strip'] .session-tab:nth-of-type(2)",
+    ".terminal-pane", { x: 0.9, y: 0.5 });
+  await sleep(800);
+  s = await state(page);
+  check("tab-drop: one tab with two panes", s.tabCount === 1 && s.paneCount === 2, `tabs=${s.tabCount} panes=${s.paneCount}`);
+  check("tab-drop: both still connected", s.connected.every(c => c === "true"), `connected=${JSON.stringify(s.connected)}`);
+
+  // Tab reorder: open another tab, then drag it before the first in the strip.
+  await openLocalShellTab(page);
+  s = await state(page);
+  check("reorder setup: two tabs", s.tabCount === 2, `tabs=${s.tabCount}`);
+  const orderBefore = await page.evaluate(() =>
+    [...document.querySelectorAll("[data-tab-id]")].map(el => el.dataset.tabId));
+  await html5DragDrop(page,
+    "[data-testid='session-strip'] .session-tab:nth-of-type(2)",
+    "[data-testid='session-strip'] .session-tab:nth-of-type(1)", { x: 0.15, y: 0.5 });
+  await sleep(600);
+  const orderAfter = await page.evaluate(() =>
+    [...document.querySelectorAll("[data-tab-id]")].map(el => el.dataset.tabId));
+  check("tab reorder: dragged tab moved to front",
+    orderAfter[0] === orderBefore[1] && orderAfter[1] === orderBefore[0],
+    `order=${JSON.stringify(orderAfter.map(id => orderBefore.indexOf(id)))}`);
+  s = await state(page);
+  check("reorder: sessions untouched", s.connected.every(c => c === "true"), `connected=${JSON.stringify(s.connected)}`);
+
   await page.close();
   await context.close();
   await browser.close();

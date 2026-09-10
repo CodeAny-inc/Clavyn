@@ -98,6 +98,18 @@
 @media (max-width: 640px) { .xterm .xterm-screen { padding: 2px; } }
 .overflow-y-auto { scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
 input, textarea, select, [contenteditable] { user-select: text; }
+/* Compact drag ghost rendered by setDragImageChip for tab/pane drags. Kept
+   offscreen; the webview snapshots it at dragstart. */
+.drag-chip {
+  position: fixed; top: -1000px; left: -1000px; z-index: 200;
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px; border-radius: 8px;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--popover)); color: hsl(var(--popover-foreground));
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.35);
+  font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap;
+  pointer-events: none;
+}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }

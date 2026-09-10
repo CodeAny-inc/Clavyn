@@ -45,7 +45,9 @@ async function fresh(target = url, baseline = false, name = "01-workspace-scenar
 }
 const state = () => page.evaluate(() => ({ connects: window.__terminalTest.connects, closes: window.__terminalTest.closes, live: window.__terminalTest.live }));
 const pane = host => page.locator(`[data-host-id="${host}"]`);
-const showAtlas = () => page.locator('[title^="Show Atlas Production terminal"]').click();
+// Select the tab that currently contains the atlas pane; titles can be
+// renamed after cross-tab moves, but data-host-ids always tracks contents.
+const showAtlas = () => page.locator('.session-tab[data-host-ids~="atlas"] .session-tab-select').click();
 async function connected(host) {
   await page.waitForFunction(host => document.querySelector(`[data-host-id="${host}"]`)?.getAttribute("data-connected") === "true", host);
   return pane(host).getAttribute("data-session-id");

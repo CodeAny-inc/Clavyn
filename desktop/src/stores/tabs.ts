@@ -40,16 +40,28 @@ export const useTabsStore = defineStore("tabs", () => {
   const paneFocusRequest = ref<{ paneId: string } | null>(null);
   const focusedPanes = new Map<string, string>();
   const draggedPaneId = ref<string | null>(null);
+  // A whole tab dragged from the strip — distinct from a pane grip drag. Its
+  // drop target is a pane of the active tab (split/swap) or a strip position.
+  const draggedTabId = ref<string | null>(null);
   const dragOverPaneId = ref<string | null>(null);
   const dragOverPosition = ref<DropPosition | null>(null);
-  // Highlighted tab while a pane is dragged over it, so the tab strip can show
-  // a "drop here to add as a split" affordance like Termius workspaces.
+  // Highlighted tab while a pane or tab is dragged over it, so the tab strip
+  // can show a "drop here" affordance like Termius workspaces.
   const dragOverTabId = ref<string | null>(null);
   const activeTab = computed(() => tabs.value.find(t => t.id === activeTabId.value) ?? null);
   const activePane = computed(() => activeTab.value && activePaneId.value
     ? findPane(activeTab.value.tree, activePaneId.value) : null);
   function owningTab(id: string) { return tabs.value.find(t => findPane(t.tree, id)); }
   function firstPane(tree: PaneTree): Pane { return isPane(tree) ? tree : firstPane(tree.first); }
+  // A tab's title names a terminal the tab contains; re-sync it when a pane
+  // can leave the tab (moves, closes, cross-tab swaps) so tooltips, close
+  // labels and "Move to…" entries keep identifying the right terminal.
+  // Same-tab rearrangements keep every pane, so they keep the title.
+  // Mirrors newTab's naming: host label for SSH panes, "Local" for shells.
+  function syncTabTitle(tab: Tab) {
+    const pane = firstPane(tab.tree);
+    tab.title = pane.terminalType === "local" ? "Local" : pane.title;
+  }
   function setActivePane(id: string) {
     const tab = owningTab(id);
     if (!tab) return;
@@ -102,6 +114,7 @@ export const useTabsStore = defineStore("tabs", () => {
     const sibling = findSibling(tab.tree, id);
     closeSession(pane);
     tab.tree = detach(tab.tree, id);
+    syncTabTitle(tab);
     if (focusedPanes.get(tab.id) === id) {
       const next = firstPane(sibling ?? tab.tree).id;
       focusedPanes.set(tab.id, next);
@@ -137,16 +150,21 @@ export const useTabsStore = defineStore("tabs", () => {
     }
   }
   function startDrag(id: string) { draggedPaneId.value = id; }
+  function startTabDrag(id: string) { draggedTabId.value = id; }
   function clearDragOver() { dragOverPaneId.value = null; dragOverPosition.value = null; dragOverTabId.value = null; }
-  function endDrag() { draggedPaneId.value = null; clearDragOver(); }
+  function endDrag() { draggedPaneId.value = null; draggedTabId.value = null; clearDragOver(); }
   function setDragOver(id: string, position: DropPosition) {
+    if (!draggedPaneId.value && !draggedTabId.value) return;
     if (draggedPaneId.value === id) return;
+    // A tab cannot be dropped onto one of its own panes.
+    if (draggedTabId.value && owningTab(id)?.id === draggedTabId.value) return;
     dragOverPaneId.value = id;
     dragOverPosition.value = position;
   }
-  // Highlight a tab as a pane-drop target. Only meaningful while a pane is dragged.
+  // Highlight a tab as a drop target. Only meaningful while a pane or a tab is dragged.
   function setDragOverTab(id: string) {
-    if (!draggedPaneId.value) return;
+    if (!draggedPaneId.value && !draggedTabId.value) return;
+    if (draggedTabId.value === id) return;
     dragOverTabId.value = id;
   }
   function clearDragOverTab() { dragOverTabId.value = null; }
@@ -170,6 +188,45 @@ export const useTabsStore = defineStore("tabs", () => {
     endDrag();
     paneFocusRequest.value = { paneId: source.id };
   }
+  // Drop a dragged tab onto a pane of another tab: edge positions split the
+  // target pane with the dragged tab's tree; center swaps a single-pane tab
+  // with the target pane or merges a multi-pane tab into the target tab.
+  function dropTabOnPane(sourceTabId: string, targetPaneId: string, position: DropPosition) {
+    const source = tabs.value.find(t => t.id === sourceTabId);
+    const target = owningTab(targetPaneId);
+    if (!source || !target || source.id === target.id) { endDrag(); return; }
+    const targetPane = findPane(target.tree, targetPaneId)!;
+    if (position === "center" && isPane(source.tree)) {
+      // Swap the two panes across their tabs, keeping each pane object intact.
+      const moved = source.tree;
+      target.tree = replace(target.tree, targetPaneId, () => moved);
+      source.tree = targetPane;
+      syncTabTitle(source);
+      syncTabTitle(target);
+      focusedPanes.set(source.id, targetPane.id);
+      setActivePane(moved.id);
+      paneFocusRequest.value = { paneId: moved.id };
+    } else {
+      const moved = source.tree;
+      tabs.value = tabs.value.filter(t => t.id !== source.id);
+      focusedPanes.delete(source.id);
+      if (position === "center") {
+        // A multi-pane tab has no single pane to swap; merge its split tree.
+        target.tree = { id: paneId(), direction: "horizontal", ratio: 0.5, first: target.tree, second: moved };
+      } else {
+        const direction = position === "left" || position === "right" ? "horizontal" : "vertical";
+        const before = position === "left" || position === "top";
+        target.tree = replace(target.tree, targetPaneId, old => ({
+          id: paneId(), direction, ratio: 0.5,
+          first: before ? moved : old, second: before ? old : moved,
+        }));
+      }
+      const focus = firstPane(moved).id;
+      setActivePane(focus);
+      paneFocusRequest.value = { paneId: focus };
+    }
+    endDrag();
+  }
   function movePaneToTab(id: string, targetTabId: string) {
     const source = owningTab(id);
     const target = tabs.value.find(t => t.id === targetTabId);
@@ -180,9 +237,11 @@ export const useTabsStore = defineStore("tabs", () => {
       focusedPanes.delete(source.id);
     } else {
       source.tree = detach(source.tree, id);
+      syncTabTitle(source);
       if (focusedPanes.get(source.id) === id) focusedPanes.set(source.id, firstPane(source.tree).id);
     }
     target.tree = { id: paneId(), direction: "horizontal", ratio: 0.5, first: target.tree, second: pane };
+    syncTabTitle(target);
     setActivePane(id);
     endDrag();
     paneFocusRequest.value = { paneId: id };
@@ -202,6 +261,7 @@ export const useTabsStore = defineStore("tabs", () => {
       focusedPanes.delete(source.id);
     } else {
       source.tree = detach(source.tree, id);
+      syncTabTitle(source);
       if (focusedPanes.get(source.id) === id) focusedPanes.set(source.id, firstPane(source.tree).id);
     }
     const tab = { id: paneId(), title: pane.title, tree: pane as PaneTree };
@@ -223,11 +283,11 @@ export const useTabsStore = defineStore("tabs", () => {
     tabs.value.splice(to, 0, tab);
   }
   return { tabs, activeTabId, activePaneId, activeTab, activePane, paneFocusRequest,
-    draggedPaneId, dragOverPaneId, dragOverPosition, dragOverTabId,
+    draggedPaneId, draggedTabId, dragOverPaneId, dragOverPosition, dragOverTabId,
     newTab, closeTab, setActiveTab, setActivePane, splitPane, closePane,
-    setPaneConnected, setPaneDisconnected, setPaneTitle, setRatio, firstPane,
-    startDrag, endDrag, setDragOver, clearDragOver, setDragOverTab, clearDragOverTab,
-    dropPane, movePaneToTab, extractPaneToNewTab, navigatePane, reorderTab };
+    setPaneConnected, setPaneDisconnected, setPaneTitle, setRatio, firstPane, owningTab,
+    startDrag, startTabDrag, endDrag, setDragOver, clearDragOver, setDragOverTab, clearDragOverTab,
+    dropPane, dropTabOnPane, movePaneToTab, extractPaneToNewTab, navigatePane, reorderTab };
 });
 function replace(tree: PaneTree, id: string, change: (pane: Pane) => PaneTree): PaneTree {
   if (isPane(tree)) return tree.id === id ? change(tree) : tree;

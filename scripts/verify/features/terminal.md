@@ -8,10 +8,16 @@ a Tauri session (SSH via `connect_ssh` or a local shell via
 ## Sub-features
 
 - tab-strip: top tab bar with New-session picker (open in tab vs split).
+  Drag a tab sideways to reorder it (insertion bar marks the landing edge);
+  drag a tab onto a terminal pane to split it into that tab.
 - terminal-pane: xterm.js pane; `data-host-id`, `data-session-id`,
   `data-connected`, `data-active` attributes for inspection.
 - split-view: split panes horizontally/vertically; fullscreen a pane.
 - pane-actions: per-pane action menu (split, close, fullscreen, etc.).
+- pane-drag: drag a pane header grip onto another pane — edge zones split
+  (above/below/left/right), center swaps; drop on a strip tab to merge the
+  pane into that tab; drop on the strip/New-session area to extract the pane
+  into its own tab. Dragging a whole tab onto a pane splits or swaps it too.
 - local-shell: "Open local shell" from the New-session picker.
 
 ## How to get to it (user POV)

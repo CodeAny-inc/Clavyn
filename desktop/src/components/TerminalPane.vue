@@ -4,7 +4,8 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
-import { useTabsStore, type Pane, type DropPosition } from "../stores/tabs";
+import { useTabsStore, isPane, type Pane, type DropPosition } from "../stores/tabs";
+import { setDragImageChip } from "../lib/dragChip";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
@@ -410,6 +411,7 @@ function searchKey(event: KeyboardEvent) {
 }
 function startDrag(event: DragEvent) {
   tabs.startDrag(props.pane.id);
+  setDragImageChip(event, props.pane.title);
   if (event.dataTransfer) { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", props.pane.id); }
 }
 function dropPosition(event: DragEvent): DropPosition {
@@ -420,15 +422,26 @@ function dropPosition(event: DragEvent): DropPosition {
   const edges: [DropPosition, number][] = [["left", x], ["right", 1 - x], ["top", y], ["bottom", 1 - y]];
   return edges.sort((a, b) => a[1] - b[1])[0][0];
 }
+// A dragged tab merges its tree into the hovered pane; a single-pane tab can
+// also swap with it. The center label reflects which will happen.
+const centerDropLabel = computed(() => {
+  const tab = tabs.tabs.find(t => t.id === tabs.draggedTabId);
+  return tab && !isPane(tab.tree) ? "Merge" : "Swap";
+});
 function dragOver(event: DragEvent) {
-  if (!tabs.draggedPaneId || isDragging.value || !paneRef.value) return;
+  if ((!tabs.draggedPaneId && !tabs.draggedTabId) || isDragging.value || !paneRef.value) return;
+  // A tab cannot be dropped onto one of its own panes.
+  if (tabs.draggedTabId && tabs.owningTab(props.pane.id)?.id === tabs.draggedTabId) return;
   event.preventDefault();
   tabs.setDragOver(props.pane.id, dropPosition(event));
 }
 function drop(event: DragEvent) {
-  if (!tabs.draggedPaneId || !paneRef.value) return;
+  if ((!tabs.draggedPaneId && !tabs.draggedTabId) || !paneRef.value) return;
   event.preventDefault();
-  tabs.dropPane(props.pane.id, dropPosition(event));
+  // Reveal the resulting split instead of keeping the old pane fullscreened.
+  ui.exitFullscreen();
+  if (tabs.draggedTabId) tabs.dropTabOnPane(tabs.draggedTabId, props.pane.id, dropPosition(event));
+  else tabs.dropPane(props.pane.id, dropPosition(event));
 }
 const actions = computed<MenuAction[]>(() => [
   { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
@@ -454,12 +467,12 @@ function selectAction(id: string) {
 <template>
   <Teleport to="body" :disabled="!isFullscreen">
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
-    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '']"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '', isDragOver ? 'pane-drop-target' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
     @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
     <header class="pane-header" :class="{ 'pane-header-active': isActive }" data-testid="pane-header">
-      <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2" draggable="true"
+      <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2 active:cursor-grabbing" draggable="true"
         :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
         <GripVertical class="size-3 shrink-0 text-muted-foreground" />
         <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-muted-foreground" aria-label="Connecting" />
@@ -492,33 +505,57 @@ function selectAction(id: string) {
       <button class="pane-button" aria-label="Next match" @click="doSearch()"><ChevronDown class="size-3.5" /></button>
       <button class="pane-button" aria-label="Close search" @click="closeSearch"><X class="size-3.5" /></button>
     </div>
-    <div v-if="isDragOver && tabs.draggedPaneId && !isDragging" class="drop-overlay" aria-hidden="true">
+    <div v-if="isDragOver && (tabs.draggedPaneId || tabs.draggedTabId) && !isDragging" class="drop-overlay" aria-hidden="true">
       <div class="drop-zone drop-zone-top" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'top' }"><span>Split above</span></div>
       <div class="drop-zone drop-zone-bottom" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'bottom' }"><span>Split below</span></div>
       <div class="drop-zone drop-zone-left" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'left' }"><span>Split left</span></div>
       <div class="drop-zone drop-zone-right" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'right' }"><span>Split right</span></div>
-      <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>Swap</span></div>
+      <div class="drop-zone drop-zone-center" :class="{ 'drop-zone-active': tabs.dragOverPosition === 'center' }"><span>{{ centerDropLabel }}</span></div>
     </div>
   </div>
   </Teleport>
 </template>
 
 <style scoped>
-.terminal-pane { background: var(--terminal-background); }
-.pane-dragging { @apply opacity-50; }
+.terminal-pane { background: var(--terminal-background); transition: box-shadow 180ms ease-out, opacity 160ms ease-out; }
+.pane-dragging { opacity: 0.5; }
+.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--workspace-accent) 70%, transparent); }
 .pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-muted-foreground; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
 .pane-header-active { background: var(--terminal-toolbar-active); color: hsl(var(--foreground)); box-shadow: inset 2px 0 var(--workspace-accent); }
 .pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
 /* Directional drop zones: four edges split the pane, the center swaps it.
-   The overlay never captures pointer events so dragover/drop reach the pane. */
-.drop-overlay { @apply pointer-events-none absolute inset-0 z-30; }
-.drop-zone { @apply absolute flex items-center justify-center text-[11px] font-medium text-primary-foreground opacity-0 transition-opacity duration-100; }
-.drop-zone span { @apply rounded-md bg-primary/70 px-2 py-1 shadow; }
+   The overlay never captures pointer events so dragover/drop reach the pane.
+   Each zone's tint wipes in from the edge the pane will land on and its label
+   slides in from the same direction, previewing the split rather than naming
+   it. Transitions retarget mid-flight as the pointer crosses zones. */
+.drop-overlay { @apply pointer-events-none absolute inset-0 z-30; animation: drop-overlay-in 140ms ease-out; }
+@keyframes drop-overlay-in { from { opacity: 0; } }
+.drop-zone { @apply absolute flex items-center justify-center opacity-0; transition: opacity 140ms ease-out; }
+.drop-zone::before { content: ""; @apply absolute inset-0; transition: clip-path 160ms cubic-bezier(0.23, 1, 0.32, 1); }
+.drop-zone span { @apply rounded-full bg-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground opacity-0 shadow-lg backdrop-blur-sm; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
 .drop-zone-active { @apply opacity-100; }
-.drop-zone-top { @apply left-0 right-0 top-0 h-1/3 bg-primary/25; }
-.drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3 bg-primary/25; }
-.drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3 bg-primary/25; }
-.drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3 bg-primary/25; }
-.drop-zone-center { @apply inset-1/3 rounded-md bg-primary/35; }
+.drop-zone-top { @apply left-0 right-0 top-0 h-1/3; }
+.drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3; }
+.drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3; }
+.drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3; }
+.drop-zone-center { @apply inset-1/3; }
+/* Zone previews share the workspace accent used by the active-pane underline
+   and the reorder caret, so every drag affordance reads as one system. */
+.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
+.drop-zone-center::before { background: color-mix(in srgb, var(--workspace-accent) 28%, transparent); border-radius: 8px; }
+.drop-zone-top::before { clip-path: inset(0 0 100% 0); }
+.drop-zone-bottom::before { clip-path: inset(100% 0 0 0); }
+.drop-zone-left::before { clip-path: inset(0 100% 0 0); }
+.drop-zone-right::before { clip-path: inset(0 0 0 100%); }
+.drop-zone-center::before { clip-path: inset(40% round 8px); }
+.drop-zone-top.drop-zone-active::before, .drop-zone-bottom.drop-zone-active::before,
+.drop-zone-left.drop-zone-active::before, .drop-zone-right.drop-zone-active::before { clip-path: inset(0); }
+.drop-zone-center.drop-zone-active::before { clip-path: inset(0 round 8px); }
+.drop-zone-top span { transform: translateY(-8px) scale(0.92); }
+.drop-zone-bottom span { transform: translateY(8px) scale(0.92); }
+.drop-zone-left span { transform: translateX(-8px) scale(0.92); }
+.drop-zone-right span { transform: translateX(8px) scale(0.92); }
+.drop-zone-center span { transform: scale(0.9); }
+.drop-zone-active span { opacity: 1; transform: none; }
 </style>
