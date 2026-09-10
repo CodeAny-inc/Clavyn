@@ -385,6 +385,39 @@ pub async fn connect_ssh(
     Ok(info)
 }
 
+/// Upper bound on local terminals held open at once. Each one owns a PTY, a
+/// child shell and a reader thread, so an unbounded map is an unbounded
+/// resource claim on the machine.
+const MAX_LOCAL_TERMINALS: usize = 16;
+
+/// Decide whether a new local terminal may take `session_id`.
+///
+/// A session id names exactly one live session for the whole lifetime of that
+/// session: `session_write`, `session_resize` and the `session-data` event
+/// stream all address sessions by id alone. Handing a live id to a second
+/// session silently repoints one of those channels at the other session — for a
+/// local id the old shell is dropped and killed, and for an SSH id writes keep
+/// going to SSH while the new PTY's output is rendered in the SSH pane. Reject
+/// the collision instead of resolving it arbitrarily.
+fn admit_local_terminal(
+    session_id: &str,
+    local_terminal_ids: &[String],
+    ssh_session_ids: &[String],
+) -> ApiResult<()> {
+    if local_terminal_ids.iter().any(|id| id == session_id) {
+        return Err("session id is already in use by a local terminal".into());
+    }
+    if ssh_session_ids.iter().any(|id| id == session_id) {
+        return Err("session id is already in use by an SSH session".into());
+    }
+    if local_terminal_ids.len() >= MAX_LOCAL_TERMINALS {
+        return Err(format!(
+            "too many local terminals open (limit {MAX_LOCAL_TERMINALS}); close one first"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn create_local_terminal(
     state: State<'_, Arc<AppState>>,
@@ -394,6 +427,18 @@ pub async fn create_local_terminal(
     rows: Option<u32>,
 ) -> ApiResult<()> {
     use portable_pty::*;
+
+    // The map lock is held from the admission check through the insert so two
+    // concurrent calls cannot both pass the check for the same id or slot.
+    let ssh_session_ids = state.sessions.list().await;
+    let mut locals = state.local_terminals.lock().await;
+    // An entry outlives its shell: a pane whose shell exited keeps its entry
+    // until the pane unmounts, so reconnecting leaves the finished terminal
+    // behind. Drop those first so the limit below bounds live shells. A child
+    // whose status cannot be read is kept, since that is not evidence it exited.
+    locals.retain(|_, term| !matches!(term.child.try_wait(), Ok(Some(_))));
+    let local_terminal_ids: Vec<String> = locals.keys().cloned().collect();
+    admit_local_terminal(&session_id, &local_terminal_ids, &ssh_session_ids)?;
 
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -473,13 +518,12 @@ pub async fn create_local_terminal(
 
     // Store the master and child for writing, resizing, and keeping
     // the child process alive.
-    let mut locals = state.local_terminals.lock().await;
     locals.insert(
         session_id,
         LocalTerminal {
             writer,
             master,
-            _child: child,
+            child,
         },
     );
 
@@ -970,6 +1014,47 @@ pub async fn install_update(
     app.request_restart();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod admit_local_terminal_tests {
+    use super::*;
+
+    fn ids(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("local-{i}")).collect()
+    }
+
+    #[test]
+    fn accepts_a_fresh_id_while_slots_remain() {
+        assert!(admit_local_terminal("fresh", &ids(1), &["ssh-a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_a_local_terminal() {
+        let error = admit_local_terminal("local-0", &ids(2), &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_an_ssh_session() {
+        let error = admit_local_terminal("ssh-a", &[], &["ssh-a".to_string()]).unwrap_err();
+        assert!(error.contains("SSH session"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_fresh_id_once_the_concurrent_limit_is_reached() {
+        let full = ids(MAX_LOCAL_TERMINALS);
+        assert!(admit_local_terminal("fresh", &full[..MAX_LOCAL_TERMINALS - 1], &[]).is_ok());
+        let error = admit_local_terminal("fresh", &full, &[]).unwrap_err();
+        assert!(error.contains("too many local terminals"), "{error}");
+    }
+
+    #[test]
+    fn reports_the_collision_rather_than_the_limit_when_both_apply() {
+        let full = ids(MAX_LOCAL_TERMINALS);
+        let error = admit_local_terminal("local-0", &full, &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
 }
 
 #[cfg(test)]

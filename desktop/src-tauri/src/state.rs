@@ -63,7 +63,9 @@ pub struct AppState {
 pub struct LocalTerminal {
     pub writer: Box<dyn std::io::Write + Send>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
-    pub _child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Kept alive so the shell is not reaped, and polled with `try_wait` to
+    /// tell a live terminal from one whose shell has already exited.
+    pub child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
 impl AppState {
