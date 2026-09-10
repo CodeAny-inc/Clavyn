@@ -31,6 +31,14 @@ function tauriFixtureDevPlugin() {
 export default defineConfig({
   plugins: [vue(), tauriFixtureDevPlugin()],
   clearScreen: false,
+  // Every SFC in this app is `<script setup>`, so the Options API runtime is
+  // dead weight. The flags must be set explicitly: @vitejs/plugin-vue defaults
+  // __VUE_OPTIONS_API__ to true when no `define` is present.
+  define: {
+    __VUE_OPTIONS_API__: "false",
+    __VUE_PROD_DEVTOOLS__: "false",
+    __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: "false",
+  },
   server: {
     port: 1420,
     strictPort: true,
@@ -38,5 +46,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // The app only ever runs in the Tauri webview (WebView2 / WKWebView /
+    // WebKitGTK), all of which support ES2022. Vite's default 'modules' target
+    // downlevels syntax these engines handle natively.
+    target: "es2022",
   },
 });
