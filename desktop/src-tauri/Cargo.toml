@@ -29,9 +29,16 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 semver = "1"
 url = "2"
 
+[dev-dependencies]
+tempfile = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
-security-framework = { version = "=3.7.0", features = ["OSX_10_15"], optional = true }
-security-framework-sys = { version = "=2.17.0", features = ["OSX_10_15"], optional = true }
+# Keep Security.framework cleanup available even when Touch ID enrollment/unlock
+# is compiled out. Data Protection Keychain visibility still depends on the
+# app's code-signing access groups; the durable enrollment marker makes reset
+# fail closed if a differently signed build cannot see a tracked credential.
+security-framework = { version = "=3.7.0", features = ["OSX_10_15"] }
+security-framework-sys = { version = "=2.17.0", features = ["OSX_10_15"] }
 core-foundation = { version = "=0.10.1", optional = true }
 core-foundation-sys = { version = "=0.8.7", optional = true }
 objc2-local-authentication = { version = "=0.3.2", default-features = false, features = ["std", "LAContext"], optional = true }
@@ -42,8 +49,6 @@ custom-protocol = ["tauri/custom-protocol"]
 # should enable this only after proper Apple signing + Data Protection Keychain
 # entitlements are configured and validated.
 macos-biometric = [
-    "dep:security-framework",
-    "dep:security-framework-sys",
     "dep:core-foundation",
     "dep:core-foundation-sys",
     "dep:objc2-local-authentication",

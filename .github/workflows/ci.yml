@@ -25,6 +25,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux dependencies
         run: |
+          # The Google Chrome apt repo pre-installed on GitHub-hosted runners can
+          # transiently fail with hash sum mismatches during metadata refreshes.
+          # Never rewrite package sources on persistent self-hosted machines.
+          if [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
+            sudo python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [Path('/etc/apt/sources.list')]
+          source_dir = Path('/etc/apt/sources.list.d')
+          if source_dir.is_dir():
+              paths.extend(source_dir.iterdir())
+
+          for path in paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(errors='ignore')
+              if 'dl.google.com' not in text:
+                  continue
+              if path.suffix == '.sources':
+                  kept = [
+                      stanza for stanza in text.split('\n\n')
+                      if 'dl.google.com' not in stanza
+                  ]
+                  updated = '\n\n'.join(kept).rstrip()
+              else:
+                  kept = [
+                      line for line in text.splitlines()
+                      if 'dl.google.com' not in line
+                  ]
+                  updated = '\n'.join(kept).rstrip()
+              path.write_text(updated + ('\n' if updated else ''))
+          PY
+          fi
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Cargo check

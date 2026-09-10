@@ -31,5 +31,9 @@ export const useKeysStore = defineStore("keys", () => {
     keys.value = keys.value.filter((k) => k.id !== keyId);
   }
 
-  return { keys, load, generateKey, importKey, deleteKey };
+  function clear() {
+    keys.value = [];
+  }
+
+  return { keys, load, generateKey, importKey, deleteKey, clear };
 });

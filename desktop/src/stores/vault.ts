@@ -1,6 +1,9 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
+import { useKeysStore } from "./keys";
+
+const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
 
 export const useVaultStore = defineStore("vault", () => {
   const initialized = ref(false);
@@ -8,6 +11,7 @@ export const useVaultStore = defineStore("vault", () => {
   const error = ref<string | null>(null);
   const biometricAvailable = ref(false);
   const biometricEnabled = ref(false);
+  const keysStore = useKeysStore();
 
   const needsSetup = computed(() => !initialized.value);
   const needsUnlock = computed(
@@ -17,9 +21,21 @@ export const useVaultStore = defineStore("vault", () => {
   let biometricStateRevision = 0;
   let biometricMutationTail: Promise<void> = Promise.resolve();
 
+  function publishDestroyedVaultState() {
+    ++biometricStateRevision;
+    initialized.value = false;
+    unlocked.value = false;
+    biometricEnabled.value = false;
+    // Key metadata is derived from the encrypted vault. Once reset crosses the
+    // destructive boundary, retaining it would let host/identity forms offer
+    // key IDs that no longer exist in the backend.
+    keysStore.clear();
+  }
+
   function mutateBiometricState(operation: () => Promise<void>): Promise<void> {
     // Invalidate in-flight snapshots immediately, not only after the write.
-    // Serialize writes across components so their backend and UI order agree.
+    // Serialize credential writes and destructive reset across components so
+    // their backend and UI order agree.
     ++biometricStateRevision;
     const result = biometricMutationTail.then(operation);
     // A failed write must not poison the queue for subsequent operations.
@@ -183,6 +199,40 @@ export const useVaultStore = defineStore("vault", () => {
     unlocked.value = false;
   }
 
+  async function reset(passphrase: string) {
+    // Serialize reset behind any credential write already in flight. The backend
+    // independently serializes direct IPC mutations too; this queue keeps
+    // ordinary UI state deterministic.
+    return mutateBiometricState(async () => {
+      error.value = null;
+      try {
+        await api.resetVault(passphrase);
+        publishDestroyedVaultState();
+      } catch (e) {
+        const resetError = String(e);
+        if (resetError.includes(RESET_DURABILITY_ERROR_MARKER)) {
+          // The backend only emits this marker after the authoritative vault file
+          // has already been unlinked and its in-memory/auth state cleared. Even
+          // though directory durability could not be confirmed, the renderer
+          // must treat the old vault as destroyed rather than showing stale
+          // unlocked state.
+          publishDestroyedVaultState();
+        } else {
+          // Failures before the destructive boundary preserve the vault. A
+          // credential may still have been removed before a later unlink error,
+          // so reconcile biometric enrollment while keeping the reset-form error
+          // local to the component.
+          try {
+            await reconcileBiometricState();
+          } catch {
+            // Reconciliation fails closed; preserve the original reset error.
+          }
+        }
+        throw e;
+      }
+    });
+  }
+
   return {
     initialized,
     unlocked,
@@ -199,5 +249,6 @@ export const useVaultStore = defineStore("vault", () => {
     enableBiometric,
     disableBiometric,
     lock,
+    reset,
   };
 });

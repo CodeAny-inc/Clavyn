@@ -14,6 +14,7 @@ import {
   Fingerprint,
   Loader2,
   Check,
+  Trash2,
 } from "lucide-vue-next";
 
 const vault = useVaultStore();
@@ -25,6 +26,9 @@ const unlockLoading = ref<"password" | "biometric" | null>(null);
 const enableBiometricMode = ref(false);
 const biometricPassphrase = ref("");
 const biometricSettingsLoading = ref<"enable" | "disable" | null>(null);
+const resetMode = ref(false);
+const resetPassphrase = ref("");
+const resetLoading = ref(false);
 
 const displayRuntimeError = computed(() => error.value || vault.error || "");
 
@@ -32,6 +36,12 @@ function clearSensitiveFormState() {
   passphrase.value = "";
   confirmPassphrase.value = "";
   resetBiometricEnableForm();
+  resetResetForm();
+}
+
+function resetResetForm() {
+  resetPassphrase.value = "";
+  resetMode.value = false;
 }
 
 // This component stays mounted across lock/unlock, including automatic locks.
@@ -143,6 +153,29 @@ async function disableBiometric() {
     error.value = String(e);
   } finally {
     biometricSettingsLoading.value = null;
+  }
+}
+
+function cancelReset() {
+  if (resetLoading.value) return;
+  resetResetForm();
+  error.value = "";
+}
+
+async function confirmReset() {
+  if (!resetPassphrase.value || resetLoading.value) return;
+  error.value = "";
+  resetLoading.value = true;
+  try {
+    await vault.reset(resetPassphrase.value);
+    resetResetForm();
+  } catch (e: any) {
+    // Do not keep the master passphrase referenced in component state after a
+    // failed reset attempt. The user can explicitly enter it again.
+    resetPassphrase.value = "";
+    error.value = String(e);
+  } finally {
+    resetLoading.value = false;
   }
 }
 
@@ -373,6 +406,78 @@ const showBiometricButton = computed(
             <Lock class="size-3.5" :stroke-width="1.75" />
             Lock Vault Now
           </Button>
+
+          <!-- Danger Zone -->
+          <div class="rounded-lg border border-destructive/30 p-4 mt-2">
+            <div class="flex items-center gap-2 mb-2">
+              <AlertTriangle class="size-4 text-destructive" :stroke-width="1.75" />
+              <span class="text-[13px] font-medium text-destructive">Danger Zone</span>
+            </div>
+
+            <!-- Reset confirmation form -->
+            <div v-if="resetMode" class="flex flex-col gap-3">
+              <div class="flex items-start gap-2.5 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                <AlertTriangle class="size-4 text-destructive shrink-0 mt-0.5" :stroke-width="1.75" />
+                <div class="text-[12px] text-muted-foreground">
+                  Resetting the vault <strong class="text-destructive">permanently deletes all stored SSH keys and credentials</strong>.
+                  This cannot be undone. Enter your master passphrase to confirm.
+                </div>
+              </div>
+              <FormGroup>
+                <Label for="reset-pass">Master passphrase</Label>
+                <Input
+                  id="reset-pass"
+                  v-model="resetPassphrase"
+                  type="password"
+                  placeholder="Enter master passphrase to confirm"
+                  :disabled="resetLoading"
+                  @keydown.enter="confirmReset"
+                />
+              </FormGroup>
+              <p v-if="error" class="text-[12px] text-destructive">{{ error }}</p>
+              <div class="flex items-center gap-2">
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  :disabled="resetLoading || !resetPassphrase"
+                  @click="confirmReset"
+                >
+                  <Loader2
+                    v-if="resetLoading"
+                    class="size-3.5 mr-1 animate-spin"
+                    :stroke-width="1.75"
+                  />
+                  <Trash2 v-else class="size-3.5" :stroke-width="1.75" />
+                  {{ resetLoading ? "Resetting..." : "Reset Vault" }}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  :disabled="resetLoading"
+                  @click="cancelReset"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+
+            <!-- Reset button -->
+            <template v-else>
+              <p class="text-[12px] text-muted-foreground mb-3">
+                Reset the vault to destroy all keys and credentials and start
+                fresh with a new passphrase.
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                class="text-destructive border-destructive/30 hover:bg-destructive/5"
+                @click="resetMode = true"
+              >
+                <Trash2 class="size-3.5" :stroke-width="1.75" />
+                Reset Vault
+              </Button>
+            </template>
+          </div>
         </div>
       </div>
     </div>

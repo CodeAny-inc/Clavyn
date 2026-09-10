@@ -44,8 +44,51 @@ jobs:
           npm run build 2>&1 | tee ui-test-results/build.log
       - name: Install isolated, pinned browser tooling
         run: |
+          # Work around the transient Google Chrome apt metadata issue only on
+          # ephemeral GitHub-hosted images. Persistent self-hosted package-source
+          # configuration belongs to the runner administrator, not a CI job.
+          if [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
+            sudo python3 - <<'PY'
+          from pathlib import Path
+
+          paths = [Path('/etc/apt/sources.list')]
+          source_dir = Path('/etc/apt/sources.list.d')
+          if source_dir.is_dir():
+              paths.extend(source_dir.iterdir())
+
+          for path in paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(errors='ignore')
+              if 'dl.google.com' not in text:
+                  continue
+              if path.suffix == '.sources':
+                  kept = [
+                      stanza for stanza in text.split('\n\n')
+                      if 'dl.google.com' not in stanza
+                  ]
+                  updated = '\n\n'.join(kept).rstrip()
+              else:
+                  kept = [
+                      line for line in text.splitlines()
+                      if 'dl.google.com' not in line
+                  ]
+                  updated = '\n'.join(kept).rstrip()
+              path.write_text(updated + ('\n' if updated else ''))
+          PY
+          fi
           npm ci --prefix desktop/e2e --ignore-scripts --no-audit --no-fund
-          desktop/e2e/node_modules/.bin/playwright install --with-deps chromium
+          # Retry browser install as a safety net — the --with-deps flag runs
+          # apt-get update internally, which can still transiently fail on
+          # other upstream apt mirrors.
+          for attempt in 1 2 3; do
+            if desktop/e2e/node_modules/.bin/playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying in 5s..."
+            sleep 5
+          done
+          exit 1
       - name: Start application
         run: |
           (cd desktop && npm run dev -- --host 127.0.0.1 > "$RUNNER_TEMP/terminal-vite.log" 2>&1) &

@@ -72,7 +72,7 @@
         }
         return;
       }
-      if (["sftp_connect", "sftp_close", "secure_lock_vault"].includes(command)) return;
+      if (["sftp_connect", "sftp_close", "secure_lock_vault", "secure_reset_vault"].includes(command)) return;
       if (command === "sftp_canonicalize") return "/srv/atlas";
       if (command === "sftp_list_dir") return [
         { name: "deployments", long_name: "deployments", is_dir: true, is_file: false, is_symlink: false, size: 4096, modified: 1788600000, permissions: 493 },
