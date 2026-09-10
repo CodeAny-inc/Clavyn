@@ -50,6 +50,17 @@ jobs:
             TAG="${GITHUB_REF##*/}"
             VERSION="${TAG#v}"
           fi
+          # Everything downstream trusts these two values: they become the
+          # release tag, the `gh release upload` target and tauri-action's
+          # tagName. `$GITHUB_OUTPUT` is a line-oriented file and the last
+          # record for a key wins, so a version carrying a newline writes
+          # extra records and repoints `tag` at something the caller chose.
+          # Accept only a semantic version; nothing else can express a
+          # newline, and no tag this project has ever released is rejected.
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Refusing to release: '$VERSION' is not a semantic version." >&2
+            exit 1
+          fi
           IS_PRERELEASE="false"
           if [[ "$VERSION" == *alpha* ]] || [[ "$VERSION" == *beta* ]] || [[ "$VERSION" == *rc* ]]; then
             IS_PRERELEASE="true"
