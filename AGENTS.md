@@ -15,6 +15,10 @@
 - **UI verification with the agent CLI** — see "Agent UI verification" below.
 - **Comment hygiene check** — `node scripts/verify/check-comments.mjs` before
   committing. See "Comment hygiene (enforced)" below.
+- **Audit suppression expiry** — `node scripts/verify/check-audit-expiry.mjs`
+  after touching `.cargo/audit.toml`. Every entry in the `ignore` list needs a
+  `# review-by: YYYY-MM-DD` comment; the check fails once a date is reached, so
+  no `cargo audit` suppression can sit there unexamined.
 
 ## Agent UI verification
 
