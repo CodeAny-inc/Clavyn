@@ -46,6 +46,38 @@ skill:
 | Claude Code | `.claude/commands/verify-clavyn.md` | Slash commands |
 | Cursor | `.cursor/rules/verify-clavyn.mdc` | Rules |
 
+## Native-app testing and debugging (real builds)
+
+The harness above runs the frontend in Chromium with all Tauri IPC mocked —
+it verifies the **renderer only**. Anything that crosses the webview↔OS
+boundary is invisible to it: HTML5 drag-and-drop/file drop (Tauri's
+`dragDropEnabled` installs a native drop target that can consume drags before
+the DOM sees them), clipboard, native dialogs/menus, global shortcuts, window
+management, tray, updater, and OS permission prompts. A feature that passes
+every harness test can still be dead in the shipped app — that is exactly how
+a frontend fix once shipped while remaining broken in the real WKWebView
+(the native handler swallowed `dragover`/`drop` entirely).
+
+For those cases use the `native-e2e` skill: it covers driving the real
+`tauri dev`/packaged build with OS-level input, instrumenting the page with a
+DOM event-counter overlay to see what the webview actually receives, running
+a browser control test before trusting a synthetic-input negative, and
+per-platform toolkits for macOS (cliclick/screencapture/System Events AX),
+Linux (xdotool/ydotool/AT-SPI), and Windows (pyautogui/pywinauto/UIA,
+tauri-driver + msedgedriver). Same multi-agent pointer pattern:
+
+| Agent | Pointer | Convention |
+|-------|---------|------------|
+| **All agentskills.io-compatible** | `.agents/skills/native-e2e/SKILL.md` | Standard Agent Skills (agentskills.io) |
+| Universal / Codex | `AGENTS.md` (this file) | De facto standard |
+| Devin | `.devin/skills/native-e2e/SKILL.md` | Devin skills |
+| Claude Code | `.claude/commands/native-e2e.md` | Slash commands |
+| Cursor | `.cursor/rules/native-e2e.mdc` | Rules |
+
+Quick signal that you're in native-swallow territory: `dragstart`/`dragend`
+fire but no `dragenter`/`dragover`/`drop` reach the page — check
+`tauri.conf.json` window flags before touching frontend code.
+
 ## Comment hygiene verification
 
 The comment hygiene rule (see "Comment hygiene (enforced)" below) is enforced
@@ -80,6 +112,10 @@ it before navigating to save context tokens. Full docs: `scripts/verify/README.m
 Notes:
 - The fixture mocks the transport; this verifies the **renderer**, not
   end-to-end SSH. Core Rust logic is verified with `cargo test -p clavyn-core`.
+- The harness also cannot observe the **native layer** — webview↔OS behavior
+  (drag-drop interception, clipboard, dialogs, windowing) needs a real build
+  via the `native-e2e` skill. Never certify a native-boundary feature from
+  harness results alone.
 - To drive a real `tauri dev`/packaged webview, set `CLAVYN_URL` and
   `CHROMIUM_EXECUTABLE_PATH` to point at its webview endpoint.
 
