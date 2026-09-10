@@ -29,6 +29,7 @@ const biometricSettingsLoading = ref<"enable" | "disable" | null>(null);
 const resetMode = ref(false);
 const resetPassphrase = ref("");
 const resetLoading = ref(false);
+const resetError = ref("");
 
 const displayRuntimeError = computed(() => error.value || vault.error || "");
 
@@ -42,6 +43,7 @@ function clearSensitiveFormState() {
 function resetResetForm() {
   resetPassphrase.value = "";
   resetMode.value = false;
+  resetError.value = "";
 }
 
 // This component stays mounted across lock/unlock, including automatic locks.
@@ -159,12 +161,11 @@ async function disableBiometric() {
 function cancelReset() {
   if (resetLoading.value) return;
   resetResetForm();
-  error.value = "";
 }
 
 async function confirmReset() {
   if (!resetPassphrase.value || resetLoading.value) return;
-  error.value = "";
+  resetError.value = "";
   resetLoading.value = true;
   try {
     await vault.reset(resetPassphrase.value);
@@ -173,7 +174,7 @@ async function confirmReset() {
     // Do not keep the master passphrase referenced in component state after a
     // failed reset attempt. The user can explicitly enter it again.
     resetPassphrase.value = "";
-    error.value = String(e);
+    resetError.value = String(e);
   } finally {
     resetLoading.value = false;
   }
@@ -434,7 +435,7 @@ const showBiometricButton = computed(
                   @keydown.enter="confirmReset"
                 />
               </FormGroup>
-              <p v-if="error" class="text-[12px] text-destructive">{{ error }}</p>
+              <p v-if="resetError" class="text-[12px] text-destructive">{{ resetError }}</p>
               <div class="flex items-center gap-2">
                 <Button
                   variant="destructive"

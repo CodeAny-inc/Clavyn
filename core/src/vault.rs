@@ -158,8 +158,9 @@ impl Vault {
     /// to uninitialized. Every encrypted private key and credential is
     /// irrecoverably lost.
     ///
-    /// The on-disk files hold only AES-256-GCM ciphertext; plaintext never
-    /// touches disk. The caller owns authorization (verifying the master
+    /// The on-disk file stores a salt and key metadata alongside the
+    /// AES-256-GCM ciphertext; private key material is encrypted and plaintext
+    /// never touches disk. The caller owns authorization (verifying the master
     /// passphrase) and biometric credential cleanup before invoking this.
     pub fn reset(&mut self) -> Result<()> {
         let removal = crate::fs_util::remove_private(&self.path)?;

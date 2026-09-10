@@ -8,6 +8,8 @@
   let sequence = 0;
   const callbacks = new Map();
   const listeners = new Map();
+  let vaultInitialized = true;
+  let vaultUnlocked = true;
   const state = {
     calls: [], connects: [], closes: [], writes: [], live: {}, pending: [],
     holdNext: false, failNext: false,
@@ -33,7 +35,8 @@
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "list_hosts") return structuredClone(hosts);
       if (["list_groups", "list_identities", "list_keys", "list_workspaces", "list_known_hosts"].includes(command)) return [];
-      if (["vault_is_initialized", "is_vault_unlocked"].includes(command)) return true;
+      if (["vault_is_initialized"].includes(command)) return vaultInitialized;
+      if (["is_vault_unlocked"].includes(command)) return vaultUnlocked;
       if (["biometric_available", "biometric_passphrase_stored"].includes(command)) return false;
       if (command === "get_app_info") return { name: "Clavyn", version: "0.1.1-ui-test", platform: "linux", arch: "x86_64" };
       if (command === "check_for_updates") return { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
@@ -72,7 +75,9 @@
         }
         return;
       }
-      if (["sftp_connect", "sftp_close", "secure_lock_vault", "secure_reset_vault"].includes(command)) return;
+      if (["sftp_connect", "sftp_close"].includes(command)) return;
+      if (command === "secure_lock_vault") { vaultUnlocked = false; return; }
+      if (command === "secure_reset_vault") { vaultInitialized = false; vaultUnlocked = false; return; }
       if (command === "sftp_canonicalize") return "/srv/atlas";
       if (command === "sftp_list_dir") return [
         { name: "deployments", long_name: "deployments", is_dir: true, is_file: false, is_symlink: false, size: 4096, modified: 1788600000, permissions: 493 },

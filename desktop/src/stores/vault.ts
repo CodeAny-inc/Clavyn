@@ -215,8 +215,14 @@ export const useVaultStore = defineStore("vault", () => {
           // has already been unlinked and its in-memory/auth state cleared. Even
           // though directory durability could not be confirmed, the renderer
           // must treat the old vault as destroyed rather than showing stale
-          // unlocked state.
+          // unlocked state. The biometric credential is removed before the
+          // unlink, so reconcile enrollment against the now-destroyed vault.
           publishDestroyedVaultState();
+          try {
+            await reconcileBiometricState();
+          } catch {
+            // Reconciliation fails closed; preserve the original reset error.
+          }
         } else {
           // Failures before the destructive boundary preserve the vault. A
           // credential may still have been removed before a later unlink error,
