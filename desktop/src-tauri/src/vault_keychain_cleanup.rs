@@ -425,17 +425,21 @@ pub(crate) async fn reconcile_credential_observation(
 /// crash before the marker write leaves only a non-secret orphan probe, while a
 /// crash after the marker write can be recovered safely on the next probe.
 ///
-/// A legacy vault with no enrollment marker is treated as Clear here because
-/// the user is explicitly enabling biometric. An invisible credential from a
-/// previous macOS signing access group is bound to this binding id and cannot
-/// unlock a future vault generation, so establishing Clear is safe at this
-/// point without affecting the status probe or disable paths.
+/// A legacy vault with no enrollment marker transitions directly to Pending
+/// without an intermediate Clear write. Writing Clear before the fallible
+/// scope-probe creation would persist a Clear marker that a later disable
+/// trusts to skip Keychain deletion, leaving a hidden credential accessible.
+/// Going directly to Pending means a scope-probe failure leaves the vault
+/// untracked (Unknown), which fails closed for disable.
 pub(crate) async fn begin_enrollment(app_data_dir: &Path, binding_id: &str) -> ApiResult<()> {
     let marker = marker_for_binding(app_data_dir, binding_id)?;
 
     match marker {
         None => {
-            write_clear_state(app_data_dir, binding_id).await?;
+            // Skip the Clear precondition for legacy vaults and transition
+            // directly to Pending. write_tracked_state creates the scope
+            // probe first; if that fails, no marker is written and the vault
+            // stays untracked rather than persisting a dangerous Clear state.
         }
         Some(marker) if marker.state != TrackingState::Clear => {
             return Err("biometric enrollment state is not clear; refresh biometric status first".into());
@@ -640,10 +644,10 @@ mod marker_tests {
         let dir = tempfile::tempdir().expect("tempdir");
 
         // A legacy vault with no enrollment marker can begin enrollment
-        // because begin_enrollment establishes Clear tracking when the user
-        // explicitly enables biometric. On macOS without Keychain
-        // entitlements the scope probe may fail, but that is a platform
-        // capability error, not the tracking block being fixed here.
+        // because begin_enrollment transitions directly to Pending without
+        // an intermediate Clear write. On macOS without Keychain entitlements
+        // the scope probe may fail, but that is a platform capability error,
+        // not the tracking block being fixed here.
         let result = begin_enrollment(dir.path(), "generation-a").await;
         match &result {
             Ok(()) => {
@@ -658,6 +662,23 @@ mod marker_tests {
                     "legacy vault should not be blocked by unknown tracking: {error}"
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_enrollment_leaves_no_clear_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // If begin_enrollment fails (e.g. scope-probe creation fails on macOS
+        // without Keychain entitlements), no Clear marker must be left behind.
+        // A stale Clear marker would let a later disable skip Keychain deletion
+        // and leave a hidden credential accessible to an older build.
+        let result = begin_enrollment(dir.path(), "generation-a").await;
+        if result.is_err() {
+            assert!(
+                read_marker(dir.path()).unwrap().is_none(),
+                "failed enrollment must not persist a Clear marker"
+            );
         }
     }
 
