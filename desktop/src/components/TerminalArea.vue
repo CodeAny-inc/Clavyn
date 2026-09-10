@@ -5,6 +5,7 @@ import { useUiStore } from "../stores/ui";
 import { Plus, X, TerminalSquare, Columns2 } from "lucide-vue-next";
 import TerminalWorkspace from "./TerminalWorkspace.vue";
 import SessionPicker, { type SessionPlacement } from "./SessionPicker.vue";
+import { setDragImageChip } from "../lib/dragChip";
 
 const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ activate: [] }>();
@@ -33,6 +34,7 @@ function tabLabel(id: string) {
 }
 function tabDrag(event: DragEvent, id: string) {
   tabs.startTabDrag(id);
+  setDragImageChip(event, tabLabel(id));
   if (event.dataTransfer) {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", id);
@@ -160,20 +162,28 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 
 <style scoped>
 .session-strip { @apply flex h-12 shrink-0 items-center gap-2 px-3 pl-12 md:pl-3 border-b border-sidebar-border; background: var(--workspace-chrome); color: hsl(var(--sidebar-foreground)); }
-.session-tab { @apply flex h-9 shrink-0 items-center rounded-md; background: hsl(var(--muted)); }
+/* Drop affordances ease in/out: a resting zero-width inset shadow lets the
+   drop-target ring interpolate instead of snapping on. */
+.session-tab { @apply relative flex h-9 shrink-0 items-center rounded-md; background: hsl(var(--muted)); box-shadow: inset 0 0 0 0 transparent; transition: opacity 140ms ease-out, box-shadow 160ms ease-out, background-color 120ms ease-out; }
 .session-tab-active { background: hsl(var(--accent)); box-shadow: inset 0 -2px var(--workspace-accent); }
 .session-tab-select { @apply flex h-9 min-w-0 items-center gap-2 rounded-md px-3 text-[12px] text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
 .session-tab-active .session-tab-select { @apply text-foreground; }
 .session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring; }
-.new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
+.new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; box-shadow: inset 0 0 0 0 transparent; transition: box-shadow 160ms ease-out, background-color 120ms ease-out; }
 .terminal-empty { @apply flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center; background: var(--terminal-background); }
 /* Pane-drag affordances in the tab strip, mirroring Termius workspaces. */
-.pane-drag-active .session-tab { @apply transition-colors duration-100; }
-.session-tab-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
-.new-session-drop-target { @apply ring-2 ring-primary ring-inset bg-primary/15; }
+.session-tab-drop-target { background: hsl(var(--primary) / 0.15); box-shadow: inset 0 0 0 2px hsl(var(--primary)); }
+.new-session-drop-target { background: hsl(var(--primary) / 0.15); box-shadow: inset 0 0 0 2px hsl(var(--primary)); }
 /* Tab-drag affordances: the dragged tab dims and the hovered neighbour shows
-   an insertion bar on the side the tab will land on. */
-.session-tab-dragging { @apply opacity-50; }
-.session-tab-reorder-before { box-shadow: inset 3px 0 0 var(--workspace-accent); }
-.session-tab-reorder-after { box-shadow: inset -3px 0 0 var(--workspace-accent); }
+   an insertion caret on the side the tab will land on. */
+.session-tab-dragging { opacity: 0.45; }
+.session-tab-reorder-before::before, .session-tab-reorder-after::after {
+  content: ""; position: absolute; top: 3px; bottom: 3px; width: 2.5px;
+  border-radius: 9999px; background: var(--workspace-accent);
+  pointer-events: none;
+  animation: session-insert-in 150ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.session-tab-reorder-before::before { left: 1.5px; }
+.session-tab-reorder-after::after { right: 1.5px; }
+@keyframes session-insert-in { from { transform: scaleY(0.2); opacity: 0; } }
 </style>
