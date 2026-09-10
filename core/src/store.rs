@@ -49,6 +49,14 @@ impl Store {
 
     pub fn save(&self) -> Result<()> {
         let raw = serde_json::to_string_pretty(&self.data)?;
+        // Never write a document this same build could not read again. `load`
+        // fails closed, and a failed load aborts startup, so an unloadable
+        // store file leaves the app unable to open at all. Rejecting the write
+        // keeps the previous file — and the previous session — intact.
+        serde_json::from_str::<StoreData>(&raw).map_err(|e| CoreError::UnwritableState {
+            path: self.path.display().to_string(),
+            reason: e.to_string(),
+        })?;
         crate::fs_util::write_private(&self.path, &raw)
     }
 
@@ -133,12 +141,17 @@ impl Store {
     }
 
     // --- workspaces ---
-    pub fn add_workspace(&mut self, ws: Workspace) -> Result<()> {
+    /// Layouts reach the store straight from the frontend IPC surface, so the
+    /// pane tree is sanitized here rather than trusting the renderer's own
+    /// bounds checks.
+    pub fn add_workspace(&mut self, mut ws: Workspace) -> Result<()> {
+        ws.sanitize()?;
         self.data.workspaces.push(ws);
         self.save()
     }
 
-    pub fn update_workspace(&mut self, ws: Workspace) -> Result<()> {
+    pub fn update_workspace(&mut self, mut ws: Workspace) -> Result<()> {
+        ws.sanitize()?;
         if let Some(w) = self.data.workspaces.iter_mut().find(|w| w.id == ws.id) {
             *w = ws;
         }
@@ -167,6 +180,21 @@ impl Store {
 mod tests {
     use super::Store;
     use crate::host::HostGroup;
+    use crate::workspace::{PaneLayout, SplitDirection, TabLayout, Workspace};
+
+    fn workspace_with_ratio(ratio: f32) -> Workspace {
+        let mut ws = Workspace::new("hostile");
+        ws.tabs.push(TabLayout::new(
+            "tab",
+            PaneLayout::Split {
+                direction: SplitDirection::Horizontal,
+                ratio,
+                first: Box::new(PaneLayout::pane(None)),
+                second: Box::new(PaneLayout::pane(None)),
+            },
+        ));
+        ws
+    }
 
     const ONE_HOST: &str = r#"{"hosts":[{"id":"11111111-1111-1111-1111-111111111111","label":"prod","hostname":"prod.example.com","port":22,"username":"deploy","auth":"publickey","tags":[]}],"host_groups":[],"identities":[],"workspaces":[]}"#;
 
@@ -201,5 +229,61 @@ mod tests {
         let reloaded = Store::load(path).expect("reload");
         assert_eq!(reloaded.hosts().len(), 1);
         assert_eq!(reloaded.groups().len(), 1);
+    }
+
+    #[test]
+    fn a_workspace_with_a_non_finite_ratio_is_not_stored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        std::fs::write(&path, ONE_HOST).expect("seed store");
+
+        let mut store = Store::load(path.clone()).expect("load");
+        let hostile = workspace_with_ratio(f32::INFINITY);
+        assert!(store.add_workspace(hostile.clone()).is_err());
+        assert!(store.update_workspace(hostile).is_err());
+
+        assert!(store.workspaces().is_empty());
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), ONE_HOST);
+        Store::load(path).expect("the store still loads");
+    }
+
+    #[test]
+    fn an_out_of_range_ratio_is_snapped_rather_than_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+
+        let mut store = Store::load(path.clone()).expect("load");
+        store
+            .add_workspace(workspace_with_ratio(12.0))
+            .expect("a finite ratio saves");
+
+        let reloaded = Store::load(path).expect("reload");
+        match &reloaded.workspaces()[0].tabs[0].layout {
+            PaneLayout::Split { ratio, .. } => assert_eq!(*ratio, 0.9),
+            PaneLayout::Pane { .. } => panic!("expected a split"),
+        }
+    }
+
+    // The workspace mutators reject this input, so reach past them to prove the
+    // write-side guard stands on its own for any future field that can produce
+    // a document the loader rejects.
+    #[test]
+    fn save_refuses_a_document_it_could_not_load_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        std::fs::write(&path, ONE_HOST).expect("seed store");
+
+        let mut store = Store::load(path.clone()).expect("load");
+        store
+            .data
+            .workspaces
+            .push(workspace_with_ratio(f32::INFINITY));
+
+        let error = store.save().expect_err("an unloadable document must not be written");
+        assert!(
+            error.to_string().contains("cannot be loaded again"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), ONE_HOST);
     }
 }

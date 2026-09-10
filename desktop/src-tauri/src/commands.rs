@@ -270,8 +270,11 @@ pub async fn create_workspace(
 #[tauri::command]
 pub async fn save_workspace(
     state: State<'_, Arc<AppState>>,
-    workspace: Workspace,
+    mut workspace: Workspace,
 ) -> ApiResult<Workspace> {
+    // Sanitize before the store does, so the caller gets back the layout that
+    // was actually persisted rather than the one it sent.
+    workspace.sanitize().map_err(err)?;
     let mut store = state.store.lock().await;
     store.update_workspace(workspace.clone()).map_err(err)?;
     Ok(workspace)
@@ -965,6 +968,11 @@ pub async fn install_update(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    // Release the single-instance guard first. `request_restart` spawns the
+    // replacement process before this one exits, so the guard would still be
+    // held and the new instance would exit immediately instead of starting.
+    tauri_plugin_single_instance::destroy(&app);
 
     // Restart the app to apply the update
     app.request_restart();
