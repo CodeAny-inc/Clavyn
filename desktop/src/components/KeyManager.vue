@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useKeysStore } from "../stores/keys";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
@@ -41,6 +41,21 @@ onMounted(() => {
   keys.load();
 });
 
+// The dialog's contents are destroyed by `v-if`, but `addForm` is not: a
+// private key left there is rendered straight back into the plaintext textarea
+// the next time the dialog opens, with no vault authentication in between and
+// no lock to clear it. Every exit from the dialog discards the key material,
+// not just the successful ones. Synchronous so nothing can observe the ref
+// between the close and the clear.
+watch(showAdd, (open) => {
+  if (!open) clearAddForm();
+}, { flush: "sync" });
+
+// Only navigating away from this view unmounts the component today. Clearing
+// here means a future caller that keeps it mounted does not silently reopen
+// the retention window.
+onUnmounted(clearAddForm);
+
 async function generateKey() {
   if (!addForm.value.label.trim()) return;
   try {
@@ -63,13 +78,23 @@ async function importKey() {
     resetForm();
   } catch (e) {
     console.error("Failed to import key:", e);
+    // A rejected key is still a key. Discard it here rather than leaving it
+    // resident for whatever the user does next.
+    resetForm();
     alert(`Failed to import key: ${e}`);
   }
 }
 
+function clearAddForm() {
+  addForm.value.label = "";
+  addForm.value.import = false;
+  addForm.value.privateKey = "";
+  addForm.value.passphrase = "";
+}
+
 function resetForm() {
   showAdd.value = false;
-  addForm.value = { label: "", import: false, privateKey: "", passphrase: "" };
+  clearAddForm();
 }
 
 async function deleteKey(key: KeyMeta) {
@@ -202,7 +227,7 @@ async function browseForKeyFile() {
       :title="addForm.import ? 'Import Key' : 'Generate Key'"
       description="Create or import an SSH key. Keys are encrypted at rest in the vault."
       width="520px"
-      @close="showAdd = false"
+      @close="resetForm"
     >
       <div class="flex flex-col gap-4">
         <div class="flex gap-1 p-1 rounded-md bg-muted">
@@ -261,7 +286,7 @@ async function browseForKeyFile() {
       </div>
 
       <template #footer>
-        <Button variant="ghost" @click="showAdd = false">Cancel</Button>
+        <Button variant="ghost" @click="resetForm">Cancel</Button>
         <Button v-if="!addForm.import" :disabled="!addForm.label.trim()" @click="generateKey">
           Generate Key
         </Button>
