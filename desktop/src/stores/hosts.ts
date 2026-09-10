@@ -8,6 +8,7 @@ export const useHostsStore = defineStore("hosts", () => {
   const groups = ref<HostGroup[]>([]);
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
+  let pendingLoad: Promise<void> | null = null;
 
   const filteredHosts = computed(() => {
     let result = hosts.value;
@@ -27,9 +28,20 @@ export const useHostsStore = defineStore("hosts", () => {
     return result;
   });
 
-  async function load() {
-    hosts.value = await api.listHosts();
-    groups.value = await api.listGroups();
+  // App startup and every host-facing view call load(). Concurrent callers share
+  // one in-flight pair of reads rather than issuing duplicate IPC, and the two
+  // reads are independent so they go out together.
+  function load(): Promise<void> {
+    if (pendingLoad) return pendingLoad;
+    pendingLoad = Promise.all([api.listHosts(), api.listGroups()])
+      .then(([loadedHosts, loadedGroups]) => {
+        hosts.value = loadedHosts;
+        groups.value = loadedGroups;
+      })
+      .finally(() => {
+        pendingLoad = null;
+      });
+    return pendingLoad;
   }
 
   async function addHost(host: Host) {

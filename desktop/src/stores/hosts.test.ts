@@ -75,6 +75,44 @@ describe("hosts store", () => {
       expect(store.groups).toHaveLength(1);
       expect(store.groups[0].name).toBe("Production");
     });
+
+    it("reads hosts and groups in one round-trip", async () => {
+      const store = useHostsStore();
+      const order: string[] = [];
+      vi.mocked(api.listHosts).mockImplementationOnce(() => {
+        order.push("hosts");
+        return Promise.resolve([]);
+      });
+      vi.mocked(api.listGroups).mockImplementationOnce(() => {
+        order.push("groups");
+        return Promise.resolve([]);
+      });
+
+      const load = store.load();
+      // Both reads are dispatched before either resolves.
+      expect(order).toEqual(["hosts", "groups"]);
+      await load;
+    });
+
+    it("shares one in-flight load between concurrent callers", async () => {
+      const store = useHostsStore();
+
+      await Promise.all([store.load(), store.load(), store.load()]);
+
+      expect(api.listHosts).toHaveBeenCalledTimes(1);
+      expect(api.listGroups).toHaveBeenCalledTimes(1);
+      expect(store.hosts).toHaveLength(2);
+      expect(store.groups).toHaveLength(1);
+    });
+
+    it("starts a fresh read once the previous one has settled", async () => {
+      const store = useHostsStore();
+
+      await store.load();
+      await store.load();
+
+      expect(api.listHosts).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("addHost", () => {
