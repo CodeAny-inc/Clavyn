@@ -31,6 +31,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: windows-nsis-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows-nsis-smoke:
     name: Windows NSIS smoke test
@@ -47,7 +51,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: "desktop/src-tauri -> target"
+          # The Cargo workspace root is the repository root (members: core,
+          # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
+          # at desktop/src-tauri caches a directory that never exists, which
+          # leaves every run recompiling from scratch.
+          workspaces: ". -> target"
       - name: Install frontend dependencies
         working-directory: desktop
         run: npm ci
