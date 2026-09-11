@@ -5,7 +5,7 @@ use clavyn_core::store::Store;
 use clavyn_core::vault::Vault;
 use clavyn_core::Result;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
@@ -123,10 +123,16 @@ impl LocalTerminals {
         self.opening.remove(session_id);
     }
 
-    /// Removes a session, live or still opening.
+    /// Removes a session, live or still opening. The removed terminal gives up
+    /// its session id here rather than when it is dropped, so the id is free of
+    /// its old reader before the lock this runs under is released.
     pub fn remove(&mut self, session_id: &str) -> Option<LocalTerminal> {
         self.opening.remove(session_id);
-        self.live.remove(session_id)
+        let removed = self.live.remove(session_id);
+        if let Some(terminal) = &removed {
+            terminal.disown();
+        }
+        removed
     }
 
     /// Takes out the terminals `exited` reports as finished, returning them so
@@ -144,6 +150,7 @@ impl LocalTerminals {
         finished
             .iter()
             .filter_map(|id| self.live.remove(id))
+            .inspect(|terminal| terminal.disown())
             .collect()
     }
 }
@@ -155,6 +162,23 @@ pub struct LocalTerminal {
     /// Kept alive so the shell is not reaped, and polled with `try_wait` to
     /// tell a live terminal from one whose shell has already exited.
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Cleared when this terminal stops holding its session id.
+    ///
+    /// The thread draining the PTY outlives the map entry: it is detached, and
+    /// a shell that has exited is only noticed when the entry is reaped, by
+    /// which time the reader may still have buffered output to deliver and a
+    /// closing notice to send. Session ids are reusable, and both events carry
+    /// nothing but the id, so a replacement terminal on the same id would
+    /// receive the old shell's output and then be disconnected by its
+    /// `session-closed`. The reader checks this before it emits.
+    pub owns_session_id: Arc<AtomicBool>,
+}
+
+impl LocalTerminal {
+    /// Marks the terminal as no longer holding its session id.
+    pub fn disown(&self) {
+        self.owns_session_id.store(false, Ordering::Release);
+    }
 }
 
 impl AppState {
@@ -217,6 +241,92 @@ pub struct SessionDataEvent {
 pub struct SessionClosedEvent {
     pub session_id: String,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod local_terminal_ownership_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    /// A real terminal, plus the flag its reader thread would consult. The PTY
+    /// handles are what the map stores, so there is no way to exercise removal
+    /// without them.
+    fn terminal() -> (LocalTerminal, Arc<AtomicBool>) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let shell = if cfg!(target_os = "windows") {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        };
+        let child = pair
+            .slave
+            .spawn_command(CommandBuilder::new(shell))
+            .expect("a shell can be spawned");
+        let writer = pair.master.take_writer().expect("the master has a writer");
+        let owns_session_id = Arc::new(AtomicBool::new(true));
+        (
+            LocalTerminal {
+                writer,
+                master: pair.master,
+                child,
+                owns_session_id: owns_session_id.clone(),
+            },
+            owns_session_id,
+        )
+    }
+
+    fn live(locals: &mut LocalTerminals, session_id: &str) -> Arc<AtomicBool> {
+        let (terminal, owns) = terminal();
+        locals.reserve(session_id.to_string());
+        assert!(locals.fulfil(session_id, terminal).is_ok());
+        owns
+    }
+
+    #[test]
+    fn closing_a_terminal_hands_its_session_id_back() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+        assert!(owns.load(Ordering::Acquire));
+
+        // The id is free for reuse from here, so the reader still draining the
+        // old shell must stop addressing it.
+        let mut closed = locals.remove("local-0").expect("the terminal was live");
+        assert!(!owns.load(Ordering::Acquire));
+        let _ = closed.child.kill();
+    }
+
+    #[test]
+    fn reaping_an_exited_terminal_hands_its_session_id_back() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+
+        let reaped = locals.reap_exited(|_| true);
+        assert_eq!(reaped.len(), 1);
+        assert!(!owns.load(Ordering::Acquire));
+        for mut terminal in reaped {
+            let _ = terminal.child.kill();
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_stays_open_keeps_its_session_id() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+
+        assert!(locals.reap_exited(|_| false).is_empty());
+        assert!(locals.remove("other").is_none());
+        assert!(owns.load(Ordering::Acquire));
+
+        let mut open = locals.remove("local-0").expect("the terminal was live");
+        let _ = open.child.kill();
+    }
 }
 
 #[cfg(test)]

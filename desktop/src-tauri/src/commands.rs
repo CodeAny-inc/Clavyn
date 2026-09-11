@@ -525,10 +525,12 @@ pub async fn create_local_terminal(
     // check can have changed, because `connect_ssh` never consults the local
     // map and so cannot be held off by a reservation.
     let ssh_session_ids = state.sessions.list().await;
+    let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let terminal = LocalTerminal {
         writer,
         master,
         child,
+        owns_session_id: owns_session_id.clone(),
     };
     let refused = {
         let mut locals = state.local_terminals.lock().await;
@@ -567,6 +569,12 @@ pub async fn create_local_terminal(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // The shell can outlive its map entry, and the id it used is
+                    // reusable, so output that arrives after the entry is gone
+                    // would be rendered in whatever holds that id now.
+                    if !owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
                     let _ = app_handle.emit(
                         "session-data",
                         crate::state::SessionDataEvent {
@@ -582,13 +590,17 @@ pub async fn create_local_terminal(
                 Err(_) => break,
             }
         }
-        let _ = app_handle.emit(
-            "session-closed",
-            crate::state::SessionClosedEvent {
-                session_id: sid,
-                reason: "local terminal closed".to_string(),
-            },
-        );
+        // Likewise for the closing notice: announcing this shell's exit on an
+        // id that now belongs to a replacement would disconnect the replacement.
+        if owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = app_handle.emit(
+                "session-closed",
+                crate::state::SessionClosedEvent {
+                    session_id: sid,
+                    reason: "local terminal closed".to_string(),
+                },
+            );
+        }
     });
 
     Ok(())
