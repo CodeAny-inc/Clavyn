@@ -9,7 +9,7 @@ allowed-tools: Bash(git:*) Bash(greptile:*) Bash(command:*) Bash(curl:*) Bash(np
 The canonical skill lives at `.agents/skills/cli-review/SKILL.md` (the
 standard Agent Skills location from agentskills.io, supported by Claude Code,
 Cursor, Codex, VS Code, Copilot, Gemini CLI, Goose, OpenHands, and more).
-Vendored verbatim from https://github.com/greptileai/skills (MIT).
+Vendored from https://github.com/greptileai/skills (MIT).
 This file exists so Devin's own discovery (`.devin/skills/`) finds it.
 
 ## Quick reference

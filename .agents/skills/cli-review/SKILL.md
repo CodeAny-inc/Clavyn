@@ -41,11 +41,10 @@ If it is missing, do not install it automatically. Ask the user for permission, 
 npm i -g greptile
 ```
 
-If npm is unavailable, offer the shell installer fallback:
-
-```bash
-curl -fsSL "https://greptile.com/cli/install" | sh
-```
+If npm is unavailable, do not pipe a remote installer into a shell
+(`curl ... | sh` executes unverified remote content with the user's
+privileges). Point the user at the manual install instructions on
+https://greptile.com/cli and wait for them to finish.
 
 After installation, re-run `command -v greptile`.
 

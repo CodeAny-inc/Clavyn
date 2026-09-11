@@ -121,11 +121,15 @@ Notes:
 
 ## Greptile PR review skills
 
-Three Agent Skills for automated PR review workflows are vendored **verbatim**
-from https://github.com/greptileai/skills (MIT, copyright Greptile AI — the
-upstream `LICENSE` is included in each skill directory). They are pinned to
-upstream commit `646e2dfad81e5157e97daecc802b68d3d2c4d1e4`; to update,
-re-download at the new upstream SHA and re-verify checksums.
+Three Agent Skills for automated PR review workflows are vendored from
+https://github.com/greptileai/skills (MIT, copyright Greptile AI — the
+upstream `LICENSE` is included in each skill directory). They are based on
+upstream commit `646e2dfad81e5157e97daecc802b68d3d2c4d1e4` **plus local fixes**
+applied during review (scoped GitLab thread resolution, trigger-bounded GitHub
+check polling, GraphQL `isResolved` for the unresolved set, restricted staging,
+and removal of the `curl | sh` installer fallback). To update, diff the new
+upstream SHA against `646e2df` to see which local patches still apply, then
+re-apply any that are still needed.
 
 - **`check-pr`** — check a PR/MR/CL for unresolved review comments, failing
   status checks, and incomplete descriptions; fix and resolve.

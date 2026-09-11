@@ -77,6 +77,10 @@ Key field differences:
 
 Repeat the following cycle. **Max 5 iterations** to avoid runaway loops.
 
+Before the first iteration, require a clean working tree — `git status --porcelain`
+must be empty. If it is not, commit, stash, or otherwise preserve the pre-existing
+work before continuing, so unrelated files can never enter a review-fix commit.
+
 #### A. Trigger Greptile review
 
 Push/shelve the latest changes (if any):
@@ -98,24 +102,28 @@ Wait for checks to start after push/shelve:
 sleep 5
 ```
 
-**GitHub** — check if Greptile is already running before posting a new trigger comment:
+**GitHub** — check if Greptile is already running before posting a new trigger comment. Count matches rather than reading a single state — a commit can have several Greptile check runs (e.g. a completed older run plus a new one), and a multiline value breaks scalar comparisons:
 
 ```bash
-GREPTILE_STATE=$(gh pr checks <PR_NUMBER> --json name,state | jq -r '.[] | select(.name | test("greptile"; "i")) | .state')
+GREPTILE_RUNNING=$(gh pr checks <PR_NUMBER> --json name,state \
+  | jq '[.[] | select(.name | test("greptile"; "i")) | select(.state == "PENDING" or .state == "IN_PROGRESS")] | length')
 ```
 
-If Greptile is **not** already running (`PENDING` or `IN_PROGRESS`), request a fresh review:
+If Greptile is **not** already running, request a fresh review:
 
 ```bash
-if [ "$GREPTILE_STATE" != "PENDING" ] && [ "$GREPTILE_STATE" != "IN_PROGRESS" ]; then
+if [ "$GREPTILE_RUNNING" = "0" ]; then
   gh pr comment <PR_NUMBER> --body "@greptile review"
 fi
 ```
 
-Then poll for the Greptile check run to complete:
+Then poll for the Greptile check run to complete. Record a creation-time boundary
+beforehand and poll only runs created at/after it — otherwise an older completed
+run on the same commit satisfies the poll before the new review starts:
 
 ```bash
 HEAD_SHA=$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)
+TRIGGERED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ATTEMPTS=0
 MAX_ATTEMPTS=60
 POLL_INTERVAL_SECONDS=10
@@ -128,8 +136,9 @@ while true; do
   fi
 
   GREPTILE_CHECK=$(gh api "repos/{owner}/{repo}/commits/$HEAD_SHA/check-runs" \
-    --jq '.check_runs[] | select(.name | test("greptile"; "i"))' 2>/dev/null)
-  
+    | jq --arg triggered_at "$TRIGGERED_AT" \
+      '[.check_runs[] | select(.name | test("greptile"; "i")) | select(.created_at >= $triggered_at)] | sort_by(.created_at) | last // empty' 2>/dev/null)
+
   if [ -z "$GREPTILE_CHECK" ]; then
     echo "Waiting for Greptile check to appear..."
     sleep "$POLL_INTERVAL_SECONDS"
@@ -289,14 +298,39 @@ For all platforms, parse the text for:
 
 Use whichever source has the **most recently updated** score. For GitHub, prefer `updated_at` from issue comments when comparing an edited Greptile summary against older review entries.
 
-Also fetch all unresolved inline comments:
+Also fetch all unresolved inline comments. Resolution is thread-level state on
+GitHub — the REST review-comments endpoint has no `isResolved` field, so the
+unresolved set must come from the GraphQL `reviewThreads` query (see
+[GraphQL reference](references/graphql-queries.md)), not from counting REST
+comments:
 
 **GitHub:**
 ```bash
-gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
+gh api graphql -f query='
+query($cursor: String) {
+  repository(owner: "OWNER", name: "REPO") {
+    pullRequest(number: PR_NUMBER) {
+      reviewThreads(first: 100, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          id
+          isResolved
+          comments(first: 10) {
+            nodes { body path author { login } }
+          }
+        }
+      }
+    }
+  }
+}'
 ```
 
-Also carry forward actionable items from the latest Greptile general PR comment, especially the "Prompt to fix all with AI" section, even if the inline comment endpoint returns zero unresolved comments.
+Keep only threads with `isResolved: false` — paginate with
+`-f cursor=ENDCURSOR` while `hasNextPage` is true. This unresolved-thread set
+(not the REST comment count) feeds the exit check in step C and the fix set in
+step D, so already-resolved threads cannot keep the loop alive.
+
+Also carry forward actionable items from the latest Greptile general PR comment, especially the "Prompt to fix all with AI" section, even if no unresolved threads remain.
 
 **GitLab:**
 ```bash
@@ -363,27 +397,44 @@ mutation {
 }'
 ```
 
-**GitLab** — fetch unresolved discussions and resolve each one (see [GitLab API reference](references/gitlab-api.md)):
+**GitLab** — resolve only the discussions selected in step B (see [GitLab API
+reference](references/gitlab-api.md)). Re-apply the full filter — unresolved
+Greptile-authored `DiffNote` discussions on the latest commit — so human
+reviewer discussions and Greptile feedback on older commits are never
+resolved:
 
 ```bash
-glab api "projects/:fullpath/merge_requests/<MR_IID>/discussions?per_page=100"
+HEAD_SHA=$(glab mr view <MR_IID> --output json | jq -r '.sha')
+DISCUSSION_IDS=$(glab api "projects/:fullpath/merge_requests/<MR_IID>/discussions?per_page=100" \
+  | jq -r --arg sha "$HEAD_SHA" '
+    [.[] | select(.resolved == false)
+      | select(.notes[0].type == "DiffNote")
+      | select(.notes[0].position.head_sha == $sha)
+      | select(.notes[0].author.username | test("greptile"; "i"))
+      | .id] | .[]')
 ```
 
-Filter for `"resolved": false` discussions. Then resolve each by its `id`:
+Then resolve each selected discussion by its `id` — GitLab has no batch
+resolution, so loop through them:
 
 ```bash
-glab api --method PUT \
-  "projects/:fullpath/merge_requests/<MR_IID>/discussions/<DISCUSSION_ID>" \
-  --field resolved=true
+for ID in $DISCUSSION_IDS; do
+  glab api --method PUT \
+    "projects/:fullpath/merge_requests/<MR_IID>/discussions/$ID" \
+    --field resolved=true
+done
 ```
 
-Repeat for each unresolved discussion ID. (GitLab has no batch resolution — loop through each one.)
+Never resolve a discussion that did not come from the filter above.
 
 #### F. Commit and push / re-shelve
 
-**GitHub/GitLab:**
+**GitHub/GitLab:** stage only the files changed during this iteration — never
+`git add -A` — and review the staged diff before committing:
+
 ```bash
-git add -A
+git add <file1> <file2>   # explicit paths edited this iteration only
+git diff --cached          # confirm nothing unrelated is staged
 git commit -m "address greptile review feedback (greploop iteration N)"
 git push
 ```

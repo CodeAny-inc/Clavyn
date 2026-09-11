@@ -1,7 +1,7 @@
 # Greploop
 
 The canonical Agent Skill lives at `.agents/skills/greploop/SKILL.md`
-(standard agentskills.io location, vendored verbatim from
+(standard agentskills.io location, vendored from
 https://github.com/greptileai/skills — MIT). This slash command is a thin
 pointer so Claude Code's `/greploop` command finds it.
 

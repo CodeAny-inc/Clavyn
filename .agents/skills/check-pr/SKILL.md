@@ -251,17 +251,33 @@ Batch multiple resolutions into a single mutation using aliases (`t1`, `t2`, etc
 glab api "projects/:fullpath/merge_requests/<MR_IID>/discussions?per_page=100"
 ```
 
-Filter for discussions where `"resolved": false`. Collect each discussion's `id`.
-
-Resolve each discussion individually (GitLab has no batch resolution):
+Resolve only discussions that correspond to the comments addressed above —
+never blanket-resolve every `"resolved": false` discussion, which would close
+unaddressed human reviewer threads. Filter to unresolved bot-authored
+`DiffNote` discussions (e.g. Greptile) that were addressed:
 
 ```bash
-glab api --method PUT \
-  "projects/:fullpath/merge_requests/<MR_IID>/discussions/<DISCUSSION_ID>" \
-  --field resolved=true
+HEAD_SHA=$(glab mr view <MR_IID> --output json | jq -r '.sha')
+DISCUSSION_IDS=$(glab api "projects/:fullpath/merge_requests/<MR_IID>/discussions?per_page=100" \
+  | jq -r --arg sha "$HEAD_SHA" '
+    [.[] | select(.resolved == false)
+      | select(.notes[0].type == "DiffNote")
+      | select(.notes[0].position.head_sha == $sha)
+      | select(.notes[0].author.username | test("greptile"; "i"))
+      | .id] | .[]')
 ```
 
-Repeat for each unresolved discussion ID.
+Then resolve each selected discussion individually (GitLab has no batch resolution):
+
+```bash
+for ID in $DISCUSSION_IDS; do
+  glab api --method PUT \
+    "projects/:fullpath/merge_requests/<MR_IID>/discussions/$ID" \
+    --field resolved=true
+done
+```
+
+Human-authored discussions should be resolved by their reviewer, not by this workflow.
 
 ### 9. Multiple PRs/MRs/CLs
 

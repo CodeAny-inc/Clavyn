@@ -8,7 +8,7 @@ alwaysApply: false
 # Check PR
 
 The canonical Agent Skill lives at `.agents/skills/check-pr/SKILL.md`
-(standard agentskills.io location, vendored verbatim from
+(standard agentskills.io location, vendored from
 https://github.com/greptileai/skills — MIT). This Cursor rule is a thin
 pointer so Cursor's rules discovery finds it.
 
