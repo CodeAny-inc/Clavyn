@@ -34,7 +34,21 @@ use tauri::Emitter;
 ///   guard. A session with no bus running at all needs no guard from here: the
 ///   plugin's own connect already fails soft and the app starts unguarded.
 fn single_instance_guard_applies() -> bool {
-    !cfg!(debug_assertions) && session_bus_is_addressable()
+    guard_applies(cfg!(debug_assertions), session_bus_is_addressable())
+}
+
+/// The guard decision with both of its inputs supplied by the caller.
+///
+/// Neither input can be varied from inside a test: `debug_assertions` is fixed
+/// when the test binary is compiled, and the address check answers from the
+/// ambient session. Taking them as parameters keeps every combination reachable
+/// from a single build profile.
+///
+/// Both arguments are evaluated before the call, so a debug build resolves the
+/// address it then ignores. That costs an environment read and a parse, with no
+/// I/O and nothing to fail on.
+fn guard_applies(is_debug_build: bool, bus_addressable: bool) -> bool {
+    !is_debug_build && bus_addressable
 }
 
 /// Whether the address the single-instance plugin resolves on startup parses.
@@ -187,33 +201,23 @@ async fn check_for_updates_silent(app: tauri::AppHandle) {
 
 #[cfg(test)]
 mod single_instance_guard_tests {
-    use super::single_instance_guard_applies;
+    use super::guard_applies;
 
-    /// A debug build carries the same bundle identifier as an installed
-    /// release build, and the guard is keyed on that identifier, so claiming
-    /// it here would make `tauri dev` hand focus to the installed window and
-    /// exit instead of starting.
+    /// Both halves of the decision, in every combination, under whichever
+    /// profile the test binary happens to be built with.
     ///
-    /// The two profiles need separate assertions because `debug_assertions` is
-    /// itself one of the inputs: `cargo test` compiles this module with the
-    /// flag on and `cargo test --release` with it off, so a single assertion
-    /// can only ever hold under one of them. The release half is the one that
-    /// covers the profile the shipped artifacts are built with.
-    #[cfg(debug_assertions)]
+    /// A debug build must never claim the guard: it carries the same bundle
+    /// identifier as an installed release build, and the guard is keyed on that
+    /// identifier, so claiming it would make `tauri dev` hand focus to the
+    /// installed window and exit instead of starting. A release build claims it
+    /// only when the plugin's D-Bus address resolves, because the plugin
+    /// unwraps that address inside a setup hook and `panic = "abort"` turns the
+    /// failure into a silent exit.
     #[test]
-    fn a_debug_build_does_not_claim_the_guard() {
-        assert!(!single_instance_guard_applies());
-    }
-
-    /// A release build is the one that must hold the guard, and the address
-    /// check is the only thing allowed to withhold it. Off Linux that check is
-    /// a constant `true`, so there the assertion reads as "always claims it".
-    #[cfg(not(debug_assertions))]
-    #[test]
-    fn a_release_build_claims_the_guard_whenever_the_plugin_could_hold_it() {
-        assert_eq!(
-            single_instance_guard_applies(),
-            super::session_bus_is_addressable()
-        );
+    fn only_a_release_build_with_an_addressable_bus_claims_the_guard() {
+        assert!(guard_applies(false, true));
+        assert!(!guard_applies(false, false));
+        assert!(!guard_applies(true, true));
+        assert!(!guard_applies(true, false));
     }
 }
