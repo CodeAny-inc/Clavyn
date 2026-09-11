@@ -271,7 +271,10 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
   3. Picks the highest version that has a `latest.json` asset
   4. Builds a Tauri updater with that release's `latest.json` URL as the endpoint
   5. The plugin handles download, signature verification, and installation
-- App checks for updates on startup (release builds only, silent)
+- The renderer checks for updates on startup (`App.vue` `onMounted` →
+  `check_for_updates`) and on demand from Settings and the command palette.
+  That command is the only thing that reports availability; the backend does
+  not announce updates on its own.
 - Frontend shows `UpdateBanner` when an update is available
 - User clicks "Download & Restart" → downloads, verifies signature, installs, restarts
 - Signing key: private key is a GitHub secret (`TAURI_SIGNING_PRIVATE_KEY`),

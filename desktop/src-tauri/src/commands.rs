@@ -907,6 +907,10 @@ pub fn get_app_info(app: AppHandle) -> AppInfo {
 /// Unlike the default Tauri updater (which uses `releases/latest` and
 /// thus skips prereleases), this queries the GitHub API to find the
 /// newest release — including prereleases — and uses its `latest.json`.
+///
+/// This is the only path that reports availability: the renderer drives the
+/// check and owns the notification state, so the backend never announces an
+/// update on its own.
 #[tauri::command]
 pub async fn check_for_updates(
     app: AppHandle,
