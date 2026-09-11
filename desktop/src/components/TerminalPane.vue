@@ -10,6 +10,7 @@ import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
+import { useSettingsStore } from "../stores/settings";
 import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
@@ -28,6 +29,7 @@ const hosts = useHostsStore();
 const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
+const settings = useSettingsStore();
 const { maskAddress } = useMaskedAddress();
 const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
@@ -308,7 +310,11 @@ onMounted(async () => {
   term = new Terminal({ fontSize: 13,
     fontFamily: "'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'Roboto Mono', ui-monospace, monospace",
     theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
-    cursorBlink: true, scrollback: 10000, allowProposedApi: true });
+    cursorBlink: true, scrollback: 10000, allowProposedApi: true,
+    // Builds xterm's accessibility layer: its own row elements and a live
+    // region, read from the buffer rather than from whatever is drawing, so it
+    // works the same on the GPU renderer as on the DOM one.
+    screenReaderMode: settings.screenReaderMode });
   fitAddon = new FitAddon();
   searchAddon = new SearchAddon();
   term.loadAddon(fitAddon);
@@ -363,6 +369,11 @@ onMounted(async () => {
 // xterm's DOM renderer.
 watch([() => props.visible, isActive], ([visible, active], [wasVisible, wasActive]) => {
   if (term && ((visible && !wasVisible) || (active && !wasActive))) void acquireWebglRenderer(props.pane.id, term);
+});
+// Turning screen reader support on has to reach terminals that are already
+// open, or it would only apply to panes created afterwards.
+watch(() => settings.screenReaderMode, enabled => {
+  if (term) term.options.screenReaderMode = enabled;
 });
 onBeforeUnmount(() => {
   disposed = true;
