@@ -101,8 +101,25 @@ struct VaultPayload {
 /// deserializing it hands every private key to a fresh `String` on the heap
 /// that the plaintext's own wipe does not reach. A `String` also cannot be
 /// wiped through the shared reference the seal path holds, so the wipe lives on
-/// the value itself: any payload that goes out of scope takes its key material
-/// with it, on the success path and on every `?` alike.
+/// the value itself.
+///
+/// The guarantee is narrow: the `String` this value owns is zeroized when the
+/// value drops, on the success path and on every `?` alike. It is a reduction
+/// in how long key material stays readable, not an erasure of it, and two gaps
+/// stay open:
+///
+/// - Deserialization leaves a second copy behind. A PEM key always contains
+///   newlines, and JSON escapes those, so `serde_json` can never borrow the key
+///   straight out of the plaintext. It unescapes through the `SliceRead` scratch
+///   buffer and copies the key out of it. That buffer belongs to the
+///   deserializer, never reaches this type, and is freed unwiped.
+/// - `Drop` does not run when a panic unwinds past this value, because the
+///   release profile sets `panic = "abort"`. The wipe is skipped in exactly the
+///   case most likely to produce a crash dump.
+///
+/// Closing either gap requires keeping key material out of a plain `String` for
+/// the whole of its life, which is a deserialization strategy this type cannot
+/// impose on its own.
 #[derive(Serialize, Deserialize)]
 #[serde(transparent)]
 struct SecretText(String);
