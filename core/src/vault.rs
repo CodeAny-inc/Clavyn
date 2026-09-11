@@ -1,4 +1,4 @@
-use crate::keys::KeyMeta;
+use crate::keys::{public_identity, KeyMeta};
 use crate::{CoreError, Result};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -241,7 +241,7 @@ impl Vault {
         drop(plaintext);
         let salt = self.file.salt.clone();
         let epoch = self.next_epoch()?;
-        let keys_meta = self.file.keys_meta.clone();
+        let keys_meta = migrated_keys_meta(&self.file.keys_meta, &payload)?;
         self.seal_and_persist(key, salt, epoch, keys_meta, &payload)?;
         Ok(true)
     }
@@ -551,6 +551,44 @@ fn base64(b: impl AsRef<[u8]>) -> String {
 fn unbase64(s: &str) -> Result<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.decode(s).map_err(|e| CoreError::Vault(format!("b64: {e}")))
+}
+
+/// Key metadata for a vault being migrated, rebuilt from the private keys.
+///
+/// A v0 header is outside the tag, so anything in it may have been edited since
+/// the vault was written. Migration is the moment that header becomes
+/// authentic, so carrying it across unchanged would permanently bless whatever
+/// it says: an attacker who substitutes a public key and fingerprint in a
+/// legacy vault before its first unlock gets the application displaying and
+/// copying a key of their choosing under the victim's label, with the tag now
+/// vouching for it.
+///
+/// Everything the key determines is therefore read back from the key itself.
+/// The label is not derivable — nothing but the user supplies it — so it is
+/// carried across as the one field still taken on trust.
+///
+/// An entry with no private key behind it describes a key the vault cannot
+/// produce, so it is dropped rather than authenticated. A key whose public half
+/// cannot be read at all is refused: the caller treats that as a deferred
+/// migration and leaves the vault in the format it already has, which keeps
+/// working.
+fn migrated_keys_meta(legacy: &[KeyMeta], payload: &VaultPayload) -> Result<Vec<KeyMeta>> {
+    let mut migrated = Vec::with_capacity(legacy.len());
+    for meta in legacy {
+        let id = meta.id.to_string();
+        let Some((_, secret)) = payload.keys.iter().find(|(key_id, _)| key_id == &id) else {
+            continue;
+        };
+        let (key_type, fingerprint, public_key_base64) = public_identity(&secret.0)?;
+        migrated.push(KeyMeta {
+            id: meta.id,
+            label: meta.label.clone(),
+            key_type,
+            fingerprint,
+            public_key_base64,
+        });
+    }
+    Ok(migrated)
 }
 
 #[cfg(test)]
@@ -955,6 +993,123 @@ mod tests {
             .verify_passphrase("correct horse battery staple")
             .await
             .is_err());
+    }
+
+    /// The window this closes: a v0 header is outside the tag, so a public key
+    /// substituted there before the first unlock would be permanently vouched
+    /// for by the migration.
+    #[tokio::test]
+    async fn migration_takes_key_metadata_from_the_keys_not_the_legacy_header() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (mut meta, private) = a_key();
+        let (attacker, _) = a_key();
+        let honest_public_key = meta.public_key_base64.clone();
+        assert_ne!(honest_public_key, attacker.public_key_base64);
+
+        // What an attacker with write access to the file can do before it is
+        // ever unlocked: the label stays, the key underneath it does not.
+        meta.public_key_base64 = attacker.public_key_base64.clone();
+        meta.fingerprint = attacker.fingerprint.clone();
+        meta.label = "Production deploy key".to_string();
+        let key_id = meta.id.to_string();
+        write_unbound_vault(
+            &path,
+            "correct horse battery staple",
+            vec![(key_id.clone(), private.clone())],
+            vec![meta],
+        );
+
+        let mut vault = Vault::open(path.clone()).expect("open");
+        let key = vault
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("unlock");
+        assert!(vault.migrate_to_current_format(&key).expect("migrate"));
+        drop(vault);
+
+        let reopened = Vault::open(path).expect("reopen");
+        assert_eq!(reopened.format_version(), VAULT_FORMAT_VERSION);
+        let migrated = reopened.keys_meta();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(
+            migrated[0].public_key_base64, honest_public_key,
+            "the authenticated metadata must describe the key the vault holds"
+        );
+        assert_ne!(migrated[0].fingerprint, attacker.fingerprint);
+        // The label is the user's, not the key's, so it survives as written.
+        assert_eq!(migrated[0].label, "Production deploy key");
+
+        let reopened_key = reopened
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("the repaired vault still unlocks");
+        assert_eq!(
+            reopened.get_key_with(&reopened_key, &key_id).expect("key"),
+            private.as_bytes()
+        );
+    }
+
+    /// Metadata with no key behind it describes something the vault cannot
+    /// produce, so there is nothing to authenticate it against.
+    #[tokio::test]
+    async fn migration_drops_metadata_for_a_key_the_vault_does_not_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (meta, private) = a_key();
+        let (phantom, _) = a_key();
+        let key_id = meta.id.to_string();
+        let kept = meta.public_key_base64.clone();
+        write_unbound_vault(
+            &path,
+            "correct horse battery staple",
+            vec![(key_id, private)],
+            vec![meta, phantom],
+        );
+
+        let mut vault = Vault::open(path.clone()).expect("open");
+        let key = vault
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("unlock");
+        assert!(vault.migrate_to_current_format(&key).expect("migrate"));
+
+        let migrated = vault.keys_meta();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].public_key_base64, kept);
+    }
+
+    /// A key whose public half cannot be read has nothing to check its metadata
+    /// against. The migration is refused rather than run on trust, and because
+    /// callers treat that as deferred the vault keeps working in the format it
+    /// already has.
+    #[tokio::test]
+    async fn a_key_that_cannot_be_read_defers_the_migration_instead_of_trusting_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (meta, _) = a_key();
+        let key_id = meta.id.to_string();
+        write_unbound_vault(
+            &path,
+            "correct horse battery staple",
+            vec![(key_id.clone(), "not an openssh private key".to_string())],
+            vec![meta],
+        );
+
+        let mut vault = Vault::open(path.clone()).expect("open");
+        let key = vault
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("unlock");
+        assert!(vault.migrate_to_current_format(&key).is_err());
+
+        assert_eq!(vault.format_version(), 0);
+        let reopened = Vault::open(path).expect("reopen");
+        assert_eq!(reopened.format_version(), 0);
+        assert!(reopened
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .is_ok());
     }
 
     #[tokio::test]
