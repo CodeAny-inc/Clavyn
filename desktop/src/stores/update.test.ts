@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { listen } from "@tauri-apps/api/event";
+import * as api from "../api";
 import { setInvokeHandler, getInvokeMock } from "../test/setup";
 import { useUpdateStore } from "./update";
 
@@ -71,8 +72,19 @@ describe("update store", () => {
 
     await store.registerListeners();
 
-    const events = vi.mocked(listen).mock.calls.map(call => call[0]);
-    expect(events).toEqual(["update-progress", "update-extracting"]);
+    // Sorted, because which of the two the store subscribes to first is not a
+    // property worth pinning — the set is.
+    const events = vi.mocked(listen).mock.calls.map(call => call[0]).sort();
+    expect(events).toEqual(["update-extracting", "update-progress"]);
+
+    // The store is not the only place an availability listener could reappear:
+    // every event subscription in the app goes through a helper in `api`, so
+    // pin that surface too. This catches a re-added `onUpdateAvailable` even
+    // before anything calls it.
+    const updateHelpers = Object.keys(api)
+      .filter(name => name.startsWith("onUpdate"))
+      .sort();
+    expect(updateHelpers).toEqual(["onUpdateExtracting", "onUpdateProgress"]);
   });
 
   it("checks once while a check is already in flight", async () => {
