@@ -15,8 +15,10 @@ russh = "0.46"
 russh-keys = "0.46"
 # Enumerate the runtime pieces Clavyn and its dependencies actually use. `full`
 # additionally compiles the process, signal and io-std drivers, none of which
-# any crate in this workspace requires. `net` is listed explicitly because
-# russh drives TCP through tokio without declaring the feature itself.
+# any crate in this workspace requires. `net` would be switched on regardless by
+# russh-keys, reqwest, tokio-stream and hyper-util, but we still name it here so
+# the SSH transport keeps compiling if any of those drop it or stop being
+# reachable from the graph.
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

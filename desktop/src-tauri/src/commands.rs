@@ -507,10 +507,16 @@ pub async fn session_write(
     Err("session not found".into())
 }
 
-/// Narrow a webview-supplied terminal dimension to the `u16` the PTY layer
-/// takes. A plain `as` cast wraps, so a caller asking for 65536 columns would
-/// silently get a 0-column PTY; reject anything outside the usable range
+/// Narrow a webview-supplied terminal dimension to the `u16` the local PTY
+/// layer takes. A plain `as` cast wraps, so a caller asking for 65536 columns
+/// would silently get a 0-column PTY; reject anything outside the usable range
 /// instead.
+///
+/// SSH sessions need the same gate for a different reason: russh does not
+/// validate or clamp a window-change request, it just writes the `u32` onto the
+/// wire, so an absurd geometry is forwarded to the remote host verbatim and
+/// whatever it does with it is out of our hands. Both transports go through
+/// here so one caller-supplied value cannot mean two different things.
 fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
     const MAX_PTY_DIMENSION: u16 = 10_000;
     match u16::try_from(value) {
@@ -528,16 +534,20 @@ pub async fn session_resize(
     cols: u32,
     rows: u32,
 ) -> ApiResult<()> {
+    let cols = pty_dimension("cols", cols)?;
+    let rows = pty_dimension("rows", rows)?;
     // Try SSH session first
     if state.sessions.list().await.contains(&session_id) {
-        return state.sessions.resize(&session_id, cols, rows).await.map_err(err);
+        return state
+            .sessions
+            .resize(&session_id, cols.into(), rows.into())
+            .await
+            .map_err(err);
     }
     // Try local terminal
     let locals = state.local_terminals.lock().await;
     if let Some(term) = locals.get(&session_id) {
         use portable_pty::PtySize;
-        let rows = pty_dimension("rows", rows)?;
-        let cols = pty_dimension("cols", cols)?;
         term.master
             .resize(PtySize {
                 rows,
@@ -1030,5 +1040,19 @@ mod pty_dimension_tests {
     fn rejects_zero_and_oversized_dimensions() {
         assert!(pty_dimension("rows", 0).is_err());
         assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `session_resize` widens the checked value back to the `u32` russh puts on
+    // the wire, so the SSH path can only ever emit a geometry this helper
+    // accepted. Nothing else bounds it: russh forwards the number unchanged.
+    #[test]
+    fn checked_dimensions_widen_back_into_the_ssh_range() {
+        for value in [1_u32, 80, 24, 10_000] {
+            let checked: u32 = pty_dimension("cols", value).unwrap().into();
+            assert_eq!(checked, value);
+        }
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(pty_dimension("cols", value).is_err(), "accepted {value}");
+        }
     }
 }
