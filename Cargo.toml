@@ -20,7 +20,7 @@ thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 zeroize = { version = "1", features = ["derive"] }
-argon2 = "0.5"
+argon2 = "0.6"
 aes-gcm = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
