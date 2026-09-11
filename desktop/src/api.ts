@@ -57,9 +57,23 @@ export const readKeyFile = (path: string) => invoke<string>("read_key_file", { p
  */
 export type SessionOutput = Channel<ArrayBuffer>;
 
-export function sessionOutput(onData: (bytes: Uint8Array) => void): SessionOutput {
+/**
+ * Opens a sink for one session.
+ *
+ * A batch is never empty, so the backend marks the end of the stream with a
+ * zero-length frame. It rides the channel's own ordering index, which means it
+ * is delivered behind every batch already sent — including a batch large enough
+ * to take the asynchronous transport route. `onEnd` is therefore the only
+ * signal that says no more output is coming; the `session-closed` event carries
+ * no index and can overtake output that is still in flight.
+ */
+export function sessionOutput(onData: (bytes: Uint8Array) => void, onEnd: () => void): SessionOutput {
   const channel: SessionOutput = new Channel();
-  channel.onmessage = (message) => onData(new Uint8Array(message));
+  channel.onmessage = (message) => {
+    const bytes = new Uint8Array(message);
+    if (bytes.length === 0) onEnd();
+    else onData(bytes);
+  };
   return channel;
 }
 

@@ -1,7 +1,7 @@
 use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
-use crate::output::{OutputBatcher, FINAL_PIECE};
+use crate::output::OutputBatcher;
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
@@ -146,12 +146,11 @@ impl SessionManager {
                                 }
                             }
                             Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                                // Trailing output belongs to this session, and
-                                // must reach the UI ahead of the close.
-                                for piece in batcher.batch().chunks(FINAL_PIECE) {
-                                    data_cb(&sid, piece);
-                                }
-                                batcher.mark_flushed(Instant::now());
+                                // Trailing output belongs to this session, so it
+                                // is handed over before the close is announced.
+                                // The UI transport is what keeps the two in
+                                // order; see `AppState::init`.
+                                flush(&mut batcher);
                                 close_cb(&sid, "session closed");
                                 break;
                             }

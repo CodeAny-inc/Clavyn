@@ -52,8 +52,17 @@ let listenerSetup: Promise<boolean> | null = null;
 let currentSessionId: string | null = null;
 let disposed = false;
 let sessionEnded = false;
+// The close notification and the session's output travel on different
+// transports, so "the session ended" and "its output has all arrived" are two
+// facts and the second can land last. Writes stop on the first; the transcript
+// is only finished by the second.
+let streamEnded = false;
+let closeReason: string | null = null;
 // Buffer remote output, never user input, until this attempt can answer queries.
 let pendingOutput: Uint8Array[] | null = null;
+// Output still arriving after the close notification, held so the trailing
+// bytes are written before the closed banner rather than after it.
+let tailOutput: Uint8Array[] | null = null;
 const listenersReady = ref(false);
 const listenerSetupPending = ref(false);
 const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
@@ -139,6 +148,19 @@ function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
 }
+// Closes out the transcript once both halves of the ending are known: why the
+// session ended, and that its output has stopped arriving. Whichever lands
+// second does the writing, so the trailing bytes are never dropped and never
+// appear after the banner.
+function finishClose() {
+  if (!streamEnded || closeReason === null) return;
+  const output = tailOutput;
+  tailOutput = null;
+  for (const chunk of output ?? []) term?.write(chunk);
+  const reason = closeReason;
+  closeReason = null;
+  writeError(`Session closed: ${reason}`);
+}
 async function ensureListeners(): Promise<boolean> {
   if (disposed) return false;
   if (listenersReady.value) return true;
@@ -153,11 +175,12 @@ async function ensureListeners(): Promise<boolean> {
           tabs.setPaneDisconnected(props.pane.id);
           // EOF does not invalidate diagnostics already received from this owner.
           // Disable writes before parsing them: queries must not reply to a dead
-          // session. Reconnect still drains this queue before resetting xterm.
-          const output = pendingOutput;
+          // session. Take ownership of anything this attempt has buffered so a
+          // connection still settling cannot discard it.
+          tailOutput = [...(pendingOutput ?? [])];
           pendingOutput = null;
-          for (const chunk of output ?? []) term?.write(chunk);
-          writeError(`Session closed: ${event.reason}`);
+          closeReason = event.reason;
+          finishClose();
         }
       });
       staged.push(closeListener);
@@ -190,13 +213,23 @@ async function connectSession() {
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
   sessionEnded = false;
+  streamEnded = false;
+  closeReason = null;
+  tailOutput = null;
   pendingOutput = [];
   // The sink belongs to this attempt, so a superseded attempt's output can
-  // never reach the emulator even before its session is torn down.
+  // never reach the emulator even before its session is torn down. Bytes keep
+  // being accepted until the sink itself reports the end of the stream: the
+  // close notification does not travel with them and can arrive first.
   const outputSink = api.sessionOutput(data => {
-    if (disposed || props.pane.closing || sessionEnded || currentSessionId !== sessionId) return;
-    if (pendingOutput) pendingOutput.push(data);
+    if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
+    if (sessionEnded) tailOutput?.push(data);
+    else if (pendingOutput) pendingOutput.push(data);
     else if (props.pane.connected) term?.write(data);
+  }, () => {
+    if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
+    streamEnded = true;
+    finishClose();
   });
   let endpointForAttempt = "Local shell";
   try {
@@ -358,6 +391,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true;
   pendingOutput = null;
+  tailOutput = null;
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();

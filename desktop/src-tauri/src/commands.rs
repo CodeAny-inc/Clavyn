@@ -1,8 +1,8 @@
-use crate::state::{AppState, LocalTerminal, OutputSink};
+use crate::state::{end_of_output, AppState, LocalTerminal, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
-use clavyn_core::output::{OutputBatcher, FINAL_PIECE};
+use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
 use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
@@ -495,10 +495,11 @@ pub async fn create_local_terminal(
                 }
                 Err(RecvTimeoutError::Timeout) => deliver(&mut batcher),
                 Err(RecvTimeoutError::Disconnected) => {
-                    // Trailing output must reach the UI ahead of the close.
-                    for piece in batcher.batch().chunks(FINAL_PIECE) {
-                        let _ = on_output.send(InvokeResponseBody::Raw(piece.to_vec()));
-                    }
+                    // Trailing output belongs to this session: hand it over,
+                    // then end the stream on the same sink so the frontend
+                    // learns that nothing follows it.
+                    deliver(&mut batcher);
+                    let _ = on_output.send(end_of_output());
                     break;
                 }
             }
@@ -581,7 +582,10 @@ pub async fn close_session(
     state: State<'_, Arc<AppState>>,
     session_id: String,
 ) -> ApiResult<()> {
-    state.release_output(&session_id);
+    // The sink stays registered: tearing the session down makes its task reach
+    // EOF, and that path is what delivers the trailing output and ends the
+    // stream. Releasing it here would drop the sink first and discard the tail,
+    // which also happens on the reconnect path.
     // Try SSH session
     if state.sessions.list().await.contains(&session_id) {
         return state.sessions.close(&session_id).await.map_err(err);

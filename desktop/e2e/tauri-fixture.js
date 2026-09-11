@@ -17,20 +17,39 @@
   const state = {
     calls: [], connects: [], closes: [], writes: [], live: {}, pending: [],
     holdNext: false, failNext: false,
+    // Frames waiting on the asynchronous delivery route, and the switch that
+    // puts them there.
+    holdOutput: false, heldFrames: [],
     emit(event, payload) {
       for (const [id, entry] of listeners) if (entry.event === event)
         callbacks.get(entry.handler)?.({ event, id, payload });
     },
     output(id, text) {
+      state.frame(id, new TextEncoder().encode(text).buffer);
+    },
+    frame(id, payload) {
       const sink = sinks.get(id);
       const deliver = sink && callbacks.get(sink.id);
       if (!deliver) return;
       // Matches the backend payload: raw bytes, carrying the ordering index the
       // channel uses to reassemble them.
-      deliver({ message: new TextEncoder().encode(text).buffer, index: sink.index++ });
+      const frame = { message: payload, index: sink.index++ };
+      // Tauri fetches a frame of 1024 bytes or more instead of evaluating it
+      // inline, so it can still be in flight while a later, smaller frame is
+      // already being evaluated. `releaseOutput` is that fetch completing.
+      if (state.holdOutput && payload.byteLength >= 1024) state.heldFrames.push(() => deliver(frame));
+      else deliver(frame);
     },
+    releaseOutput() { state.heldFrames.splice(0).forEach(deliver => deliver()); },
     release() { state.pending.splice(0).forEach(resolve => resolve()); },
-    disconnect(id) { delete state.live[id]; state.emit("session-closed", { session_id: id, reason: "Fixture disconnect" }); },
+    disconnect(id) {
+      delete state.live[id];
+      // A batch is never empty, so the zero-length frame is the end of the
+      // stream. It goes out on the sink, ahead of the event, the way the
+      // backend sends it.
+      state.frame(id, new ArrayBuffer(0));
+      state.emit("session-closed", { session_id: id, reason: "Fixture disconnect" });
+    },
   };
   window.__terminalTest = state;
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };

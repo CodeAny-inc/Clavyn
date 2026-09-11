@@ -21,6 +21,18 @@ use tokio::sync::Mutex;
 /// bytes only to discard them.
 pub type OutputSink = Channel<InvokeResponseBody>;
 
+/// Frame that marks the end of a session's output stream.
+///
+/// A batch is never empty, so a zero-length payload is unambiguous. It travels
+/// on the session's own sink, which stamps every frame with an index and holds
+/// a frame back until its predecessors have been delivered; that is what keeps
+/// the end of the stream behind the last batch even when the batch is large
+/// enough to take the transport's asynchronous route. The `session-closed`
+/// event carries no index and cannot provide that ordering on its own.
+pub fn end_of_output() -> InvokeResponseBody {
+    InvokeResponseBody::Raw(Vec::new())
+}
+
 /// Registry of live output sinks, keyed by session id.
 ///
 /// Guarded by a blocking mutex because the core data callback is synchronous.
@@ -107,10 +119,13 @@ impl AppState {
         let sinks = output_sinks.clone();
         let app_handle = app.clone();
         let close_callback = Arc::new(move |sid: &str, reason: &str| {
-            // Drop the sink first: the frontend stops accepting output for a
-            // session the moment it is told the session ended.
-            if let Ok(mut map) = sinks.lock() {
-                map.remove(sid);
+            // End the stream on the sink itself before announcing the close, so
+            // the frontend can tell a batch that is still in flight from one
+            // that will never arrive. The event that follows says why the
+            // session ended; the frame says that nothing more is coming.
+            let sink = sinks.lock().ok().and_then(|mut map| map.remove(sid));
+            if let Some(sink) = sink {
+                let _ = sink.send(end_of_output());
             }
             let _ = app_handle.emit(
                 "session-closed",

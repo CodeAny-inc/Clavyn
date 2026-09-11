@@ -11,20 +11,13 @@ use std::time::{Duration, Instant};
 /// added to output that arrives while a batch is already in flight.
 pub const FLUSH_WINDOW: Duration = Duration::from_millis(6);
 
-/// Largest batch handed over in one piece. Caps the memory a stalled UI layer
-/// can hold per batch, and stays far enough above the size at which transports
-/// switch from an inline literal to a binary payload that a full batch always
-/// takes the binary path.
+/// Size at which a batch is due for delivery. The check happens after a chunk
+/// has been appended, so a released batch is at least this large and at most
+/// this size plus the last chunk. Caps the memory a stalled UI layer can hold
+/// per batch, and stays far enough above the size at which transports switch
+/// from an inline literal to a binary payload that a full batch always takes
+/// the binary path.
 pub const MAX_BATCH: usize = 64 * 1024;
-
-/// Largest piece the last batch of a session is split into.
-///
-/// A batch above this size is handed to the UI layer over an asynchronous
-/// transport, which can land after the close notification that follows it and
-/// lose the tail of the session's output. Pieces this small are delivered
-/// inline, in order with that notification. The split costs a handful of extra
-/// messages once per session, and only at close.
-pub const FINAL_PIECE: usize = 1023;
 
 /// Accumulates terminal output into batches.
 ///
@@ -235,25 +228,26 @@ mod tests {
     }
 
     #[test]
-    fn a_final_batch_splits_into_ordered_pieces() {
+    fn a_partial_batch_is_available_for_a_final_flush() {
         let start = Instant::now();
         let mut batcher = OutputBatcher::new(start);
         let now = idle_after(start);
         assert!(batcher.push(b"$ ", now));
         batcher.mark_flushed(now);
 
+        // What EOF hands over: whatever is buffered, in one piece, whether or
+        // not the window has elapsed.
         let tail: Vec<u8> = (0..MAX_BATCH - 1).map(|i| i as u8).collect();
         assert!(!batcher.push(&tail, now + Duration::from_micros(1)));
-
-        let pieces: Vec<&[u8]> = batcher.batch().chunks(FINAL_PIECE).collect();
-        assert!(pieces.iter().all(|piece| piece.len() <= FINAL_PIECE));
-        assert_eq!(pieces.concat(), tail);
+        assert!(!batcher.is_empty());
+        assert_eq!(batcher.batch(), tail.as_slice());
     }
 
     #[test]
-    fn a_final_batch_of_nothing_produces_no_pieces() {
+    fn an_empty_batch_reports_nothing_to_flush() {
         let batcher = OutputBatcher::new(Instant::now());
-        assert_eq!(batcher.batch().chunks(FINAL_PIECE).count(), 0);
+        assert!(batcher.is_empty());
+        assert!(batcher.batch().is_empty());
     }
 
     #[test]

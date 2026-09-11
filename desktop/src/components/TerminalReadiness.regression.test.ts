@@ -6,7 +6,7 @@ import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
-import { emitSessionOutput, emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { deliverHeldSessionOutput, emitSessionClosed, emitSessionOutput, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
 const terminals = vi.hoisted(() => ({ instances: [] as Array<{
@@ -55,7 +55,7 @@ function output(id: string, text: string) {
   emitSessionOutput(id, text);
 }
 function closed(id: string) {
-  emitTauriEvent("session-closed", { session_id: id, reason: "fixture EOF" });
+  emitSessionClosed(id);
 }
 function writes() { return getInvokeMock().mock.calls.filter(([cmd]) => cmd === "session_write"); }
 function deferConnection(command: string) {
@@ -160,6 +160,39 @@ describe("connection output readiness", () => {
     terminals.instances[0].input("NO_WRITE_AFTER_EOF");
     expect(terminals.instances[0].output).toEqual(expected);
     expect(writes()).toHaveLength(beforeCloseWrites);
+  });
+
+  it.each(["connect_ssh", "create_local_terminal"])("renders a %s batch still in flight when the close arrives", async command => {
+    const pending = deferConnection(command);
+    const saved = host("atlas");
+    useHostsStore().hosts = [saved];
+    const tab = useTabsStore().newTab(command === "connect_ssh" ? saved : undefined);
+    const pane = collectPanes(tab.tree)[0];
+    const wrapper = render();
+    await vi.waitFor(() => expect(pending.id).not.toBe(""));
+    pending.resolve();
+    await vi.waitFor(() => expect(pane.connected).toBe(true));
+    const before = [...terminals.instances[0].output];
+    // `cat bigfile; exit`. A full batch is over the size at which the transport
+    // stops evaluating frames inline and fetches them instead, so it is still
+    // in flight when the session ends — and because the batch left on the size
+    // cap, nothing trails it that could arrive inline in its place.
+    const bulk = "B".repeat(64 * 1024);
+    output(pending.id, bulk);
+    expect(terminals.instances[0].output).toEqual(before);
+    closed(pending.id);
+    await nextTick();
+    // The close notification overtakes the batch. Nothing is written off it:
+    // the transcript is not finished while the session's output is in flight.
+    expect(terminals.instances[0].output).toEqual(before);
+    expect(pane.connected).toBe(false);
+    deliverHeldSessionOutput(pending.id);
+    await vi.waitFor(() => expect(wrapper.get('[role="alert"] button').attributes("disabled")).toBeUndefined());
+    expect(terminals.instances[0].output).toEqual([...before, bulk, "\r\n\x1b[31mSession closed: fixture EOF\x1b[0m\r\n"]);
+    // Whatever the channel delivers past the end of the stream is still refused.
+    output(pending.id, "LATE_OUTPUT");
+    deliverHeldSessionOutput(pending.id);
+    expect(terminals.instances[0].output).toEqual([...before, bulk, "\r\n\x1b[31mSession closed: fixture EOF\x1b[0m\r\n"]);
   });
 
   it.each(["connect_ssh", "create_local_terminal"])("isolates an early-closed %s attempt from its replacement", async command => {

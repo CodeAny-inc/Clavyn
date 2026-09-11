@@ -260,6 +260,25 @@ try {
       }, "held");
     }
   }
+  await scenario("close-tail-in-flight", async page => {
+    const id = await atlas(page);
+    await page.evaluate(id => {
+      // `cat bigfile; exit`. The batch is over the size at which the transport
+      // stops evaluating frames inline, so it is still being fetched when the
+      // session ends; the resets pad it on the wire without printing anything.
+      window.__terminalTest.holdOutput = true;
+      window.__terminalTest.output(id, `${"\x1b[0m".repeat(300)}TAIL_IN_FLIGHT_SURVIVES\r\n`);
+      window.__terminalTest.disconnect(id);
+    }, id);
+    await page.waitForTimeout(150);
+    assert.doesNotMatch(await transcript(page, "atlas"), /Session closed:/, "Close waits for output still in flight");
+    await page.evaluate(() => window.__terminalTest.releaseOutput());
+    await visibleText(page, "atlas", "Session closed: Fixture disconnect");
+    const text = await transcript(page, "atlas");
+    assert.ok(text.includes("TAIL_IN_FLIGHT_SURVIVES"), "Trailing batch survives the close");
+    assert.ok(text.indexOf("TAIL_IN_FLIGHT_SURVIVES") < text.indexOf("Session closed:"), "Trailing batch precedes the close status");
+    assert.equal(await pane(page, "atlas").getAttribute("data-connected"), "false");
+  });
 } finally {
   await writeFile(`${output}/keyboard-close-results.json`, JSON.stringify(results, null, 2));
   await browser.close();
