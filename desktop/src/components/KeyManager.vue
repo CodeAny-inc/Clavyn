@@ -246,7 +246,7 @@ async function browseForKeyFile() {
               v-model="addForm.privateKey"
               :rows="6"
               placeholder="-----BEGIN OPENSSH PRIVATE KEY-----... or click Browse to select a file"
-              class="font-mono text-[11px]"
+              class="font-mono !text-[11px]"
             />
           </FormGroup>
           <FormGroup>

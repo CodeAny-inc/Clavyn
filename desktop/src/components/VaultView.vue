@@ -457,7 +457,7 @@ const showBiometricButton = computed(
               <Button
                 variant="outline"
                 size="sm"
-                class="text-destructive border-destructive/30 hover:bg-destructive/5"
+                class="!text-destructive border-destructive/30 hover:!bg-destructive/5"
                 @click="resetMode = true"
               >
                 <Trash2 class="size-3.5" :stroke-width="1.75" />

@@ -523,7 +523,7 @@ function hostsUsingIdentity(identityId: string): number {
                 v-model="importKeyText"
                 :rows="5"
                 placeholder="-----BEGIN OPENSSH PRIVATE KEY-----... or click Browse"
-                class="font-mono text-[11px]"
+                class="font-mono !text-[11px]"
               />
             </FormGroup>
             <FormGroup>
