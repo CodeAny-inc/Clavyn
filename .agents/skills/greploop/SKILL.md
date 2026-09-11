@@ -102,7 +102,16 @@ Wait for checks to start after push/shelve:
 sleep 5
 ```
 
-**GitHub** — check if Greptile is already running before posting a new trigger comment. Count matches rather than reading a single state — a commit can have several Greptile check runs (e.g. a completed older run plus a new one), and a multiline value breaks scalar comparisons:
+**GitHub** — first resolve the head SHA and record a creation-time boundary,
+**before** checking for an existing run or posting any review request. Any run
+created while those commands execute then counts as new:
+
+```bash
+HEAD_SHA=$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)
+TRIGGERED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+```
+
+Then check if Greptile is already running before posting a new trigger comment. Count matches rather than reading a single state — a commit can have several Greptile check runs (e.g. a completed older run plus a new one), and a multiline value breaks scalar comparisons:
 
 ```bash
 GREPTILE_RUNNING=$(gh pr checks <PR_NUMBER> --json name,state \
@@ -117,13 +126,13 @@ if [ "$GREPTILE_RUNNING" = "0" ]; then
 fi
 ```
 
-Then poll for the Greptile check run to complete. Record a creation-time boundary
-beforehand and poll only runs created at/after it — otherwise an older completed
-run on the same commit satisfies the poll before the new review starts:
+Then poll for the Greptile check run to complete. Accept only runs created
+at/after the boundary **or** still in progress: the first condition excludes
+older completed runs that would falsely satisfy the poll, while the second
+retains the already-running run detected above (it was created before the
+boundary, and no new request was posted for it):
 
 ```bash
-HEAD_SHA=$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)
-TRIGGERED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ATTEMPTS=0
 MAX_ATTEMPTS=60
 POLL_INTERVAL_SECONDS=10
@@ -137,7 +146,7 @@ while true; do
 
   GREPTILE_CHECK=$(gh api "repos/{owner}/{repo}/commits/$HEAD_SHA/check-runs" \
     | jq --arg triggered_at "$TRIGGERED_AT" \
-      '[.check_runs[] | select(.name | test("greptile"; "i")) | select(.created_at >= $triggered_at)] | sort_by(.created_at) | last // empty' 2>/dev/null)
+      '[.check_runs[] | select(.name | test("greptile"; "i")) | select(.created_at >= $triggered_at or .status != "completed")] | sort_by(.created_at) | last // empty' 2>/dev/null)
 
   if [ -z "$GREPTILE_CHECK" ]; then
     echo "Waiting for Greptile check to appear..."
