@@ -1,5 +1,10 @@
 name: CI
 
+# Adding a trigger here means revisiting the self-hosted runner gate on the
+# jobs below. That gate asks whether a pull request is in play and whether its
+# head repository is this one, so it already covers `pull_request_target`. A
+# trigger that carries fork-authored code without a `pull_request` payload —
+# `issue_comment` on a pull request, or `workflow_run` — would slip past it.
 on:
   push:
     branches: [main]
@@ -16,13 +21,35 @@ jobs:
   #   ["self-hosted","linux","clavyn"]
   # and the Linux jobs below will use the self-hosted runner instead.
   # macOS jobs always use GitHub-hosted (no macOS self-hosted runner).
+  #
+  # The variable is honoured when no pull request is in play, and for pull
+  # requests raised from a branch of this repository. A pull request from a
+  # fork always lands on a GitHub-hosted runner, whatever the variable says:
+  # these jobs execute code from the pull request (build.rs during
+  # `cargo check`, package install scripts, `vite.config.ts`, Vitest suites).
+  # An ephemeral runner contains that; a persistent one hands the author a
+  # foothold that outlives the job.
+  #
+  # The gate keys off the head repository rather than off the event name, so a
+  # `pull_request_target` trigger added later cannot quietly reopen it. A head
+  # repository that no longer exists reads as null, which does not match this
+  # repository, so a deleted fork also stays GitHub-hosted.
   rust-check:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The Cargo workspace root is the repository root (members: core,
+          # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
+          # at desktop/src-tauri caches a directory that never exists, which
+          # leaves every run recompiling from scratch.
+          workspaces: ". -> target"
       - name: Install Linux dependencies
         run: |
           # The Google Chrome apt repo pre-installed on GitHub-hosted runners can
@@ -70,10 +97,21 @@ jobs:
   macos-rust-build:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          # No `shared-key`: the automatic key carries the job id plus the
+          # runner OS and architecture, so this job holds its own entry and
+          # never restores the Linux target directory that `rust-check` saves.
+          # The `macos-biometric` feature needs no key of its own — both
+          # feature sets are built in this one job, and cargo's fingerprints
+          # already keep their artifacts apart inside the target directory.
       - name: Cargo build (macOS shipping defaults)
         run: cargo build --workspace
       - name: Cargo build (macOS biometric implementation)
@@ -82,15 +120,24 @@ jobs:
         run: cargo test -p clavyn-desktop --features macos-biometric
 
   security-audit:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
+      # This job deliberately carries no Rust cache. It compiles none of the
+      # workspace, so there is no target directory worth keeping; all a cache
+      # would restore is `cargo-audit` itself and the registry index it
+      # resolves against. Cache entries are written by earlier runs and read
+      # across branches, and an audit that runs a restored binary reports on
+      # whatever that binary decides. The tool that judges the dependencies is
+      # built fresh, every run.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit Rust dependencies
@@ -98,19 +145,38 @@ jobs:
       - name: Audit npm production dependencies
         working-directory: desktop
         run: npm audit --omit=dev --audit-level=high
+      - name: Report npm development advisories
+        # `--omit=dev` hides everything that only a developer machine runs, and
+        # a developer machine on this project holds the release signing key and
+        # the SSH vault. The full desktop tree currently carries advisories that
+        # only a vite/vitest major clears, so this step reports without gating —
+        # a gate that is red on the day it lands teaches everyone to skip it.
+        continue-on-error: true
+        working-directory: desktop
+        run: npm audit --audit-level=moderate
+      - name: Audit browser test dependencies
+        # This tree is clean today, so it gates: it holds the line rather than
+        # announcing a backlog.
+        working-directory: desktop/e2e
+        run: npm audit --audit-level=high
 
   frontend-build:
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-latest"') || '"ubuntu-latest"') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
       - name: Install dependencies
         working-directory: desktop
-        run: npm ci
+        # A lockfile entry with an install hook is arbitrary code that runs
+        # here, in this job's workspace, ahead of every step that follows.
+        # Nothing in this tree needs those hooks:
+        # esbuild resolves its binary through its platform optional dependency
+        # and vue-demi's shim already targets Vue 3.
+        run: npm ci --ignore-scripts
       - name: Typecheck
         working-directory: desktop
         run: npx vue-tsc --noEmit
