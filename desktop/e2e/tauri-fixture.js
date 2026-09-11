@@ -1,6 +1,17 @@
 // Test-only transport injected by Playwright. Never imported by the application.
 // These hosts are fixtures, not real infrastructure or credentials.
 (() => {
+  // Scenarios read a pane's transcript out of `.xterm-rows`, which exists only
+  // under xterm's DOM renderer — the GPU renderer draws to a canvas instead.
+  // Reporting no WebGL2 puts every pane on the DOM renderer, which is the same
+  // path a machine without WebGL2 takes. `terminal-gpu-renderer.mjs` sets
+  // `window.__clavynAllowWebgl` first to exercise the GPU renderer instead.
+  if (!window.__clavynAllowWebgl) {
+    const getContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (kind, ...rest) {
+      return kind === "webgl2" ? null : getContext.call(this, kind, ...rest);
+    };
+  }
   const hosts = [
     { id: "atlas", label: "Atlas Production", hostname: "atlas.example.test", port: 22, username: "deploy", auth: "agent", tags: ["fixture"] },
     { id: "orion", label: "Orion Staging", hostname: "orion.example.test", port: 22, username: "deploy", auth: "agent", tags: ["fixture"] },

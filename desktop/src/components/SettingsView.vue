@@ -20,6 +20,7 @@ import {
   Lock,
   Clock,
   EyeOff,
+  Accessibility,
 } from "lucide-vue-next";
 
 const update = useUpdateStore();
@@ -194,6 +195,38 @@ function openReleases() {
               <span
                 class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
                 :class="settings.maskAddresses ? 'translate-x-6' : 'translate-x-1'"
+              />
+            </button>
+          </div>
+        </section>
+
+        <section class="rounded-lg border border-border bg-card p-4 sm:p-5">
+          <h3 class="text-[14px] font-semibold mb-4 flex items-center gap-2">
+            <Accessibility class="size-4 text-muted-foreground" :stroke-width="1.75" />
+            Accessibility
+          </h3>
+
+          <div class="flex items-center gap-3">
+            <div class="flex h-9 w-9 items-center justify-center rounded-md bg-muted shrink-0">
+              <Accessibility class="size-4 text-muted-foreground" :stroke-width="1.75" />
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium">Screen reader support</div>
+              <div class="text-[11px] text-muted-foreground mt-0.5">
+                Announces terminal output and makes the visible rows readable by a screen reader. Terminals draw their rows for the eye, so without this there is nothing for assistive technology to read. Costs a little memory per terminal.
+              </div>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="settings.screenReaderMode"
+              class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
+              :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted'"
+              @click="settings.setScreenReaderMode(!settings.screenReaderMode)"
+            >
+              <span
+                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
+                :class="settings.screenReaderMode ? 'translate-x-6' : 'translate-x-1'"
               />
             </button>
           </div>
