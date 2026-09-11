@@ -395,11 +395,14 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
+    let rows = pty_dimension("rows", rows.unwrap_or(24))?;
+    let cols = pty_dimension("cols", cols.unwrap_or(80))?;
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: rows.unwrap_or(24) as u16,
-            cols: cols.unwrap_or(80) as u16,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -507,6 +510,30 @@ pub async fn session_write(
     Err("session not found".into())
 }
 
+/// Narrow a webview-supplied terminal dimension to the `u16` the local PTY
+/// layer takes. A plain `as` cast wraps, so a caller asking for 65536 columns
+/// would silently get a 0-column PTY; reject anything outside the usable range
+/// instead.
+///
+/// SSH sessions need the same gate for a different reason: russh does not
+/// validate or clamp a window-change request, it just writes the `u32` onto the
+/// wire, so an absurd geometry is forwarded to the remote host verbatim and
+/// whatever it does with it is out of our hands. Both transports go through
+/// here so one caller-supplied value cannot mean two different things.
+///
+/// Creation goes through it too. Bounding only the resize path would leave the
+/// wrap reachable on the first geometry a session ever gets, which is the one
+/// the caller chooses outright.
+fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
+    const MAX_PTY_DIMENSION: u16 = 10_000;
+    match u16::try_from(value) {
+        Ok(dimension) if (1..=MAX_PTY_DIMENSION).contains(&dimension) => Ok(dimension),
+        _ => Err(format!(
+            "{name} out of range: {value} (expected 1..={MAX_PTY_DIMENSION})"
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn session_resize(
     state: State<'_, Arc<AppState>>,
@@ -514,9 +541,15 @@ pub async fn session_resize(
     cols: u32,
     rows: u32,
 ) -> ApiResult<()> {
+    let cols = pty_dimension("cols", cols)?;
+    let rows = pty_dimension("rows", rows)?;
     // Try SSH session first
     if state.sessions.list().await.contains(&session_id) {
-        return state.sessions.resize(&session_id, cols, rows).await.map_err(err);
+        return state
+            .sessions
+            .resize(&session_id, cols.into(), rows.into())
+            .await
+            .map_err(err);
     }
     // Try local terminal
     let locals = state.local_terminals.lock().await;
@@ -524,8 +557,8 @@ pub async fn session_resize(
         use portable_pty::PtySize;
         term.master
             .resize(PtySize {
-                rows: rows as u16,
-                cols: cols as u16,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -634,29 +667,6 @@ pub async fn sftp_canonicalize(
     state
         .sftp
         .canonicalize(&session_id, &path)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn sftp_read_file(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    path: String,
-) -> ApiResult<Vec<u8>> {
-    state.sftp.read_file(&session_id, &path).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn sftp_write_file(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    path: String,
-    data: Vec<u8>,
-) -> ApiResult<()> {
-    state
-        .sftp
-        .write_file(&session_id, &path, &data)
         .await
         .map_err(err)
 }
@@ -1011,5 +1021,62 @@ mod ssh_connection_info_tests {
     fn rejects_changed_identity_before_a_network_connection_can_start() {
         let result = ssh_connection_info(&host(), Some(&identity()), Some("deploy"));
         assert!(result.unwrap_err().contains("SSH identity changed"));
+    }
+}
+
+#[cfg(test)]
+mod pty_dimension_tests {
+    use super::pty_dimension;
+
+    #[test]
+    fn accepts_ordinary_terminal_geometry() {
+        assert_eq!(pty_dimension("cols", 120).unwrap(), 120);
+        assert_eq!(pty_dimension("rows", 1).unwrap(), 1);
+        assert_eq!(pty_dimension("cols", 10_000).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn rejects_values_a_u16_cast_would_wrap() {
+        for value in [65_536_u32, 65_537, 131_072, u32::MAX] {
+            let error = pty_dimension("cols", value).unwrap_err();
+            assert!(error.contains("out of range"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_dimensions() {
+        assert!(pty_dimension("rows", 0).is_err());
+        assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `create_local_terminal` defaults a missing dimension to 80x24 and then
+    // runs the supplied one through the same helper, so the geometry a PTY is
+    // opened with is bounded the same way a later resize is. Before this the
+    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    #[test]
+    fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
+        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
+        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(
+                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
+                "creation accepted {value}"
+            );
+        }
+    }
+
+    // `session_resize` widens the checked value back to the `u32` russh puts on
+    // the wire, so the SSH path can only ever emit a geometry this helper
+    // accepted. Nothing else bounds it: russh forwards the number unchanged.
+    #[test]
+    fn checked_dimensions_widen_back_into_the_ssh_range() {
+        for value in [1_u32, 80, 24, 10_000] {
+            let checked: u32 = pty_dimension("cols", value).unwrap().into();
+            assert_eq!(checked, value);
+        }
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(pty_dimension("cols", value).is_err(), "accepted {value}");
+        }
     }
 }
