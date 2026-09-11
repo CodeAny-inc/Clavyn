@@ -289,7 +289,7 @@ function gitStagedFiles() {
       stdio: ["pipe", "pipe", "pipe"],
     });
     return out
-      .split("\n")
+      .split(/\r?\n/)
       .map((l) => l.trim())
       .filter(Boolean)
       .filter((f) => {
@@ -323,7 +323,11 @@ function scanFile(relPath) {
   // by example (like this scanner) or generated code.
   if (/check-comments:skip-file/.test(src)) return [];
 
-  const lines = src.split("\n");
+  // Split on either terminator. A CRLF checkout leaves a trailing \r on every
+  // line, and the comment regex ends in `(.*)$` — `.` does not match \r, so a
+  // \n-only split makes every comment line unmatchable and the scan silently
+  // reports zero findings.
+  const lines = src.split(/\r?\n/);
   const findings = [];
 
   for (let i = 0; i < lines.length; i++) {

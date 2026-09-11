@@ -120,3 +120,10 @@ jobs:
       - name: Build
         working-directory: desktop
         run: npm run build
+      # The comment scanner reads source line by line and reports success on
+      # any file it fails to parse, so a broken scanner is indistinguishable
+      # from a clean tree. Its own tests run first, and gate.
+      - name: Test comment hygiene scanner
+        run: node --test scripts/verify/check-comments.test.mjs
+      - name: Comment hygiene
+        run: node scripts/verify/check-comments.mjs --pretty
