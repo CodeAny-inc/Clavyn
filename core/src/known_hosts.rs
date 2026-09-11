@@ -166,6 +166,25 @@ impl KnownHosts {
             .collect()
     }
 
+    /// The fingerprint `forget` would erase, or the error it would refuse with.
+    ///
+    /// Read-only, so a caller that has to ask the user first can find out
+    /// whether there is anything to ask about without the question itself being
+    /// able to erase a key. Deciding and erasing then happen against one view of
+    /// the store instead of two.
+    pub fn forgettable_fingerprint(&self, host: &str, port: u16) -> Result<String> {
+        let k = key_path(host, port);
+        match self.entries.get(&k) {
+            None => Err(CoreError::InvalidInput(format!(
+                "{k} is not a removed known host"
+            ))),
+            Some(existing) if !existing.removed => Err(CoreError::InvalidInput(format!(
+                "{k} is still trusted; remove it before forgetting the key it was pinned to"
+            ))),
+            Some(existing) => Ok(existing.fingerprint.clone()),
+        }
+    }
+
     /// Erase a tombstoned entry and the key it retained.
     ///
     /// This is the deliberate end of the retention `remove` starts, and it puts
@@ -173,20 +192,8 @@ impl KnownHosts {
     /// answers. A live pin is refused, so forgetting a host is always two
     /// decisions rather than one.
     pub fn forget(&mut self, host: &str, port: u16) -> Result<()> {
+        self.forgettable_fingerprint(host, port)?;
         let k = key_path(host, port);
-        match self.entries.get(&k) {
-            None => {
-                return Err(CoreError::InvalidInput(format!(
-                    "{k} is not a removed known host"
-                )))
-            }
-            Some(existing) if !existing.removed => {
-                return Err(CoreError::InvalidInput(format!(
-                    "{k} is still trusted; remove it before forgetting the key it was pinned to"
-                )))
-            }
-            Some(_) => {}
-        }
         self.entries.remove(&k);
         self.presented.remove(&k);
         self.save()
@@ -226,10 +233,6 @@ impl KnownHosts {
     /// The pending change for one host, if the server presented a key that
     /// conflicts with the pin. Reads the fingerprints out of the held key rather
     /// than out of a caller's argument, so what is shown is what arrived.
-    pub fn pending_change(&self, host: &str, port: u16) -> Option<HostKeyChange> {
-        self.change_for(&key_path(host, port))
-    }
-
     fn change_for(&self, k: &str) -> Option<HostKeyChange> {
         let key = self.presented.get(k)?;
         let entry = self.entries.get(k)?;
@@ -241,21 +244,49 @@ impl KnownHosts {
         })
     }
 
+    /// The change `trust_presented_key` would pin, or the error it would refuse
+    /// with.
+    ///
+    /// Read-only, the counterpart of `forgettable_fingerprint`: a caller that
+    /// has to ask the user first can find out whether there is anything to ask
+    /// about without the question itself being able to pin a key.
+    pub fn confirmable_change(
+        &self,
+        host: &str,
+        port: u16,
+        fingerprint: &str,
+    ) -> Result<HostKeyChange> {
+        self.confirmable(&key_path(host, port), fingerprint)
+            .map(|(change, _)| change)
+    }
+
+    /// The change and the key behind it, so the check and the pin read the same
+    /// held key rather than looking it up twice.
+    fn confirmable(&self, k: &str, fingerprint: &str) -> Result<(HostKeyChange, PublicKey)> {
+        let unheld = || {
+            CoreError::InvalidInput(format!(
+                "no unreviewed host key for {k}; reconnect to see the key the server presents"
+            ))
+        };
+        let key = self.presented.get(k).cloned().ok_or_else(unheld)?;
+        // A key is only a change against a recorded one. With no entry to
+        // compare it with there is no pinned fingerprint to put in front of the
+        // user, so there is nothing to confirm and nothing to replace either.
+        let change = self.change_for(k).ok_or_else(unheld)?;
+        if change.presented_fingerprint != fingerprint {
+            return Err(CoreError::InvalidInput(format!(
+                "the host key for {k} is not the one that was reviewed; reconnect and compare the fingerprints again"
+            )));
+        }
+        Ok((change, key))
+    }
+
     /// Pin a held key in place of the recorded one. The caller passes the
     /// fingerprint it showed the user, so a view rendered before another key
     /// arrived cannot trust a key nobody looked at.
     pub fn trust_presented_key(&mut self, host: &str, port: u16, fingerprint: &str) -> Result<()> {
         let k = key_path(host, port);
-        let key = self.presented.get(&k).cloned().ok_or_else(|| {
-            CoreError::InvalidInput(format!(
-                "no unreviewed host key for {k}; reconnect to see the key the server presents"
-            ))
-        })?;
-        if key.fingerprint() != fingerprint {
-            return Err(CoreError::InvalidInput(format!(
-                "the host key for {k} is not the one that was reviewed; reconnect and compare the fingerprints again"
-            )));
-        }
+        let (_, key) = self.confirmable(&k, fingerprint)?;
         self.replace(host, port, &key)?;
         self.presented.remove(&k);
         Ok(())

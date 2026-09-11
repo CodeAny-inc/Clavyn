@@ -302,6 +302,13 @@ pub async fn forget_known_host(
 /// `forget_known_host` without the dialog, so the ordering the command relies on
 /// can be tested: read the retained fingerprint, confirm it, then check that it
 /// is still the one on record before erasing anything.
+///
+/// The lock is taken twice and never held across the question — a dialog can
+/// stay open for minutes, and the store has to keep serving connections — so
+/// each half has to stand on its own. `forgettable_fingerprint` decides and
+/// refuses without touching anything, which keeps the branch that asks nothing
+/// from being a branch that erases something; the recheck after the dialog is
+/// what makes the second acquisition safe.
 async fn forget_confirmed<F, Fut>(
     known_hosts: &Mutex<KnownHosts>,
     host: &str,
@@ -312,13 +319,13 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = ApiResult<()>>,
 {
-    let retained = known_hosts.lock().await.retained_fingerprint(host, port);
-    let Some(fingerprint) = retained else {
-        // Nothing is retained for this host, so there is nothing to confirm.
-        // `forget` says why — a live pin has to be removed first, and an unknown
-        // host was never here.
-        return known_hosts.lock().await.forget(host, port).map_err(err);
-    };
+    // Nothing retained means nothing to confirm, and the refusal says why: a
+    // live pin has to be removed first, and an unknown host was never here.
+    let fingerprint = known_hosts
+        .lock()
+        .await
+        .forgettable_fingerprint(host, port)
+        .map_err(err)?;
     confirm(fingerprint.clone()).await?;
     let mut kh = known_hosts.lock().await;
     if kh.retained_fingerprint(host, port).as_deref() != Some(fingerprint.as_str()) {
@@ -391,6 +398,13 @@ pub async fn replace_known_host(
 /// `replace_known_host` without the dialog. The change handed to `confirm` comes
 /// from the held key, so what is shown is what the server presented rather than
 /// what the caller passed.
+///
+/// Same two halves as `forget_confirmed`, and the same reason for them: the
+/// question is decided without the power to answer it, and what the dialog
+/// showed is compared with what the store holds before anything is pinned. Both
+/// fingerprints are checked, not just the presented one — a pin that moved while
+/// the dialog was open means the user was comparing against a record that is no
+/// longer there.
 async fn replace_confirmed<F, Fut>(
     known_hosts: &Mutex<KnownHosts>,
     host: &str,
@@ -402,20 +416,25 @@ where
     F: FnOnce(HostKeyChange) -> Fut,
     Fut: std::future::Future<Output = ApiResult<()>>,
 {
-    let pending = known_hosts.lock().await.pending_change(host, port);
-    let confirmable = pending.filter(|c| c.presented_fingerprint == fingerprint);
-    let Some(change) = confirmable else {
-        // Either no key is being held or the caller named a different one.
-        // `trust_presented_key` refuses both, and asking about a key that is not
-        // going to be pinned would only train the user to dismiss the dialog.
-        return known_hosts
-            .lock()
-            .await
-            .trust_presented_key(host, port, fingerprint)
-            .map_err(err);
-    };
+    // Either no key is being held or the caller named a different one: both are
+    // refused here, because asking about a key that is not going to be pinned
+    // would only train the user to dismiss the dialog.
+    let change = known_hosts
+        .lock()
+        .await
+        .confirmable_change(host, port, fingerprint)
+        .map_err(err)?;
+    let shown = change.clone();
     confirm(change).await?;
     let mut kh = known_hosts.lock().await;
+    let current = kh.confirmable_change(host, port, fingerprint).map_err(err)?;
+    if current.pinned_fingerprint != shown.pinned_fingerprint
+        || current.presented_fingerprint != shown.presented_fingerprint
+    {
+        return Err(format!(
+            "the host keys for {host}:{port} changed while the confirmation was open; review them again"
+        ));
+    }
     kh.trust_presented_key(host, port, fingerprint).map_err(err)
 }
 
@@ -1197,7 +1216,10 @@ mod known_host_confirmation_tests {
     use super::{forget_confirmed, replace_confirmed};
     use clavyn_core::known_hosts::KnownHosts;
     use russh_keys::key::{KeyPair, PublicKey};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::sync::Mutex;
+    use tokio::task::JoinSet;
 
     const HOST: &str = "prod.example.com";
     const PORT: u16 = 22;
@@ -1381,5 +1403,173 @@ mod known_host_confirmation_tests {
         .expect_err("an unreviewed key was pinned");
 
         assert!(error.contains("not the one that was reviewed"));
+    }
+
+    #[tokio::test]
+    async fn a_pin_that_changes_while_the_dialog_is_open_is_not_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &server_key()).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+        let repinned = server_key();
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            // The host is pinned to a third key while the user is still
+            // comparing the two the dialog printed.
+            store
+                .lock()
+                .await
+                .replace(HOST, PORT, &repinned)
+                .expect("replace");
+            Ok(())
+        })
+        .await
+        .expect_err("a key was pinned against a comparison that no longer held");
+
+        assert!(error.contains("changed while the confirmation was open"));
+        assert!(
+            store
+                .lock()
+                .await
+                .check_mismatch(HOST, PORT, &repinned)
+                .is_ok(),
+            "the pin made while the dialog was open was overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_removed_while_the_dialog_is_open_is_not_re_pinned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &server_key()).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            store.lock().await.remove(HOST, PORT).expect("remove");
+            Ok(())
+        })
+        .await
+        .expect_err("a tombstoned host was pinned back to a key the dialog never showed");
+
+        // `remove` drops the held key, so there is nothing left to trust: the
+        // dialog compared against a pin that is no longer live.
+        assert!(error.contains("no unreviewed host key"), "unexpected: {error}");
+        assert!(
+            store.lock().await.list().is_empty(),
+            "a removed host was restored to the trusted list"
+        );
+    }
+
+    /// The dialog is the only thing between a scripted `invoke` and a host going
+    /// back to trust-on-first-use, so "is there anything to confirm?" and the
+    /// erase have to be one decision. Read under one lock and acted on under
+    /// another they are two: a burst that answers "nothing is retained" against
+    /// a live pin, plus a single `remove` landing in the middle of it, leaves
+    /// calls holding a stale answer that erase a key nobody was ever shown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_around_a_removal_cannot_forget_a_key_without_confirming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(store(dir.path()));
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &server_key())
+            .expect("first use");
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut burst = JoinSet::new();
+        for i in 0..400 {
+            let store = Arc::clone(&store);
+            let asked = Arc::clone(&asked);
+            burst.spawn(async move {
+                // The removal lands mid-burst, so calls that started on either
+                // side of it are in flight at the same time.
+                if i == 200 {
+                    store.lock().await.remove(HOST, PORT).expect("remove");
+                    return;
+                }
+                let _ = forget_confirmed(&store, HOST, PORT, |_| async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    // Stands in for a user who says no and for a dialog that
+                    // never appeared alike: neither may erase anything.
+                    Err(DECLINED.to_string())
+                })
+                .await;
+            });
+        }
+        while burst.join_next().await.is_some() {}
+
+        // Whatever order the calls landed in, the key is still on record, so a
+        // brand-new key is a change to review rather than a first contact.
+        assert!(
+            store
+                .lock()
+                .await
+                .check_mismatch(HOST, PORT, &server_key())
+                .is_err(),
+            "{HOST} was put back on trust-on-first-use by a burst that confirmed nothing \
+             ({} confirmations shown)",
+            asked.load(Ordering::SeqCst)
+        );
+    }
+
+    /// The same split in the pin path, and a worse outcome: the key that wins is
+    /// the one the server presented. A man in the middle knows the fingerprint
+    /// it is about to offer, so the burst can be armed with it before the key is
+    /// ever held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_around_a_presented_key_cannot_pin_it_without_confirming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(store(dir.path()));
+        let pinned = server_key();
+        let presented = server_key();
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &pinned)
+            .expect("first use");
+
+        let fingerprint = presented.fingerprint();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut burst = JoinSet::new();
+        for i in 0..400 {
+            let store = Arc::clone(&store);
+            let asked = Arc::clone(&asked);
+            let fingerprint = fingerprint.clone();
+            let presented = presented.clone();
+            burst.spawn(async move {
+                // The connection path holds the changed key mid-burst.
+                if i == 200 {
+                    store.lock().await.hold_presented_key(HOST, PORT, &presented);
+                    return;
+                }
+                let _ = replace_confirmed(&store, HOST, PORT, &fingerprint, |_| async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Err("Host key changed: cancelled".to_string())
+                })
+                .await;
+            });
+        }
+        while burst.join_next().await.is_some() {}
+
+        let kh = store.lock().await;
+        assert!(
+            kh.check_mismatch(HOST, PORT, &presented).is_err(),
+            "the presented key was pinned by a burst that confirmed nothing \
+             ({} confirmations shown)",
+            asked.load(Ordering::SeqCst)
+        );
+        assert!(
+            kh.check_mismatch(HOST, PORT, &pinned).is_ok(),
+            "the original pin was replaced"
+        );
     }
 }

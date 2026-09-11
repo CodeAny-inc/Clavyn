@@ -157,6 +157,21 @@ describe("KnownHostsView removed hosts", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("is still trusted");
   });
+
+  it("reports a dialog that could not be shown instead of looking like a cancel", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    // Failing closed is right; failing silently is not. Without this the button
+    // does nothing at all on a platform where the native dialog never appears.
+    vi.mocked(api.forgetKnownHost).mockRejectedValueOnce(
+      "Forget host key: the confirmation dialog could not be shown, so nothing was changed",
+    );
+    await buttonLabelled(wrapper, "Forget permanently").trigger("click");
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("could not be shown");
+  });
 });
 
 describe("KnownHostsView trusted hosts", () => {
