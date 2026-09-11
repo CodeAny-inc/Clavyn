@@ -144,6 +144,15 @@ function sendOnSink(sessionId: string, payload: ArrayBuffer) {
   const deliver = () => sink.channel.receive(payload, index);
   // A batch large enough to take the asynchronous route is held until the test
   // releases it, so a test can put a frame in flight and then keep going.
+  //
+  // Held unconditionally, which is stricter than the browser fixture's opt-in
+  // `holdOutput` switch. The two suites need opposite defaults. A unit test
+  // drives one session through one interleaving it chose, and the mistake worth
+  // catching is asserting against a frame the real transport would still be
+  // fetching, so the delay is on by default and a test that wants the batch
+  // says so by releasing it. The browser fixture drives whole user flows where
+  // a large frame is usually incidental scrollback nothing asserts on, and
+  // holding those by default would strand output no test ever releases.
   if (payload.byteLength >= RAW_INLINE_LIMIT) sink.held.push(deliver);
   else deliver();
 }

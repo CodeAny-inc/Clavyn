@@ -58,6 +58,16 @@ let sessionEnded = false;
 // is only finished by the second.
 let streamEnded = false;
 let closeReason: string | null = null;
+// A frame of 1024 bytes or more is fetched rather than evaluated inline, and a
+// fetch that rejects is dropped. Ordering parks every later frame behind the
+// dropped one, so the zero-length frame that ends the stream can be lost with
+// it, and a pane that waited only for that frame would stop with no reason
+// written to it. A close not followed by the end of the stream within this
+// grace period finishes the transcript anyway. The window is far longer than a
+// healthy fetch, so only a dropped frame reaches it.
+const STREAM_END_GRACE_MS = 5000;
+let streamEndTimer: ReturnType<typeof setTimeout> | null = null;
+let outputTruncated = false;
 // Buffer remote output, never user input, until this attempt can answer queries.
 let pendingOutput: Uint8Array[] | null = null;
 // Output still arriving after the close notification, held so the trailing
@@ -153,13 +163,41 @@ function writeError(message: string) {
 // second does the writing, so the trailing bytes are never dropped and never
 // appear after the banner.
 function finishClose() {
-  if (!streamEnded || closeReason === null) return;
+  if (closeReason === null) return;
+  if (!streamEnded) {
+    armStreamEndFallback();
+    return;
+  }
+  clearStreamEndFallback();
   const output = tailOutput;
   tailOutput = null;
   for (const chunk of output ?? []) term?.write(chunk);
   const reason = closeReason;
   closeReason = null;
-  writeError(`Session closed: ${reason}`);
+  const truncated = outputTruncated;
+  outputTruncated = false;
+  writeError(
+    truncated
+      ? `Session closed: ${reason} (some output was lost in transit)`
+      : `Session closed: ${reason}`,
+  );
+}
+function armStreamEndFallback() {
+  if (streamEndTimer !== null) return;
+  streamEndTimer = setTimeout(() => {
+    streamEndTimer = null;
+    if (disposed || streamEnded || closeReason === null) return;
+    // Treat the stream as over so nothing the channel may still deliver can
+    // land after the banner, and say the transcript is short.
+    streamEnded = true;
+    outputTruncated = true;
+    finishClose();
+  }, STREAM_END_GRACE_MS);
+}
+function clearStreamEndFallback() {
+  if (streamEndTimer === null) return;
+  clearTimeout(streamEndTimer);
+  streamEndTimer = null;
 }
 async function ensureListeners(): Promise<boolean> {
   if (disposed) return false;
@@ -216,6 +254,8 @@ async function connectSession() {
   streamEnded = false;
   closeReason = null;
   tailOutput = null;
+  outputTruncated = false;
+  clearStreamEndFallback();
   pendingOutput = [];
   // The sink belongs to this attempt, so a superseded attempt's output can
   // never reach the emulator even before its session is torn down. Bytes keep
@@ -392,6 +432,7 @@ onBeforeUnmount(() => {
   disposed = true;
   pendingOutput = null;
   tailOutput = null;
+  clearStreamEndFallback();
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();

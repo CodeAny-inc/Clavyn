@@ -39,6 +39,19 @@ pub fn end_of_output() -> InvokeResponseBody {
 /// It is only ever held long enough to look a sink up, never across delivery.
 pub type OutputSinks = Arc<std::sync::Mutex<HashMap<String, OutputSink>>>;
 
+/// Takes the sinks lock, recovering the map if the mutex is poisoned.
+///
+/// Nothing but a map lookup runs under this lock, so a panic elsewhere cannot
+/// leave the map half-updated and the recovered guard is always sound. Giving
+/// up on a poisoned mutex instead would silently drop whichever sink the caller
+/// wanted: on the close path that means never sending the frame that ends the
+/// stream, leaving the pane stopped with no reason for it.
+fn lock_sinks(
+    sinks: &std::sync::Mutex<HashMap<String, OutputSink>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, OutputSink>> {
+    sinks.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Monotonic generation used to invalidate unlock attempts that started before
 /// a newer lock (or vault initialization) operation. The passphrase mutex still
 /// serializes the final state write; this generation additionally prevents a
@@ -110,7 +123,7 @@ impl AppState {
 
         let sinks = output_sinks.clone();
         let data_callback = Arc::new(move |sid: &str, data: &[u8]| {
-            let sink = sinks.lock().ok().and_then(|map| map.get(sid).cloned());
+            let sink = lock_sinks(&sinks).get(sid).cloned();
             if let Some(sink) = sink {
                 let _ = sink.send(InvokeResponseBody::Raw(data.to_vec()));
             }
@@ -123,7 +136,7 @@ impl AppState {
             // the frontend can tell a batch that is still in flight from one
             // that will never arrive. The event that follows says why the
             // session ended; the frame says that nothing more is coming.
-            let sink = sinks.lock().ok().and_then(|mut map| map.remove(sid));
+            let sink = lock_sinks(&sinks).remove(sid);
             if let Some(sink) = sink {
                 let _ = sink.send(end_of_output());
             }
@@ -156,17 +169,13 @@ impl AppState {
 
     /// Routes a session's output to `sink` until the session ends.
     pub fn register_output(&self, session_id: String, sink: OutputSink) {
-        if let Ok(mut map) = self.output_sinks.lock() {
-            map.insert(session_id, sink);
-        }
+        lock_sinks(&self.output_sinks).insert(session_id, sink);
     }
 
     /// Stops routing output for a session. Safe to call for a session that was
     /// never registered.
     pub fn release_output(&self, session_id: &str) {
-        if let Ok(mut map) = self.output_sinks.lock() {
-            map.remove(session_id);
-        }
+        lock_sinks(&self.output_sinks).remove(session_id);
     }
 }
 

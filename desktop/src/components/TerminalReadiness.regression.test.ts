@@ -87,7 +87,7 @@ beforeEach(() => {
   document.body.innerHTML = "";
   vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
 });
-afterEach(() => { view?.unmount(); view = undefined; vi.unstubAllGlobals(); });
+afterEach(() => { view?.unmount(); view = undefined; vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("connection output readiness", () => {
   it.each(["connect_ssh", "create_local_terminal"])("flushes early output only after %s can accept protocol replies", async command => {
@@ -193,6 +193,45 @@ describe("connection output readiness", () => {
     output(pending.id, "LATE_OUTPUT");
     deliverHeldSessionOutput(pending.id);
     expect(terminals.instances[0].output).toEqual([...before, bulk, "\r\n\x1b[31mSession closed: fixture EOF\x1b[0m\r\n"]);
+  });
+
+  it("finishes the transcript when a batch in flight is never delivered", async () => {
+    const pending = deferConnection("connect_ssh");
+    const saved = host("atlas");
+    useHostsStore().hosts = [saved];
+    const tab = useTabsStore().newTab(saved);
+    const pane = collectPanes(tab.tree)[0];
+    render();
+    await vi.waitFor(() => expect(pending.id).not.toBe(""));
+    pending.resolve();
+    await vi.waitFor(() => expect(pane.connected).toBe(true));
+    const before = [...terminals.instances[0].output];
+
+    vi.useFakeTimers();
+    // A rejected fetch is logged and dropped by the transport, and ordering
+    // parks the end-of-stream frame behind it, so neither ever arrives. Held
+    // and never released is exactly that: the batch stays in flight forever.
+    output(pending.id, "B".repeat(64 * 1024));
+    closed(pending.id);
+    await nextTick();
+    expect(terminals.instances[0].output).toEqual(before);
+
+    vi.advanceTimersByTime(5000);
+    await nextTick();
+    // The pane says why it stopped rather than going quiet, and says the
+    // transcript is short.
+    expect(terminals.instances[0].output).toEqual([
+      ...before,
+      "\r\n\x1b[31mSession closed: fixture EOF (some output was lost in transit)\x1b[0m\r\n",
+    ]);
+    expect(pane.connected).toBe(false);
+
+    // The stream counts as over, so a late delivery cannot land after the banner.
+    deliverHeldSessionOutput(pending.id);
+    expect(terminals.instances[0].output).toEqual([
+      ...before,
+      "\r\n\x1b[31mSession closed: fixture EOF (some output was lost in transit)\x1b[0m\r\n",
+    ]);
   });
 
   it.each(["connect_ssh", "create_local_terminal"])("isolates an early-closed %s attempt from its replacement", async command => {
