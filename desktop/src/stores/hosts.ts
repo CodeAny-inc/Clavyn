@@ -9,10 +9,15 @@ export const useHostsStore = defineStore("hosts", () => {
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
   let pendingLoad: Promise<void> | null = null;
-  // Bumped whenever a mutation has been applied locally. A load that started
+  // Bumped whenever a mutation has been applied locally. A read that started
   // before the bump carries a snapshot taken before that change, so it is
   // discarded rather than written over newer state.
-  let revision = 0;
+  //
+  // Counted per list, because the two reads are independent: adding a host
+  // says nothing about the group list that came back with it, and one counter
+  // would throw away a current answer for the collection nothing touched.
+  let hostsRevision = 0;
+  let groupsRevision = 0;
 
   const filteredHosts = computed(() => {
     let result = hosts.value;
@@ -36,20 +41,26 @@ export const useHostsStore = defineStore("hosts", () => {
   // one in-flight pair of reads rather than issuing duplicate IPC, and the two
   // reads are independent so they go out together.
   //
-  // A load replaces both lists wholesale, so it must not land on top of a change
+  // A load replaces each list wholesale, so it must not land on top of a change
   // that completed while it was in flight: adding a host during startup would
   // otherwise see the new row appear and then vanish when the older snapshot
-  // arrived. Sharing one in-flight read across callers widens that window, so
-  // the result is dropped if anything was mutated after the read began.
+  // arrived. Sharing one in-flight read across callers widens that window, so a
+  // result is dropped if its own collection was mutated after the read began.
+  // Each result is checked on its own, so a host being added does not also
+  // throw away the group list that arrived alongside it.
   function load(): Promise<void> {
     if (pendingLoad) return pendingLoad;
-    const startedAt = revision;
-    pendingLoad = Promise.all([api.listHosts(), api.listGroups()])
-      .then(([loadedHosts, loadedGroups]) => {
-        if (revision !== startedAt) return;
-        hosts.value = loadedHosts;
-        groups.value = loadedGroups;
-      })
+    const hostsStartedAt = hostsRevision;
+    const groupsStartedAt = groupsRevision;
+    pendingLoad = Promise.all([
+      api.listHosts().then((loaded) => {
+        if (hostsRevision === hostsStartedAt) hosts.value = loaded;
+      }),
+      api.listGroups().then((loaded) => {
+        if (groupsRevision === groupsStartedAt) groups.value = loaded;
+      }),
+    ])
+      .then(() => undefined)
       .finally(() => {
         pendingLoad = null;
       });
@@ -58,14 +69,14 @@ export const useHostsStore = defineStore("hosts", () => {
 
   async function addHost(host: Host) {
     const saved = await api.addHost(host);
-    revision += 1;
+    hostsRevision += 1;
     hosts.value.push(saved);
     return saved;
   }
 
   async function updateHost(host: Host) {
     const saved = await api.updateHost(host);
-    revision += 1;
+    hostsRevision += 1;
     const idx = hosts.value.findIndex((h) => h.id === saved.id);
     if (idx >= 0) hosts.value[idx] = saved;
     return saved;
@@ -73,20 +84,23 @@ export const useHostsStore = defineStore("hosts", () => {
 
   async function deleteHost(id: string) {
     await api.deleteHost(id);
-    revision += 1;
+    hostsRevision += 1;
     hosts.value = hosts.value.filter((h) => h.id !== id);
   }
 
   async function addGroup(name: string) {
     const group = await api.addGroup(name);
-    revision += 1;
+    groupsRevision += 1;
     groups.value.push(group);
     return group;
   }
 
   async function deleteGroup(id: string) {
     await api.deleteGroup(id);
-    revision += 1;
+    // Touches both lists: the group goes, and every host that pointed at it is
+    // unassigned.
+    groupsRevision += 1;
+    hostsRevision += 1;
     groups.value = groups.value.filter((g) => g.id !== id);
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;
