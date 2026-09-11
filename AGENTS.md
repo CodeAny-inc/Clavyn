@@ -119,6 +119,53 @@ Notes:
 - To drive a real `tauri dev`/packaged webview, set `CLAVYN_URL` and
   `CHROMIUM_EXECUTABLE_PATH` to point at its webview endpoint.
 
+## Greptile PR review skills
+
+Three Agent Skills for automated PR review workflows are vendored from
+https://github.com/greptileai/skills (MIT, copyright Greptile AI — the
+upstream `LICENSE` is included in each skill directory). They are based on
+upstream commit `646e2dfad81e5157e97daecc802b68d3d2c4d1e4` **plus local fixes**
+applied during review (scoped GitLab thread resolution, trigger-bounded GitHub
+check polling, GraphQL `isResolved` for the unresolved set, restricted staging,
+and removal of the `curl | sh` installer fallback). To update, diff the new
+upstream SHA against `646e2df` to see which local patches still apply, then
+re-apply any that are still needed.
+
+- **`check-pr`** — check a PR/MR/CL for unresolved review comments, failing
+  status checks, and incomplete descriptions; fix and resolve.
+- **`cli-review`** — run a Greptile CLI review from the local checkout
+  (`greptile review --json`) and summarize findings. Use this for Greptile
+  feedback *before* opening a PR.
+- **`greploop`** — loop: trigger Greptile review (`@greptile review` comment),
+  fix actionable comments, push, re-review — until 5/5 confidence and zero
+  unresolved comments (max 5 iterations).
+
+`check-pr` and `greploop` auto-detect the platform (GitHub, GitLab, Perforce)
+from the environment; for this repo they use `gh`. `cli-review` uses the
+Greptile CLI on the local checkout.
+
+Requirements per skill:
+- GitHub reviews (`check-pr`, `greploop`): `gh` CLI authenticated
+  (`gh auth login`) and the Greptile GitHub app installed on the repo for
+  hosted reviews. Thread resolution uses the GitHub GraphQL API.
+- Local reviews (`cli-review`): the Greptile CLI (`npm i -g greptile`,
+  then `greptile login`).
+- GitLab/Perforce paths exist in the skills for completeness but are unused
+  here — Clavyn is GitHub-only.
+
+Invoke by name (e.g. `/check-pr 123`, `/cli-review`, `/greploop`) or ask the
+agent to "check this PR" / "run greploop". If no number is given, `check-pr`
+and `greploop` auto-detect the PR for the current branch. Same multi-agent
+pointer pattern as the other skills:
+
+| Agent | Pointer | Convention |
+|-------|---------|------------|
+| **All agentskills.io-compatible** | `.agents/skills/{check-pr,cli-review,greploop}/SKILL.md` | Standard Agent Skills (agentskills.io) |
+| Universal / Codex | `AGENTS.md` (this file) | De facto standard |
+| Devin | `.devin/skills/{check-pr,cli-review,greploop}/SKILL.md` | Devin skills |
+| Claude Code | `.claude/commands/{check-pr,cli-review,greploop}.md` | Slash commands |
+| Cursor | `.cursor/rules/{check-pr,cli-review,greploop}.mdc` | Rules |
+
 ## Browser UI test pitfalls (e2e)
 
 The e2e suite (`desktop/e2e/*.mjs`, run via `cd desktop/e2e && npm test`) uses
