@@ -1,3 +1,4 @@
+use crate::host_key_prompt::PromptGate as HostKeyPromptGate;
 use clavyn_core::known_hosts::KnownHosts;
 use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
@@ -47,6 +48,9 @@ pub struct AppState {
     pub store: Mutex<Store>,
     pub vault: Mutex<Vault>,
     pub known_hosts: Arc<Mutex<KnownHosts>>,
+    /// Serializes the native confirmation shown before a host key is forgotten
+    /// or replaced, so a caller cannot stack dialogs on top of each other.
+    pub host_key_prompt: HostKeyPromptGate,
     pub passphrase: Mutex<Option<zeroize::Zeroizing<String>>>,
     pub auth_generation: AuthGeneration,
     /// Serializes Keychain credential creation/deletion with destructive vault
@@ -105,6 +109,7 @@ impl AppState {
             store: Mutex::new(store),
             vault: Mutex::new(vault),
             known_hosts: Arc::new(Mutex::new(known_hosts)),
+            host_key_prompt: HostKeyPromptGate::new(),
             passphrase: Mutex::new(None),
             auth_generation: AuthGeneration::new(),
             biometric_mutation: Mutex::new(()),

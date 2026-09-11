@@ -94,8 +94,23 @@ now just tell your OS it's fine to open Clavyn. :)
 | Host passwords       | OS keychain only                | never in core state      |
 | known_hosts          | plaintext JSON (public keys)    | n/a                      |
 
-Host-key mismatches raise `CoreError::HostKeyMismatch` and are surfaced to
-the user for explicit confirmation before any replacement.
+A server key that differs from the pinned one fails the connection with
+`CoreError::HostKeyMismatch`, which carries the pinned and the presented
+fingerprint. The presented key is held in memory and listed under Known Hosts,
+where replacing the pin requires confirming the fingerprint that was shown.
+Removing a host hides it from the list but keeps its key as a tombstone, so the
+next connection with a different key is still reported as a change rather than
+accepted as a first contact. Removed hosts stay visible under their own heading
+with the key they are still remembered by, and can be forgotten permanently from
+there, which erases the key and puts the host back on first-use.
+
+The two commands that can end a pin — forgetting a retained key, and trusting a
+key the server presented in its place — confirm in a native OS dialog that
+prints the fingerprint as the backend holds it. A page-level `confirm()` is not
+a control, because code calling the command directly never renders one; an
+OS-drawn dialog cannot be read, clicked or dismissed from the webview. A
+declined dialog also suppresses the next one for half a minute, so a caller
+cannot stack prompts until one is clicked through.
 
 ## Contributing
 

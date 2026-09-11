@@ -32,6 +32,8 @@ url = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# Host key tests need real server keys to pin, hold and forget.
+russh-keys = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Resolves the D-Bus session address before the single-instance plugin does,

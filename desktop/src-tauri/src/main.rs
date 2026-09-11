@@ -3,6 +3,7 @@
 mod biometric;
 mod biometric_commands;
 mod commands;
+mod host_key_prompt;
 mod sftp_transfer;
 mod state;
 mod vault_commands;
@@ -150,6 +151,10 @@ fn main() {
             commands::delete_key,
             commands::list_known_hosts,
             commands::remove_known_host,
+            commands::list_removed_known_hosts,
+            commands::forget_known_host,
+            commands::list_host_key_changes,
+            commands::replace_known_host,
             commands::list_workspaces,
             commands::create_workspace,
             commands::save_workspace,
