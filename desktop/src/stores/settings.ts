@@ -18,7 +18,7 @@ export interface AppSettings {
    * readable by a screen reader. What is readable is xterm's accessibility
    * layer, which builds its own row elements and a live region from the buffer
    * and is independent of whichever renderer is drawing. It costs a DOM tree
-   * per terminal, so it is off unless asked for.
+   * per terminal, so it defaults to off.
    */
   screenReaderMode: boolean;
 }
