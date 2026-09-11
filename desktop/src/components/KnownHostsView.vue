@@ -52,68 +52,68 @@ const filteredHosts = computed(() => {
   );
 });
 
+// An entry is stored as "host:port", where the host is whatever was connected
+// to and may itself contain colons. Everything up to the last colon is the host,
+// so the pair rebuilds the entry it came from: "::1:22" is ::1 on port 22, and
+// "[::1]:22" keeps its brackets rather than losing them on the way back.
 function parseHostPort(entry: string): [string, number] {
-  // Entries are written as "host:port" and may also arrive bracketed as
-  // "[host]:port". Split on the last colon rather than the only one, so a bare
-  // IPv6 address keeps its own colons: "::1:22" is ::1 on port 22.
-  const bracketed = entry.match(/^\[([^\]]+)\]:(\d+)$/);
-  if (bracketed) return [bracketed[1], parseInt(bracketed[2], 10)];
   const lastColon = entry.lastIndexOf(":");
-  if (lastColon > 0 && /^\d+$/.test(entry.slice(lastColon + 1))) {
-    return [entry.slice(0, lastColon), parseInt(entry.slice(lastColon + 1), 10)];
+  const port = entry.slice(lastColon + 1);
+  const host = entry.slice(0, lastColon);
+  // A host made of nothing but colons is not a host, so "::1" with no port at
+  // all reads as the address rather than as ":" on port 1.
+  if (lastColon > 0 && /^\d+$/.test(port) && /[^:]/.test(host)) {
+    return [host, parseInt(port, 10)];
   }
   return [entry, 22];
 }
 
+// Cancelling the native confirmation is an answer, not a failure, so it is not
+// reported as one. The tag is set by the backend that raises it.
+const DECLINED = "[host-key-confirmation-declined]";
+
+async function run(error: { value: string }, action: () => Promise<void>) {
+  error.value = "";
+  try {
+    await action();
+  } catch (cause) {
+    const message = String(cause);
+    if (!message.includes(DECLINED)) error.value = message;
+  }
+  await load();
+}
+
+const removeError = ref("");
+
 async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
-  if (confirm(`Remove known host "${entry.host}"?`)) {
-    await api.removeKnownHost(host, port);
-    await load();
-  }
+  // The key is retained, not erased, so this asks in the page. Erasing it is
+  // "Forget permanently", which the backend confirms natively.
+  if (!confirm(`Remove known host "${entry.host}"?`)) return;
+  await run(removeError, () => api.removeKnownHost(host, port));
 }
 
 const forgetError = ref("");
 
+// No page-level confirmation: `forget_known_host` shows a native dialog with the
+// fingerprint it is about to erase. A second question here would only be one
+// more click on the way to the one that counts.
 async function forget(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
-  const confirmed = confirm(
-    `Permanently forget "${entry.host}"?\n\n` +
-      `Clavyn still remembers the key this host was pinned to (${entry.fingerprint}), ` +
-      "which is how it can tell a changed key from a new one.\n\n" +
-      "Forgetting it erases that record. The next connection to this host will " +
-      "trust whatever key it is offered, with no warning.",
-  );
-  if (!confirmed) return;
-  forgetError.value = "";
-  try {
-    await api.forgetKnownHost(host, port);
-  } catch (cause) {
-    forgetError.value = String(cause);
-  }
-  await load();
+  await run(forgetError, () => api.forgetKnownHost(host, port));
 }
 
 const trustError = ref("");
 
 async function trust(change: PendingHostKeyChange) {
   const [host, port] = parseHostPort(change.host);
-  const confirmed = confirm(
-    `The host key for "${change.host}" changed.\n\n` +
-      `Pinned:    ${change.pinned_fingerprint}\n` +
-      `Presented: ${change.presented_fingerprint}\n\n` +
-      "Trust the presented key only if you can confirm the change with the server's operator.",
+  // Send back the fingerprint that was shown, so a key that arrived after this
+  // view rendered cannot be trusted on the strength of the old one. The native
+  // dialog raised by `replace_known_host` prints both fingerprints as the
+  // backend holds them.
+  await run(trustError, () =>
+    api.replaceKnownHost(host, port, change.presented_fingerprint),
   );
-  if (!confirmed) return;
-  trustError.value = "";
-  try {
-    // Send back the fingerprint that was shown, so a key that arrived after this
-    // view rendered cannot be trusted on the strength of the old one.
-    await api.replaceKnownHost(host, port, change.presented_fingerprint);
-  } catch (cause) {
-    trustError.value = String(cause);
-  }
-  await load();
 }
 </script>
 
@@ -239,6 +239,22 @@ async function trust(change: PendingHostKeyChange) {
           >
             <Trash2 class="size-3.5" :stroke-width="1.75" />
           </button>
+        </div>
+        <p v-if="removeError" class="text-[12px] text-destructive">{{ removeError }}</p>
+      </div>
+
+      <!-- A search that matches nothing says so, even when the sections above
+           it have content: silence would read as a broken list. -->
+      <div
+        v-else-if="search.trim()"
+        class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center"
+      >
+        <Search class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">No trusted hosts match</p>
+          <p class="text-[12px] text-muted-foreground mt-1">
+            Nothing here matches "{{ search.trim() }}"
+          </p>
         </div>
       </div>
 

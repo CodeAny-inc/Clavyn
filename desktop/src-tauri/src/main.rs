@@ -3,6 +3,7 @@
 mod biometric;
 mod biometric_commands;
 mod commands;
+mod host_key_prompt;
 mod sftp_transfer;
 mod state;
 mod vault_commands;

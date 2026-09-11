@@ -1,11 +1,14 @@
+use crate::host_key_prompt;
 use crate::state::{AppState, LocalTerminal};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
+use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
 use clavyn_core::sftp::SftpEntry;
 use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 type ApiResult<T> = std::result::Result<T, String>;
@@ -236,6 +239,10 @@ pub async fn list_known_hosts(
         .collect())
 }
 
+/// Stop trusting a host. No native confirmation: `remove` tombstones the entry
+/// and keeps its key, so the host stays protected by the mismatch check and
+/// this call on its own cannot downgrade anything. Erasing the retained key is
+/// `forget_known_host`, and that one does ask.
 #[tauri::command]
 pub async fn remove_known_host(
     state: State<'_, Arc<AppState>>,
@@ -266,16 +273,60 @@ pub async fn list_removed_known_hosts(
 }
 
 /// Erase the key retained for a tombstoned host. That puts the host back on
-/// trust-on-first-use, which is why it stands as its own call instead of being
-/// folded into `remove_known_host`.
+/// trust-on-first-use, so it is confirmed in a native dialog that prints the
+/// fingerprint about to be erased: the webview can reach this command, but it
+/// cannot answer for the user.
 #[tauri::command]
 pub async fn forget_known_host(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     host: String,
     port: u16,
 ) -> ApiResult<()> {
-    let mut kh = state.known_hosts.lock().await;
-    kh.forget(&host, port).map_err(err)
+    let state = state.inner().clone();
+    let gate = state.clone();
+    let label = format!("{host}:{port}");
+    forget_confirmed(&state.known_hosts, &host, port, move |fingerprint| async move {
+        host_key_prompt::confirm(
+            &app,
+            &gate.host_key_prompt,
+            "Forget host key",
+            &host_key_prompt::forget_message(&label, &fingerprint),
+            "Forget the key",
+        )
+        .await
+    })
+    .await
+}
+
+/// `forget_known_host` without the dialog, so the ordering the command relies on
+/// can be tested: read the retained fingerprint, confirm it, then check that it
+/// is still the one on record before erasing anything.
+async fn forget_confirmed<F, Fut>(
+    known_hosts: &Mutex<KnownHosts>,
+    host: &str,
+    port: u16,
+    confirm: F,
+) -> ApiResult<()>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    let retained = known_hosts.lock().await.retained_fingerprint(host, port);
+    let Some(fingerprint) = retained else {
+        // Nothing is retained for this host, so there is nothing to confirm.
+        // `forget` says why — a live pin has to be removed first, and an unknown
+        // host was never here.
+        return known_hosts.lock().await.forget(host, port).map_err(err);
+    };
+    confirm(fingerprint.clone()).await?;
+    let mut kh = known_hosts.lock().await;
+    if kh.retained_fingerprint(host, port).as_deref() != Some(fingerprint.as_str()) {
+        return Err(format!(
+            "the key retained for {host}:{port} changed while the confirmation was open; review it again"
+        ));
+    }
+    kh.forget(host, port).map_err(err)
 }
 
 #[derive(serde::Serialize)]
@@ -306,16 +357,66 @@ pub async fn list_host_key_changes(
 /// Pin the key a server presented in place of the recorded one. `fingerprint`
 /// is the value the caller displayed: it is checked against the held key so a
 /// view rendered before another key arrived cannot trust an unreviewed one.
+///
+/// That check is a guard against a stale view, not against a script, so the pin
+/// itself is confirmed in a native dialog that prints both fingerprints as the
+/// store holds them.
 #[tauri::command]
 pub async fn replace_known_host(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     host: String,
     port: u16,
     fingerprint: String,
 ) -> ApiResult<()> {
-    let mut kh = state.known_hosts.lock().await;
-    kh.trust_presented_key(&host, port, &fingerprint)
-        .map_err(err)
+    let state = state.inner().clone();
+    let gate = state.clone();
+    replace_confirmed(&state.known_hosts, &host, port, &fingerprint, move |change| async move {
+        host_key_prompt::confirm(
+            &app,
+            &gate.host_key_prompt,
+            "Host key changed",
+            &host_key_prompt::trust_message(
+                &change.host,
+                &change.pinned_fingerprint,
+                &change.presented_fingerprint,
+            ),
+            "Trust the new key",
+        )
+        .await
+    })
+    .await
+}
+
+/// `replace_known_host` without the dialog. The change handed to `confirm` comes
+/// from the held key, so what is shown is what the server presented rather than
+/// what the caller passed.
+async fn replace_confirmed<F, Fut>(
+    known_hosts: &Mutex<KnownHosts>,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+    confirm: F,
+) -> ApiResult<()>
+where
+    F: FnOnce(HostKeyChange) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    let pending = known_hosts.lock().await.pending_change(host, port);
+    let confirmable = pending.filter(|c| c.presented_fingerprint == fingerprint);
+    let Some(change) = confirmable else {
+        // Either no key is being held or the caller named a different one.
+        // `trust_presented_key` refuses both, and asking about a key that is not
+        // going to be pinned would only train the user to dismiss the dialog.
+        return known_hosts
+            .lock()
+            .await
+            .trust_presented_key(host, port, fingerprint)
+            .map_err(err);
+    };
+    confirm(change).await?;
+    let mut kh = known_hosts.lock().await;
+    kh.trust_presented_key(host, port, fingerprint).map_err(err)
 }
 
 // ============================================================
@@ -1083,5 +1184,202 @@ mod ssh_connection_info_tests {
     fn rejects_changed_identity_before_a_network_connection_can_start() {
         let result = ssh_connection_info(&host(), Some(&identity()), Some("deploy"));
         assert!(result.unwrap_err().contains("SSH identity changed"));
+    }
+}
+
+/// The command bodies are exercised here with the confirmation stubbed out. The
+/// `#[tauri::command]` wrappers add nothing but the native dialog, so what these
+/// cover is the ordering the dialog depends on: the fingerprint is read before
+/// the question, nothing is written when the answer is no, and a key that moved
+/// while the dialog was open is not the one that gets used.
+#[cfg(test)]
+mod known_host_confirmation_tests {
+    use super::{forget_confirmed, replace_confirmed};
+    use clavyn_core::known_hosts::KnownHosts;
+    use russh_keys::key::{KeyPair, PublicKey};
+    use tokio::sync::Mutex;
+
+    const HOST: &str = "prod.example.com";
+    const PORT: u16 = 22;
+    const DECLINED: &str = "Forget host key: cancelled";
+
+    fn server_key() -> PublicKey {
+        KeyPair::generate_ed25519()
+            .clone_public_key()
+            .expect("public key")
+    }
+
+    fn store(dir: &std::path::Path) -> Mutex<KnownHosts> {
+        Mutex::new(KnownHosts::load(dir.join("known_hosts.json")).expect("load"))
+    }
+
+    async fn removed_host(store: &Mutex<KnownHosts>, key: &PublicKey) {
+        let mut kh = store.lock().await;
+        kh.verify(HOST, PORT, key).expect("first use");
+        kh.remove(HOST, PORT).expect("remove");
+    }
+
+    #[tokio::test]
+    async fn a_declined_confirmation_leaves_the_retained_key_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        removed_host(&store, &pinned).await;
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async { Err(DECLINED.to_string()) })
+            .await
+            .expect_err("a declined confirmation erased the key anyway");
+
+        assert_eq!(error, DECLINED);
+        let kh = store.lock().await;
+        assert_eq!(
+            kh.retained_fingerprint(HOST, PORT),
+            Some(pinned.fingerprint()),
+            "the retained key did not survive the refusal"
+        );
+        // Still remembered, so a different key is reported as a change rather
+        // than trusted as a first contact.
+        assert!(kh.check_mismatch(HOST, PORT, &server_key()).is_err());
+    }
+
+    #[tokio::test]
+    async fn forgetting_confirms_the_fingerprint_it_is_about_to_erase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        removed_host(&store, &pinned).await;
+
+        let shown = std::cell::RefCell::new(String::new());
+        forget_confirmed(&store, HOST, PORT, |fingerprint| {
+            *shown.borrow_mut() = fingerprint;
+            async { Ok(()) }
+        })
+        .await
+        .expect("forget");
+
+        assert_eq!(shown.into_inner(), pinned.fingerprint());
+        assert_eq!(store.lock().await.retained_fingerprint(HOST, PORT), None);
+    }
+
+    #[tokio::test]
+    async fn a_key_that_changes_while_the_dialog_is_open_is_not_erased() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        removed_host(&store, &server_key()).await;
+        let replacement = server_key();
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async {
+            // The host is re-pinned to another key and removed again while the
+            // user is still reading the first fingerprint.
+            let mut kh = store.lock().await;
+            kh.replace(HOST, PORT, &replacement).expect("replace");
+            kh.remove(HOST, PORT).expect("remove");
+            Ok(())
+        })
+        .await
+        .expect_err("a key nobody was shown was erased");
+
+        assert!(error.contains("changed while the confirmation was open"));
+        assert_eq!(
+            store.lock().await.retained_fingerprint(HOST, PORT),
+            Some(replacement.fingerprint())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_pin_is_refused_without_asking_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &server_key())
+            .expect("first use");
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async {
+            panic!("a live pin should never reach a confirmation");
+        })
+        .await
+        .expect_err("a live pin was forgotten");
+
+        assert!(error.contains("still trusted"));
+    }
+
+    #[tokio::test]
+    async fn a_declined_confirmation_leaves_the_pin_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            Err("Host key changed: cancelled".to_string())
+        })
+        .await
+        .expect_err("a declined confirmation pinned the presented key anyway");
+
+        assert_eq!(error, "Host key changed: cancelled");
+        let kh = store.lock().await;
+        assert!(
+            kh.check_mismatch(HOST, PORT, &pinned).is_ok(),
+            "the original pin was replaced"
+        );
+        assert!(kh.check_mismatch(HOST, PORT, &presented).is_err());
+    }
+
+    #[tokio::test]
+    async fn trusting_confirms_the_fingerprints_the_store_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let shown = std::cell::RefCell::new(None);
+        replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |change| {
+            *shown.borrow_mut() = Some(change);
+            async { Ok(()) }
+        })
+        .await
+        .expect("trust");
+
+        let change = shown.into_inner().expect("nothing was confirmed");
+        assert_eq!(change.host, "prod.example.com:22");
+        assert_eq!(change.pinned_fingerprint, pinned.fingerprint());
+        assert_eq!(change.presented_fingerprint, presented.fingerprint());
+        assert!(store
+            .lock()
+            .await
+            .check_mismatch(HOST, PORT, &presented)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_fingerprint_that_is_not_the_held_one_never_reaches_a_dialog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &server_key());
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &server_key().fingerprint(), |_| async {
+            panic!("a key that is not going to be pinned should never be asked about");
+        })
+        .await
+        .expect_err("an unreviewed key was pinned");
+
+        assert!(error.contains("not the one that was reviewed"));
     }
 }

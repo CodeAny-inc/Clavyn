@@ -104,6 +104,14 @@ accepted as a first contact. Removed hosts stay visible under their own heading
 with the key they are still remembered by, and can be forgotten permanently from
 there, which erases the key and puts the host back on first-use.
 
+The two commands that can end a pin — forgetting a retained key, and trusting a
+key the server presented in its place — confirm in a native OS dialog that
+prints the fingerprint as the backend holds it. A page-level `confirm()` is not
+a control, because code calling the command directly never renders one; an
+OS-drawn dialog cannot be read, clicked or dismissed from the webview. A
+declined dialog also suppresses the next one for half a minute, so a caller
+cannot stack prompts until one is clicked through.
+
 ## Contributing
 
 Clavyn is open source and contributions are welcome. The project is already

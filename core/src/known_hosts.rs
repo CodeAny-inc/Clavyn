@@ -147,6 +147,17 @@ impl KnownHosts {
         self.collect(true)
     }
 
+    /// The fingerprint retained for a tombstoned host, if there is one.
+    ///
+    /// A live pin and an unknown host both answer `None`: this names the record
+    /// `forget` would erase, so a caller can print it before asking.
+    pub fn retained_fingerprint(&self, host: &str, port: u16) -> Option<String> {
+        self.entries
+            .get(&key_path(host, port))
+            .filter(|e| e.removed)
+            .map(|e| e.fingerprint.clone())
+    }
+
     fn collect(&self, removed: bool) -> Vec<(String, String, String)> {
         self.entries
             .iter()
@@ -207,17 +218,27 @@ impl KnownHosts {
     /// Key changes waiting for the user to review them.
     pub fn pending_changes(&self) -> Vec<HostKeyChange> {
         self.presented
-            .iter()
-            .filter_map(|(k, key)| {
-                let entry = self.entries.get(k)?;
-                Some(HostKeyChange {
-                    host: k.clone(),
-                    key_type: key.name().to_string(),
-                    pinned_fingerprint: entry.fingerprint.clone(),
-                    presented_fingerprint: key.fingerprint(),
-                })
-            })
+            .keys()
+            .filter_map(|k| self.change_for(k))
             .collect()
+    }
+
+    /// The pending change for one host, if the server presented a key that
+    /// conflicts with the pin. Reads the fingerprints out of the held key rather
+    /// than out of a caller's argument, so what is shown is what arrived.
+    pub fn pending_change(&self, host: &str, port: u16) -> Option<HostKeyChange> {
+        self.change_for(&key_path(host, port))
+    }
+
+    fn change_for(&self, k: &str) -> Option<HostKeyChange> {
+        let key = self.presented.get(k)?;
+        let entry = self.entries.get(k)?;
+        Some(HostKeyChange {
+            host: k.to_string(),
+            key_type: key.name().to_string(),
+            pinned_fingerprint: entry.fingerprint.clone(),
+            presented_fingerprint: key.fingerprint(),
+        })
     }
 
     /// Pin a held key in place of the recorded one. The caller passes the

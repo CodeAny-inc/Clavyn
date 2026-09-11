@@ -40,7 +40,11 @@ shell.
   tombstones an entry instead of deleting it, so unpinning cannot silently
   downgrade a host back to first-use. `removed()` lists the tombstones and
   `forget()` erases one, which is the only path back to first-use and refuses a
-  live pin, so it always takes two deliberate steps.
+  live pin, so it always takes two deliberate steps. The commands wrapping
+  `forget()` and `trust_presented_key()` show a native dialog first
+  (`desktop/src-tauri/src/host_key_prompt.rs`), carrying the fingerprint read
+  from the store rather than from the caller's arguments; `remove()` does not,
+  because the tombstone it leaves keeps the host under the mismatch check.
 - `connection` — `russh` async client. Auth resolved from `AuthMethod` +
   vault + (optional) password. The returned `Handle` is owned by the shell,
   which streams channel data to the UI.
