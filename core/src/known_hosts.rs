@@ -70,6 +70,35 @@ impl KnownHosts {
         crate::fs_util::write_private(&self.path, &data)
     }
 
+    /// Apply a change to the pins and persist it, restoring the previous state
+    /// if the write fails.
+    ///
+    /// Every mutator goes through here, because this is the one store whose
+    /// in-memory copy answers a trust question directly: `verify` decides
+    /// whether to accept a server key from `entries`, not from the file. A
+    /// mutation that was applied and then failed to save would be honoured for
+    /// the rest of the process and gone after a restart, so the same host would
+    /// be trusted now and back to first use later, with an error already
+    /// reported for the write that did not happen.
+    ///
+    /// `presented` is rolled back with `entries` even though it is never
+    /// written. It is keyed the same way and read by the same decisions, so
+    /// letting the two halves disagree would reintroduce the split this exists
+    /// to prevent.
+    fn commit<T>(&mut self, apply: impl FnOnce(&mut Self) -> T) -> Result<T> {
+        let entries = self.entries.clone();
+        let presented = self.presented.clone();
+        let applied = apply(self);
+        match self.save() {
+            Ok(()) => Ok(applied),
+            Err(e) => {
+                self.entries = entries;
+                self.presented = presented;
+                Err(e)
+            }
+        }
+    }
+
     /// Returns Ok(true) if trusted (matches or first-seen + recorded).
     /// Returns Ok(false) if a different key is already recorded (mismatch).
     ///
@@ -82,42 +111,37 @@ impl KnownHosts {
             return Ok(false);
         }
         let k = key_path(host, port);
-        match self.entries.get_mut(&k) {
-            // A live pin that already matches needs no write.
-            Some(existing) if !existing.removed => {}
-            Some(existing) => {
-                existing.removed = false;
-                self.save()?;
-            }
-            None => {
-                self.entries.insert(
-                    k,
-                    KnownHostEntry {
-                        key_type: key.name().to_string(),
-                        key_base64: key.public_key_base64(),
-                        fingerprint: key.fingerprint(),
-                        removed: false,
-                    },
-                );
-                self.save()?;
-            }
+        // A live pin that already matches needs no write. The other two cases —
+        // restoring a tombstone and recording a first-use — both end with the
+        // same live entry, and `check_mismatch` has already established that the
+        // presented key is the one that belongs there.
+        if matches!(self.entries.get(&k), Some(existing) if !existing.removed) {
+            return Ok(true);
         }
+        let entry = KnownHostEntry {
+            key_type: key.name().to_string(),
+            key_base64: key.public_key_base64(),
+            fingerprint: key.fingerprint(),
+            removed: false,
+        };
+        self.commit(|known_hosts| {
+            known_hosts.entries.insert(k, entry);
+        })?;
         Ok(true)
     }
 
     /// Explicitly replace a host key after user confirmation of a mismatch.
     pub fn replace(&mut self, host: &str, port: u16, key: &PublicKey) -> Result<()> {
         let k = key_path(host, port);
-        self.entries.insert(
-            k,
-            KnownHostEntry {
-                key_type: key.name().to_string(),
-                key_base64: key.public_key_base64(),
-                fingerprint: key.fingerprint(),
-                removed: false,
-            },
-        );
-        self.save()
+        let entry = KnownHostEntry {
+            key_type: key.name().to_string(),
+            key_base64: key.public_key_base64(),
+            fingerprint: key.fingerprint(),
+            removed: false,
+        };
+        self.commit(|known_hosts| {
+            known_hosts.entries.insert(k, entry);
+        })
     }
 
     /// Tombstone a known host entry: it stops being listed as trusted, but its
@@ -126,11 +150,12 @@ impl KnownHosts {
     /// connection re-pin anything as a first contact.
     pub fn remove(&mut self, host: &str, port: u16) -> Result<()> {
         let k = key_path(host, port);
-        if let Some(existing) = self.entries.get_mut(&k) {
-            existing.removed = true;
-        }
-        self.presented.remove(&k);
-        self.save()
+        self.commit(|known_hosts| {
+            if let Some(existing) = known_hosts.entries.get_mut(&k) {
+                existing.removed = true;
+            }
+            known_hosts.presented.remove(&k);
+        })
     }
 
     /// List trusted known host entries as (host:port, key_type, fingerprint).
@@ -194,9 +219,10 @@ impl KnownHosts {
     pub fn forget(&mut self, host: &str, port: u16) -> Result<()> {
         self.forgettable_fingerprint(host, port)?;
         let k = key_path(host, port);
-        self.entries.remove(&k);
-        self.presented.remove(&k);
-        self.save()
+        self.commit(|known_hosts| {
+            known_hosts.entries.remove(&k);
+            known_hosts.presented.remove(&k);
+        })
     }
 
     /// Returns the mismatch error for a host:port if the key doesn't match,
@@ -458,6 +484,68 @@ mod tests {
         assert_eq!(removed[0].0, "prod.example.com:22");
         assert_eq!(removed[0].2, key.fingerprint());
         assert!(hosts.list().is_empty());
+    }
+
+    /// Make the next save fail by putting a directory where the file belongs.
+    /// The staged write lands beside it, and the rename onto a directory is
+    /// refused, so this exercises a genuine persistence failure rather than a
+    /// simulated one.
+    fn block_writes(path: &std::path::Path) {
+        std::fs::remove_file(path).expect("remove file");
+        std::fs::create_dir(path).expect("create blocking directory");
+    }
+
+    #[test]
+    fn a_forget_that_cannot_be_saved_keeps_the_retained_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts.json");
+        let mut hosts = KnownHosts::load(path.clone()).expect("load");
+        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.remove(HOST, PORT).expect("remove");
+        let retained = hosts
+            .forgettable_fingerprint(HOST, PORT)
+            .expect("retained fingerprint");
+
+        block_writes(&path);
+        hosts
+            .forget(HOST, PORT)
+            .expect_err("forget must report the failed write");
+
+        // The call failed, so the protection it would have dropped is still in
+        // place. Without the rollback the tombstone would be gone from memory
+        // while the file still described it, and this process would treat the
+        // next key offered for that host as a first use.
+        assert_eq!(
+            hosts
+                .forgettable_fingerprint(HOST, PORT)
+                .expect("key still retained"),
+            retained
+        );
+        assert_eq!(hosts.removed().len(), 1);
+    }
+
+    #[test]
+    fn a_replace_that_cannot_be_saved_keeps_the_previous_pin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts.json");
+        let mut hosts = KnownHosts::load(path.clone()).expect("load");
+        let pinned = server_key();
+        let presented = server_key();
+        hosts.verify(HOST, PORT, &pinned).expect("first use");
+        hosts.hold_presented_key(HOST, PORT, &presented);
+        let shown = presented.fingerprint();
+
+        block_writes(&path);
+        hosts
+            .trust_presented_key(HOST, PORT, &shown)
+            .expect_err("trust must report the failed write");
+
+        // Runtime trust must not move ahead of the file. Without the rollback
+        // the presented key would be pinned in memory for the rest of the
+        // process and absent after a restart, so the same host would be trusted
+        // now and challenged later.
+        assert!(hosts.verify(HOST, PORT, &pinned).expect("original pin"));
+        assert!(hosts.check_mismatch(HOST, PORT, &presented).is_err());
     }
 
     #[test]
