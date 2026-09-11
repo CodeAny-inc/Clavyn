@@ -1,5 +1,10 @@
 name: Terminal workspace UI
 
+# Adding a trigger here means revisiting the self-hosted runner gate on the
+# job below. That gate asks whether a pull request is in play and whether its
+# head repository is this one, so it already covers `pull_request_target`. A
+# trigger that carries fork-authored code without a `pull_request` payload —
+# `issue_comment` on a pull request, or `workflow_run` — would slip past it.
 on:
   pull_request:
     branches: [main]
@@ -26,8 +31,13 @@ jobs:
   # the pull request (package install scripts, `vite.config.ts`, the Playwright
   # suite). An ephemeral runner contains that; a persistent one hands the
   # author a foothold that outlives the job.
+  #
+  # The gate keys off the head repository rather than off the event name, so a
+  # `pull_request_target` trigger added later cannot quietly reopen it. A head
+  # repository that no longer exists reads as null, which does not match this
+  # repository, so a deleted fork also stays GitHub-hosted.
   browser-ui:
-    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
+    runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
