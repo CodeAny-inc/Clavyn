@@ -55,8 +55,97 @@ pub struct AppState {
     pub biometric_mutation: Mutex<()>,
     pub sessions: Arc<SessionManager>,
     pub sftp: Arc<SftpManager>,
-    pub local_terminals: Mutex<std::collections::HashMap<String, LocalTerminal>>,
+    pub local_terminals: Mutex<LocalTerminals>,
     pub app_data_dir: PathBuf,
+}
+
+/// Live local terminals and the ids currently being opened.
+///
+/// Opening a terminal has to release the lock to spawn a PTY and a shell, which
+/// is slow and blocking. Checking the cap and then spawning would let every
+/// request in a burst pass the check before any of them inserted, so the shells
+/// would already exist by the time the surplus was refused. A reservation is
+/// taken under the same lock as the check instead, so the id and the slot are
+/// claimed before anything is spawned and the cap bounds processes rather than
+/// map entries.
+#[derive(Default)]
+pub struct LocalTerminals {
+    live: std::collections::HashMap<String, LocalTerminal>,
+    opening: std::collections::HashSet<String>,
+}
+
+impl LocalTerminals {
+    /// Slots in use, counting terminals still being opened.
+    pub fn len(&self) -> usize {
+        self.live.len() + self.opening.len()
+    }
+
+    /// Whether an id is taken, whether or not its shell exists yet.
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.live.contains_key(session_id) || self.opening.contains(session_id)
+    }
+
+    /// Ids of terminals that are ready to use. A reserved id is deliberately
+    /// absent: nothing can be written to it yet.
+    pub fn live_ids(&self) -> impl Iterator<Item = &String> {
+        self.live.keys()
+    }
+
+    pub fn get_live(&self, session_id: &str) -> Option<&LocalTerminal> {
+        self.live.get(session_id)
+    }
+
+    pub fn get_live_mut(&mut self, session_id: &str) -> Option<&mut LocalTerminal> {
+        self.live.get_mut(session_id)
+    }
+
+    pub fn reserve(&mut self, session_id: String) {
+        self.opening.insert(session_id);
+    }
+
+    /// Turns a reservation into a usable terminal. Returns the terminal back if
+    /// the reservation is gone, which means the session was closed while its
+    /// shell was starting and the caller has to tear it down.
+    pub fn fulfil(
+        &mut self,
+        session_id: &str,
+        terminal: LocalTerminal,
+    ) -> std::result::Result<(), LocalTerminal> {
+        if !self.opening.remove(session_id) {
+            return Err(terminal);
+        }
+        self.live.insert(session_id.to_string(), terminal);
+        Ok(())
+    }
+
+    /// Drops a reservation whose shell never started.
+    pub fn release(&mut self, session_id: &str) {
+        self.opening.remove(session_id);
+    }
+
+    /// Removes a session, live or still opening.
+    pub fn remove(&mut self, session_id: &str) -> Option<LocalTerminal> {
+        self.opening.remove(session_id);
+        self.live.remove(session_id)
+    }
+
+    /// Takes out the terminals `exited` reports as finished, returning them so
+    /// the caller can drop them with the lock released. A reservation has no
+    /// child to poll, so it is never reaped.
+    pub fn reap_exited(
+        &mut self,
+        exited: impl Fn(&mut LocalTerminal) -> bool,
+    ) -> Vec<LocalTerminal> {
+        let finished: Vec<String> = self
+            .live
+            .iter_mut()
+            .filter_map(|(id, term)| exited(term).then(|| id.clone()))
+            .collect();
+        finished
+            .iter()
+            .filter_map(|id| self.live.remove(id))
+            .collect()
+    }
 }
 
 /// A local terminal session backed by portable-pty.
@@ -112,7 +201,7 @@ impl AppState {
             biometric_mutation: Mutex::new(()),
             sessions,
             sftp,
-            local_terminals: Mutex::new(std::collections::HashMap::new()),
+            local_terminals: Mutex::new(LocalTerminals::default()),
             app_data_dir: app_data,
         }))
     }
