@@ -6,10 +6,19 @@ import type { Terminal } from "@xterm/xterm";
 class FakeWebglAddon {
   static instances: FakeWebglAddon[] = [];
   static failActivation = false;
+  // The real addon's constructor throws before xterm ever sees it when its own
+  // `webgl2` probe comes back null — "Webgl2 is only supported on Safari 16 and
+  // above" is the message it uses.
+  static failConstruction = false;
   disposed = 0;
   loaded = false;
   private handlers: (() => void)[] = [];
-  constructor() { FakeWebglAddon.instances.push(this); }
+  constructor() {
+    if (FakeWebglAddon.failConstruction) {
+      throw new Error("Webgl2 is only supported on Safari 16 and above");
+    }
+    FakeWebglAddon.instances.push(this);
+  }
   onContextLoss(handler: () => void) { this.handlers.push(handler); return { dispose() {} }; }
   loseContext() { this.handlers.forEach(handler => handler()); }
   dispose() { this.disposed += 1; }
@@ -39,6 +48,7 @@ async function load(webgl2 = true): Promise<Module> {
 beforeEach(() => {
   FakeWebglAddon.instances = [];
   FakeWebglAddon.failActivation = false;
+  FakeWebglAddon.failConstruction = false;
 });
 afterEach(() => { vi.restoreAllMocks(); });
 
@@ -74,6 +84,28 @@ describe("terminal GPU renderer budget", () => {
     await expect(acquireWebglRenderer("pane-1", fakeTerminal())).resolves.toBe(false);
     expect(webglBackedPaneIds()).toEqual([]);
     expect(FakeWebglAddon.instances[0].disposed).toBe(1);
+  });
+
+  // The probe in supportsWebgl2 uses default context attributes and caches its
+  // answer, so a platform the addon rejects outright — Safari below 16 — still
+  // gets as far as `new WebglAddon()`. That throw has to land as a DOM-renderer
+  // fallback, not as a rejected promise nobody is waiting on.
+  it("falls back to the DOM renderer when the addon constructor rejects the platform", async () => {
+    const { acquireWebglRenderer, webglBackedPaneIds } = await load();
+    FakeWebglAddon.failConstruction = true;
+    await expect(acquireWebglRenderer("pane-1", fakeTerminal())).resolves.toBe(false);
+    expect(webglBackedPaneIds()).toEqual([]);
+    expect(FakeWebglAddon.instances).toHaveLength(0);
+  });
+
+  it("leaves no pending claim behind when the constructor rejects the platform", async () => {
+    const { acquireWebglRenderer, webglBackedPaneIds } = await load();
+    FakeWebglAddon.failConstruction = true;
+    await expect(acquireWebglRenderer("pane-1", fakeTerminal())).resolves.toBe(false);
+    // A later attempt must be able to try again rather than join a dead claim.
+    FakeWebglAddon.failConstruction = false;
+    await expect(acquireWebglRenderer("pane-1", fakeTerminal())).resolves.toBe(true);
+    expect(webglBackedPaneIds()).toEqual(["pane-1"]);
   });
 
   it("re-acquiring a pane refreshes its position instead of attaching twice", async () => {
