@@ -1,0 +1,27 @@
+---
+description: Run a Greptile CLI review from the current local checkout and summarize findings. Use when asked for Greptile feedback before opening a PR or directly from a local checkout.
+globs:
+  - ".agents/skills/cli-review/**/*"
+alwaysApply: false
+---
+
+# CLI Review
+
+The canonical Agent Skill lives at `.agents/skills/cli-review/SKILL.md`
+(standard agentskills.io location, vendored verbatim from
+https://github.com/greptileai/skills — MIT). This Cursor rule is a thin
+pointer so Cursor's rules discovery finds it.
+
+## Quick reference
+
+```bash
+command -v greptile        # CLI installed? (npm i -g greptile)
+greptile whoami            # authenticated? (greptile login)
+greptile review --json     # run the review, summarize findings
+```
+
+## Full instructions
+
+Read `.agents/skills/cli-review/SKILL.md` for the complete workflow — repo
+context check, CLI install/auth, JSON output parsing, and the `--agent`
+fallback. See `AGENTS.md` "Greptile PR review skills" for requirements.
