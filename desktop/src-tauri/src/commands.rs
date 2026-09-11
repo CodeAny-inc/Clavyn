@@ -246,6 +246,38 @@ pub async fn remove_known_host(
     kh.remove(&host, port).map_err(err)
 }
 
+/// Hosts with no live pin whose last key is still retained, so a different key
+/// is reported as a change. Listed separately from the trusted hosts, because
+/// what the app retains has to be visible to be erasable.
+#[tauri::command]
+pub async fn list_removed_known_hosts(
+    state: State<'_, Arc<AppState>>,
+) -> ApiResult<Vec<KnownHostEntry>> {
+    let kh = state.known_hosts.lock().await;
+    Ok(kh
+        .removed()
+        .into_iter()
+        .map(|(host, key_type, fingerprint)| KnownHostEntry {
+            host,
+            key_type,
+            fingerprint,
+        })
+        .collect())
+}
+
+/// Erase the key retained for a tombstoned host. That puts the host back on
+/// trust-on-first-use, which is why it stands as its own call instead of being
+/// folded into `remove_known_host`.
+#[tauri::command]
+pub async fn forget_known_host(
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    port: u16,
+) -> ApiResult<()> {
+    let mut kh = state.known_hosts.lock().await;
+    kh.forget(&host, port).map_err(err)
+}
+
 #[derive(serde::Serialize)]
 pub struct PendingHostKeyChange {
     pub host: String,

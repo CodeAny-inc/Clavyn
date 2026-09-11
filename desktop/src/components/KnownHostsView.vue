@@ -8,6 +8,7 @@ import Button from "./ui/Button.vue";
 import {
   ShieldCheck,
   ShieldAlert,
+  ShieldOff,
   Trash2,
   Search,
   Fingerprint,
@@ -15,6 +16,7 @@ import {
 import type { KnownHostEntry, PendingHostKeyChange } from "../types";
 
 const hosts = ref<KnownHostEntry[]>([]);
+const removedHosts = ref<KnownHostEntry[]>([]);
 const changes = ref<PendingHostKeyChange[]>([]);
 const search = ref("");
 const loading = ref(false);
@@ -27,11 +29,13 @@ onMounted(async () => {
 async function load() {
   loading.value = true;
   try {
-    const [known, pending] = await Promise.all([
+    const [known, removed, pending] = await Promise.all([
       api.listKnownHosts(),
+      api.listRemovedKnownHosts(),
       api.listHostKeyChanges(),
     ]);
     hosts.value = known;
+    removedHosts.value = removed;
     changes.value = pending;
   } finally {
     loading.value = false;
@@ -49,12 +53,14 @@ const filteredHosts = computed(() => {
 });
 
 function parseHostPort(entry: string): [string, number] {
-  // known_hosts entries may be "host" or "host:port" or "[host]:port"
-  const m = entry.match(/^\[([^\]]+)\]:(\d+)$/);
-  if (m) return [m[1], parseInt(m[2], 10)];
-  const parts = entry.split(":");
-  if (parts.length === 2 && /^\d+$/.test(parts[1])) {
-    return [parts[0], parseInt(parts[1], 10)];
+  // Entries are written as "host:port" and may also arrive bracketed as
+  // "[host]:port". Split on the last colon rather than the only one, so a bare
+  // IPv6 address keeps its own colons: "::1:22" is ::1 on port 22.
+  const bracketed = entry.match(/^\[([^\]]+)\]:(\d+)$/);
+  if (bracketed) return [bracketed[1], parseInt(bracketed[2], 10)];
+  const lastColon = entry.lastIndexOf(":");
+  if (lastColon > 0 && /^\d+$/.test(entry.slice(lastColon + 1))) {
+    return [entry.slice(0, lastColon), parseInt(entry.slice(lastColon + 1), 10)];
   }
   return [entry, 22];
 }
@@ -65,6 +71,27 @@ async function remove(entry: KnownHostEntry) {
     await api.removeKnownHost(host, port);
     await load();
   }
+}
+
+const forgetError = ref("");
+
+async function forget(entry: KnownHostEntry) {
+  const [host, port] = parseHostPort(entry.host);
+  const confirmed = confirm(
+    `Permanently forget "${entry.host}"?\n\n` +
+      `Clavyn still remembers the key this host was pinned to (${entry.fingerprint}), ` +
+      "which is how it can tell a changed key from a new one.\n\n" +
+      "Forgetting it erases that record. The next connection to this host will " +
+      "trust whatever key it is offered, with no warning.",
+  );
+  if (!confirmed) return;
+  forgetError.value = "";
+  try {
+    await api.forgetKnownHost(host, port);
+  } catch (cause) {
+    forgetError.value = String(cause);
+  }
+  await load();
 }
 
 const trustError = ref("");
@@ -111,8 +138,10 @@ async function trust(change: PendingHostKeyChange) {
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
       <!-- Key changes awaiting review. A host listed here is refusing to connect
-           until the presented key is trusted or the server is fixed. -->
-      <div v-if="changes.length" class="mb-3 flex flex-col gap-1.5">
+           until the presented key is trusted or the server is fixed. Held back
+           while a reload is in flight, so a stale list never sits above the
+           loading indicator. -->
+      <div v-if="!loading && changes.length" class="mb-3 flex flex-col gap-1.5">
         <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
           Host key changes
         </div>
@@ -144,6 +173,42 @@ async function trust(change: PendingHostKeyChange) {
           </Button>
         </div>
         <p v-if="trustError" class="text-[12px] text-destructive">{{ trustError }}</p>
+      </div>
+
+      <!-- Removed hosts whose last key is still retained. Kept visible so the
+           record can be erased from here instead of by hand. -->
+      <div v-if="!loading && removedHosts.length" class="mb-3 flex flex-col gap-1.5">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Removed hosts
+        </div>
+        <div
+          v-for="entry in removedHosts"
+          :key="entry.host"
+          class="flex items-start gap-3 rounded-md border border-border bg-card p-3"
+          data-testid="removed-known-host"
+        >
+          <div class="flex h-9 w-9 items-center justify-center rounded-md shrink-0 bg-muted">
+            <ShieldOff class="size-4 text-muted-foreground" :stroke-width="1.75" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-medium truncate font-mono">{{ maskAddress(entry.host) }}</span>
+              <Badge>{{ entry.key_type }}</Badge>
+            </div>
+            <p class="mt-1 text-[12px] text-muted-foreground">
+              No longer trusted. The key it was pinned to is still remembered, so
+              a different key is reported as a change rather than a first contact.
+            </p>
+            <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
+              <Fingerprint class="size-3" :stroke-width="1.75" />
+              <span class="font-mono truncate">{{ entry.fingerprint }}</span>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" @click="forget(entry)">
+            Forget permanently
+          </Button>
+        </div>
+        <p v-if="forgetError" class="text-[12px] text-destructive">{{ forgetError }}</p>
       </div>
 
       <div v-if="loading" class="py-12 text-center text-[13px] text-muted-foreground">Loading...</div>
@@ -178,7 +243,10 @@ async function trust(change: PendingHostKeyChange) {
       </div>
 
       <!-- Empty state -->
-      <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
+      <div
+        v-else-if="!changes.length && !removedHosts.length"
+        class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center"
+      >
         <ShieldCheck class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
           <p class="text-[14px] font-medium text-foreground">No known hosts</p>

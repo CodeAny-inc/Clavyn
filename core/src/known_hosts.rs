@@ -35,9 +35,14 @@ struct KnownHostEntry {
     /// Tombstone set by `remove`. The entry is hidden from `list` but its key is
     /// kept, so a connection presenting a different key is still classified as a
     /// change instead of a first contact. Defaults to false so a stored file
-    /// without the field loads as a live pin.
-    #[serde(default)]
+    /// without the field loads as a live pin, and is left out again when false
+    /// so ordinary pins keep the shape they have always had on disk.
+    #[serde(default, skip_serializing_if = "is_false")]
     removed: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl KnownHosts {
@@ -71,35 +76,31 @@ impl KnownHosts {
     /// A tombstoned entry whose key is presented again is restored, so a host
     /// removed by mistake becomes visible in `list` after the next connection.
     pub fn verify(&mut self, host: &str, port: u16, key: &PublicKey) -> Result<bool> {
+        // `check_mismatch` is the only place a presented key is compared with a
+        // recorded one, so the two callers cannot drift apart.
+        if self.check_mismatch(host, port, key).is_err() {
+            return Ok(false);
+        }
         let k = key_path(host, port);
-        let key_b64 = key.public_key_base64();
-        // Some(true) marks a tombstone waiting to be restored, Some(false) a
-        // live pin that already matches.
-        let tombstoned = match self.entries.get(&k) {
-            None => None,
-            Some(existing) if existing.key_base64 == key_b64 => Some(existing.removed),
-            Some(_) => return Ok(false),
-        };
-        match tombstoned {
+        match self.entries.get_mut(&k) {
+            // A live pin that already matches needs no write.
+            Some(existing) if !existing.removed => {}
+            Some(existing) => {
+                existing.removed = false;
+                self.save()?;
+            }
             None => {
                 self.entries.insert(
                     k,
                     KnownHostEntry {
                         key_type: key.name().to_string(),
-                        key_base64: key_b64,
+                        key_base64: key.public_key_base64(),
                         fingerprint: key.fingerprint(),
                         removed: false,
                     },
                 );
                 self.save()?;
             }
-            Some(true) => {
-                if let Some(existing) = self.entries.get_mut(&k) {
-                    existing.removed = false;
-                }
-                self.save()?;
-            }
-            Some(false) => {}
         }
         Ok(true)
     }
@@ -134,11 +135,50 @@ impl KnownHosts {
 
     /// List trusted known host entries as (host:port, key_type, fingerprint).
     pub fn list(&self) -> Vec<(String, String, String)> {
+        self.collect(false)
+    }
+
+    /// List tombstoned entries in the same shape as `list`.
+    ///
+    /// A retained key is still a record of a host that is no longer trusted, so
+    /// it has to be visible somewhere and erasable from there; otherwise the
+    /// only way to drop one is to hand-edit `known_hosts.json`.
+    pub fn removed(&self) -> Vec<(String, String, String)> {
+        self.collect(true)
+    }
+
+    fn collect(&self, removed: bool) -> Vec<(String, String, String)> {
         self.entries
             .iter()
-            .filter(|(_, e)| !e.removed)
+            .filter(|(_, e)| e.removed == removed)
             .map(|(k, e)| (k.clone(), e.key_type.clone(), e.fingerprint.clone()))
             .collect()
+    }
+
+    /// Erase a tombstoned entry and the key it retained.
+    ///
+    /// This is the deliberate end of the retention `remove` starts, and it puts
+    /// the host back on trust-on-first-use: the next connection pins whatever
+    /// answers. A live pin is refused, so forgetting a host is always two
+    /// decisions rather than one.
+    pub fn forget(&mut self, host: &str, port: u16) -> Result<()> {
+        let k = key_path(host, port);
+        match self.entries.get(&k) {
+            None => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{k} is not a removed known host"
+                )))
+            }
+            Some(existing) if !existing.removed => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{k} is still trusted; remove it before forgetting the key it was pinned to"
+                )))
+            }
+            Some(_) => {}
+        }
+        self.entries.remove(&k);
+        self.presented.remove(&k);
+        self.save()
     }
 
     /// Returns the mismatch error for a host:port if the key doesn't match,
@@ -351,6 +391,82 @@ mod tests {
             .trust_presented_key(HOST, PORT, "SHA256:whatever")
             .expect_err("a host key was replaced without the server presenting one");
         assert!(error.to_string().contains("no unreviewed host key"));
+    }
+
+    #[test]
+    fn a_removed_host_is_listed_so_its_retained_key_can_be_erased() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = empty_store(dir.path());
+        let key = server_key();
+        hosts.verify(HOST, PORT, &key).expect("first use");
+        hosts.remove(HOST, PORT).expect("remove");
+
+        let removed = hosts.removed();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "prod.example.com:22");
+        assert_eq!(removed[0].2, key.fingerprint());
+        assert!(hosts.list().is_empty());
+    }
+
+    #[test]
+    fn forgetting_a_removed_host_erases_the_retained_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts.json");
+        let mut hosts = KnownHosts::load(path.clone()).expect("load");
+        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.remove(HOST, PORT).expect("remove");
+        hosts.forget(HOST, PORT).expect("forget");
+
+        assert!(hosts.removed().is_empty());
+        assert!(hosts.list().is_empty());
+        assert!(!std::fs::read_to_string(&path)
+            .expect("read back")
+            .contains("prod.example.com"));
+
+        // The host is deliberately back on first use, which is the whole point
+        // of forgetting it.
+        let mut reloaded = KnownHosts::load(path).expect("reload");
+        assert!(reloaded.verify(HOST, PORT, &server_key()).expect("verify"));
+    }
+
+    #[test]
+    fn a_trusted_host_cannot_be_forgotten_in_one_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = empty_store(dir.path());
+        let pinned = server_key();
+        hosts.verify(HOST, PORT, &pinned).expect("first use");
+
+        let error = hosts
+            .forget(HOST, PORT)
+            .expect_err("a live pin was erased without being removed first");
+        assert!(error.to_string().contains("still trusted"), "{error}");
+        assert_eq!(hosts.list().len(), 1);
+        assert!(!hosts.verify(HOST, PORT, &server_key()).expect("other key"));
+    }
+
+    #[test]
+    fn an_unknown_host_cannot_be_forgotten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = empty_store(dir.path());
+        let error = hosts
+            .forget(HOST, PORT)
+            .expect_err("forgetting a host that was never known reported success");
+        assert!(error.to_string().contains("not a removed known host"), "{error}");
+    }
+
+    #[test]
+    fn a_live_pin_is_written_without_the_tombstone_field() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts.json");
+        let mut hosts = KnownHosts::load(path.clone()).expect("load");
+        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+
+        let live = std::fs::read_to_string(&path).expect("read back");
+        assert!(!live.contains("removed"), "{live}");
+
+        hosts.remove(HOST, PORT).expect("remove");
+        let tombstoned = std::fs::read_to_string(&path).expect("read back");
+        assert!(tombstoned.contains("\"removed\": true"), "{tombstoned}");
     }
 
     fn pinned_store(dir: &std::path::Path) -> std::path::PathBuf {

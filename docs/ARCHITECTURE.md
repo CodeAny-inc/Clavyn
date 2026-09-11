@@ -38,7 +38,9 @@ shell.
   memory and `trust_presented_key()` — the only caller of `replace()` — pins it
   after the user confirms the fingerprint that was displayed. `remove()`
   tombstones an entry instead of deleting it, so unpinning cannot silently
-  downgrade a host back to first-use.
+  downgrade a host back to first-use. `removed()` lists the tombstones and
+  `forget()` erases one, which is the only path back to first-use and refuses a
+  live pin, so it always takes two deliberate steps.
 - `connection` — `russh` async client. Auth resolved from `AuthMethod` +
   vault + (optional) password. The returned `Handle` is owned by the shell,
   which streams channel data to the UI.
