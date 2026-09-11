@@ -1,4 +1,4 @@
-use crate::state::{AppState, LocalTerminal};
+use crate::state::{AppState, LocalTerminal, LocalTerminals};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
@@ -385,6 +385,54 @@ pub async fn connect_ssh(
     Ok(info)
 }
 
+/// Upper bound on local terminals held open at once. Each one owns a PTY, a
+/// child shell and a reader thread, so an unbounded map is an unbounded
+/// resource claim on the machine.
+const MAX_LOCAL_TERMINALS: usize = 16;
+
+/// Decide whether a new local terminal may take `session_id`.
+///
+/// `session_write`, `session_resize` and the `session-data` event stream all
+/// address sessions by id alone, so a second session on a live id silently
+/// repoints one of those channels at the other session — for a local id the
+/// previous entry is dropped, hanging up its shell, and for an SSH id writes
+/// keep going to SSH while the new PTY's output is rendered in the SSH pane.
+/// Refuse the collision here instead of resolving it arbitrarily.
+///
+/// This guards local-terminal creation only. `connect_ssh` performs no such
+/// check and `SessionManager::create_ssh_session` inserts unconditionally, so
+/// an SSH session can still be opened on an id a local terminal already holds,
+/// or on top of another SSH session. Uniqueness is therefore a property of this
+/// entry point, not an invariant of session ids in general.
+fn admit_local_terminal(
+    session_id: &str,
+    locals: &LocalTerminals,
+    ssh_session_ids: &[String],
+) -> ApiResult<()> {
+    if locals.contains(session_id) {
+        return Err("session id is already in use by a local terminal".into());
+    }
+    if ssh_session_ids.iter().any(|id| id == session_id) {
+        return Err("session id is already in use by an SSH session".into());
+    }
+    if locals.len() >= MAX_LOCAL_TERMINALS {
+        return Err(format!(
+            "too many local terminals open (limit {MAX_LOCAL_TERMINALS}); close one first"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a local terminal's shell has finished, given the result of
+/// `Child::try_wait`.
+///
+/// A child whose status cannot be read counts as live. A failed read is not
+/// evidence that the shell exited, and treating it as one would discard a
+/// terminal the user is still typing into.
+fn local_shell_exited(status: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
+    matches!(status, Ok(Some(_)))
+}
+
 #[tauri::command]
 pub async fn create_local_terminal(
     state: State<'_, Arc<AppState>>,
@@ -395,15 +443,58 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
+    // `SessionManager::list` takes and releases its own lock and returns a copy,
+    // so this snapshot is stale by the time the local map is locked: the guard
+    // below covers the local map and the cap, not the SSH half of the check.
+    // Taking it first is deliberate — every site that touches both maps drops
+    // the `sessions` guard before taking `local_terminals`, and nesting them
+    // here would be the only place with the opposite order.
+    let ssh_session_ids = state.sessions.list().await;
+    let (dead, admission) = {
+        let mut locals = state.local_terminals.lock().await;
+        // An entry outlives its shell: nothing removes it before `close_session`
+        // or the pane unmounting, so panes left sitting disconnected keep their
+        // slots. Reaping first makes the cap bound live shells rather than map
+        // entries.
+        let dead = locals.reap_exited(|term| local_shell_exited(term.child.try_wait()));
+        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids);
+        // Claim the id and the slot before releasing the lock. The PTY and the
+        // shell below are slow and blocking, so they cannot be started under it;
+        // checking here and inserting afterwards would let every request in a
+        // burst pass the check and spawn, with the surplus refused only once the
+        // processes already existed.
+        if admission.is_ok() {
+            locals.reserve(session_id.clone());
+        }
+        (dead, admission)
+    };
+    // Tearing down the reaped PTYs can block, so it happens with the lock
+    // released rather than in front of every other pane's keystrokes.
+    drop(dead);
+    admission?;
+
+    // From here every failure has to give the reservation back, or the slot
+    // stays claimed for a terminal that will never exist.
+    macro_rules! release_on_err {
+        ($result:expr, $context:literal) => {
+            match $result {
+                Ok(value) => value,
+                Err(e) => {
+                    state.local_terminals.lock().await.release(&session_id);
+                    return Err(format!(concat!($context, ": {}"), e));
+                }
+            }
+        };
+    }
+
     let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: rows.unwrap_or(24) as u16,
-            cols: cols.unwrap_or(80) as u16,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("openpty: {e}"))?;
+    let pair = pty_system.openpty(PtySize {
+        rows: rows.unwrap_or(24) as u16,
+        cols: cols.unwrap_or(80) as u16,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    let pair = release_on_err!(pair, "openpty");
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| {
         if cfg!(target_os = "windows") {
@@ -416,20 +507,11 @@ pub async fn create_local_terminal(
     let mut cmd = CommandBuilder::new(&shell);
     cmd.env("TERM", "xterm-256color");
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("spawn: {e}"))?;
+    let child = release_on_err!(pair.slave.spawn_command(cmd), "spawn");
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("clone reader: {e}"))?;
+    let mut reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
 
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("take writer: {e}"))?;
+    let writer = release_on_err!(pair.master.take_writer(), "take writer");
 
     let master = pair.master;
 
@@ -437,9 +519,49 @@ pub async fn create_local_terminal(
     // On Unix this is the correct pattern — the child has its own copy.
     drop(pair.slave);
 
-    // Spawn a reading thread that emits data events
+    // The lock is taken again to turn the reservation into a live terminal. The
+    // id and the slot were claimed before any of the blocking work above, so
+    // neither can have been taken in the meantime; only the SSH half of the
+    // check can have changed, because `connect_ssh` never consults the local
+    // map and so cannot be held off by a reservation.
+    let ssh_session_ids = state.sessions.list().await;
+    let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let terminal = LocalTerminal {
+        writer,
+        master,
+        child,
+        owns_session_id: owns_session_id.clone(),
+    };
+    let refused = {
+        let mut locals = state.local_terminals.lock().await;
+        if ssh_session_ids.iter().any(|id| id == &session_id) {
+            locals.release(&session_id);
+            Some((
+                "session id is already in use by an SSH session".to_string(),
+                terminal,
+            ))
+        } else {
+            // A reservation that is no longer there means the session was closed
+            // while its shell was starting, so this terminal is not wanted.
+            match locals.fulfil(&session_id, terminal) {
+                Ok(()) => None,
+                Err(unwanted) => Some((
+                    "session was closed while the terminal was starting".to_string(),
+                    unwanted,
+                )),
+            }
+        }
+    };
+    if let Some((error, _refused)) = refused {
+        // Torn down with the lock released, for the same reason the reaped
+        // entries are.
+        return Err(error);
+    }
+
+    // Started after the insert: a terminal refused above must not emit
+    // `session-closed` for an id that belongs to another session.
     let app_handle = app.clone();
-    let sid = session_id.clone();
+    let sid = session_id;
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 8192];
@@ -447,6 +569,12 @@ pub async fn create_local_terminal(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // The shell can outlive its map entry, and the id it used is
+                    // reusable, so output that arrives after the entry is gone
+                    // would be rendered in whatever holds that id now.
+                    if !owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
                     let _ = app_handle.emit(
                         "session-data",
                         crate::state::SessionDataEvent {
@@ -462,26 +590,18 @@ pub async fn create_local_terminal(
                 Err(_) => break,
             }
         }
-        let _ = app_handle.emit(
-            "session-closed",
-            crate::state::SessionClosedEvent {
-                session_id: sid,
-                reason: "local terminal closed".to_string(),
-            },
-        );
+        // Likewise for the closing notice: announcing this shell's exit on an
+        // id that now belongs to a replacement would disconnect the replacement.
+        if owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = app_handle.emit(
+                "session-closed",
+                crate::state::SessionClosedEvent {
+                    session_id: sid,
+                    reason: "local terminal closed".to_string(),
+                },
+            );
+        }
     });
-
-    // Store the master and child for writing, resizing, and keeping
-    // the child process alive.
-    let mut locals = state.local_terminals.lock().await;
-    locals.insert(
-        session_id,
-        LocalTerminal {
-            writer,
-            master,
-            _child: child,
-        },
-    );
 
     Ok(())
 }
@@ -498,7 +618,7 @@ pub async fn session_write(
     }
     // Try local terminal
     let mut locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get_mut(&session_id) {
+    if let Some(term) = locals.get_live_mut(&session_id) {
         use std::io::Write;
         term.writer.write_all(&data).map_err(|e| format!("write: {e}"))?;
         term.writer.flush().map_err(|e| format!("flush: {e}"))?;
@@ -520,7 +640,7 @@ pub async fn session_resize(
     }
     // Try local terminal
     let locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get(&session_id) {
+    if let Some(term) = locals.get_live(&session_id) {
         use portable_pty::PtySize;
         term.master
             .resize(PtySize {
@@ -554,7 +674,7 @@ pub async fn close_session(
 pub async fn list_sessions(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<String>> {
     let mut sessions = state.sessions.list().await;
     let locals = state.local_terminals.lock().await;
-    sessions.extend(locals.keys().cloned());
+    sessions.extend(locals.live_ids().cloned());
     Ok(sessions)
 }
 
@@ -970,6 +1090,120 @@ pub async fn install_update(
     app.request_restart();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod admit_local_terminal_tests {
+    use super::*;
+
+    /// `count` terminals mid-open. A reservation is how a caller holds a slot
+    /// while its shell starts, and it is the only occupancy a test can build:
+    /// a live entry owns a real PTY.
+    fn opening(count: usize) -> LocalTerminals {
+        let mut locals = LocalTerminals::default();
+        for i in 0..count {
+            locals.reserve(format!("local-{i}"));
+        }
+        locals
+    }
+
+    #[test]
+    fn accepts_a_fresh_id_while_slots_remain() {
+        assert!(admit_local_terminal("fresh", &opening(1), &["ssh-a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_a_local_terminal() {
+        let error = admit_local_terminal("local-0", &opening(2), &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_an_ssh_session() {
+        let error =
+            admit_local_terminal("ssh-a", &LocalTerminals::default(), &["ssh-a".to_string()])
+                .unwrap_err();
+        assert!(error.contains("SSH session"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_fresh_id_once_the_concurrent_limit_is_reached() {
+        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), &[]).is_ok());
+        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(error.contains("too many local terminals"), "{error}");
+    }
+
+    #[test]
+    fn reports_the_collision_rather_than_the_limit_when_both_apply() {
+        let error =
+            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
+
+    /// The window this closes: the shell is spawned with the lock released, so
+    /// a burst that only checked the cap would have every request pass before
+    /// any of them inserted, and the surplus would be refused with the
+    /// processes already running. Occupancy has to be claimed by the check
+    /// itself.
+    #[test]
+    fn a_burst_of_admissions_claims_slots_as_it_goes_rather_than_all_passing() {
+        let mut locals = LocalTerminals::default();
+        let mut admitted = 0;
+        for i in 0..MAX_LOCAL_TERMINALS * 2 {
+            let id = format!("burst-{i}");
+            if admit_local_terminal(&id, &locals, &[]).is_ok() {
+                locals.reserve(id);
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, MAX_LOCAL_TERMINALS);
+        assert_eq!(locals.len(), MAX_LOCAL_TERMINALS);
+    }
+
+    /// A reservation that is never fulfilled has to free its slot, or a failed
+    /// spawn would shrink the cap for the rest of the session.
+    #[test]
+    fn releasing_a_reservation_returns_its_slot() {
+        let mut locals = opening(MAX_LOCAL_TERMINALS);
+        assert!(admit_local_terminal("fresh", &locals, &[]).is_err());
+        locals.release("local-0");
+        assert!(admit_local_terminal("fresh", &locals, &[]).is_ok());
+        assert!(admit_local_terminal("local-0", &locals, &[]).is_ok());
+    }
+
+    /// A reserved id is claimed but not usable yet: `session_write` and
+    /// `list_sessions` must not see it, or the UI would address a terminal
+    /// whose shell does not exist.
+    #[test]
+    fn a_reserved_id_is_claimed_but_not_yet_addressable() {
+        let locals = opening(2);
+        assert!(locals.contains("local-0"));
+        assert!(locals.get_live("local-0").is_none());
+        assert_eq!(locals.live_ids().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod local_terminal_reaping_tests {
+    use super::*;
+    use portable_pty::ExitStatus;
+
+    #[test]
+    fn a_child_that_reported_an_exit_is_finished() {
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(0)))));
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(1)))));
+    }
+
+    #[test]
+    fn a_child_that_has_not_exited_is_live() {
+        assert!(!local_shell_exited(Ok(None)));
+    }
+
+    #[test]
+    fn a_child_whose_status_cannot_be_read_is_live() {
+        let unreadable = std::io::Error::new(std::io::ErrorKind::Other, "status unavailable");
+        assert!(!local_shell_exited(Err(unreadable)));
+    }
 }
 
 #[cfg(test)]
