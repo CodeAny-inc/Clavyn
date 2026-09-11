@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-// check-comments:skip-file
 // check-comments.test.mjs — regression tests for check-comments.mjs.
 //
 // Run with: node --test scripts/verify/check-comments.test.mjs
