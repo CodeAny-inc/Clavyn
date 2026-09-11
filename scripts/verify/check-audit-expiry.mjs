@@ -62,15 +62,30 @@ function isoString(stamp) {
   return new Date(stamp).toISOString().slice(0, 10);
 }
 
+const IGNORE_OPEN_RE = /^\s*ignore\s*=\s*\[/;
+const QUOTED_RE = /"([^"]+)"/g;
+
 // Extract the `ignore = [ … ]` array from an audit.toml, returning one record
 // per advisory with the comment lines that precede it inside the array.
 function parseIgnoreEntries(src) {
   const lines = src.split("\n");
-  const start = lines.findIndex((l) => /^\s*ignore\s*=\s*\[/.test(l));
+  const start = lines.findIndex((l) => IGNORE_OPEN_RE.test(l));
   if (start === -1) return null;
 
   const entries = [];
   let comments = [];
+
+  // The array can close on the same line it opens. `ignore = []` is what the
+  // file looks like once every advisory has been resolved, and that is a clean
+  // pass, not a parse failure — there is just no later `]` line to scan for.
+  const head = lines[start].replace(IGNORE_OPEN_RE, "");
+  const headClose = head.indexOf("]");
+  if (headClose !== -1) {
+    for (const m of head.slice(0, headClose).matchAll(QUOTED_RE)) {
+      entries.push({ advisory: m[1], line: start + 1, comments: [] });
+    }
+    return entries;
+  }
 
   for (let i = start + 1; i < lines.length; i++) {
     const line = lines[i];
