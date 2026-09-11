@@ -511,7 +511,7 @@ dependencies = [
  "chrono",
  "rand 0.8.8",
  "russh",
- "russh-cryptovec",
+ "russh-cryptovec 0.62.0",
  "russh-keys",
  "russh-sftp",
  "serde",
@@ -3879,7 +3879,7 @@ dependencies = [
  "poly1305",
  "rand 0.8.8",
  "rand_core 0.6.4",
- "russh-cryptovec",
+ "russh-cryptovec 0.7.3",
  "russh-keys",
  "russh-sftp",
  "russh-util",
@@ -3900,6 +3900,17 @@ checksum = "fadd2c0ab350e21c66556f94ee06f766d8bdae3213857ba7610bfd8e10e51880"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "russh-cryptovec"
+version = "0.62.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3aec6cb630dbe85d72ffd7bcd95f07e1bd69f9f270ee8adfa1afe443a6331438"
+dependencies = [
+ "log",
+ "nix 0.31.3",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3940,7 +3951,7 @@ dependencies = [
  "rand 0.8.8",
  "rand_core 0.6.4",
  "rsa",
- "russh-cryptovec",
+ "russh-cryptovec 0.7.3",
  "russh-util",
  "sec1",
  "serde",
