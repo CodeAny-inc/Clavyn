@@ -642,7 +642,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "chrono",
- "rand 0.8.8",
+ "rand 0.10.2",
  "russh",
  "russh-cryptovec",
  "russh-keys",
