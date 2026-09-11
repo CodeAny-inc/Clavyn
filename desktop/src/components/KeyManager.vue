@@ -57,9 +57,23 @@ watch(showAdd, (open) => {
 // `useAutoLock` calls `vault.lock()` and nothing else, and the unlock modal is
 // a sibling of the view rather than a replacement for it, so neither the
 // visibility watcher above nor unmount fires at the lock. Close the dialog and
-// discard the key material synchronously at the session boundary so a lock
-// leaves no plaintext key in the form or in the rendered textarea.
-watch(() => vault.unlocked, resetForm, { flush: "sync" });
+// discard the key material synchronously at the lock so it leaves no plaintext
+// key in the form or in the rendered textarea.
+//
+// The lock direction only. `resetForm` also closes the dialog and drops the
+// label, which is containment for a session that ended but pure loss for one
+// that just began: this view is reachable while locked, so an unlock can land
+// on a half-typed import belonging to the very person who just authenticated.
+// The synchronous flush still observes every transition through `false`, so a
+// lock and an unlock within one tick clears on the lock rather than slipping
+// past.
+watch(
+  () => vault.unlocked,
+  (unlocked) => {
+    if (!unlocked) resetForm();
+  },
+  { flush: "sync" },
+);
 
 // Only navigating away from this view unmounts the component today. Clearing
 // here means a future caller that keeps it mounted does not silently reopen

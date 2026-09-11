@@ -100,6 +100,25 @@ describe("KeyManager add-key dialog", () => {
     expect(wrapper.html()).not.toContain("b3BlbnNzaC1rZXktdjEAAAAA");
   });
 
+  it("keeps the dialog and the typed form when the vault unlocks", async () => {
+    const vault = useVaultStore();
+    expect(vault.unlocked).toBe(false);
+
+    // This view is reachable while the vault is locked, so a user can already
+    // be mid-import when the unlock lands. An unlock only ever adds authority,
+    // and it cannot change who is at the keyboard: reaching it with key
+    // material still in the form means the same person typed it and then
+    // authenticated, with no lock in between to contain.
+    await openImportTabWithKeyMaterial();
+
+    vault.unlocked = true;
+    await flushPromises();
+
+    expect((wrapper.get("#key-private").element as HTMLTextAreaElement).value).toBe(PRIVATE_KEY);
+    expect((wrapper.get("#key-passphrase").element as HTMLInputElement).value).toBe("hunter2");
+    expect((wrapper.get("#key-label").element as HTMLInputElement).value).toBe("laptop");
+  });
+
   it("drops the private key and passphrase when the view is unmounted", async () => {
     await openImportTabWithKeyMaterial();
     const addForm = (wrapper.vm as unknown as { addForm: Record<string, string> }).addForm;
