@@ -89,7 +89,8 @@ pub async fn connect(
 
     let addr = format!("{}:{}", host.hostname, host.port);
     // A changed host key keeps its own error variant: wrapping it in a generic
-    // connect failure would hide the fingerprints the user needs to compare.
+    // connect failure would hide the two fingerprints that make the change
+    // legible.
     let mut session = client::connect(config, &addr, handler)
         .await
         .map_err(|e| match e {
