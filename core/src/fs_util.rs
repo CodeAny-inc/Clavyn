@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 
 /// Write `contents` to `path` atomically, readable only by the owner.
 ///
-/// The bytes go to a sibling temporary file that is restricted to the account
-/// running the process before a single byte is written, then flushed to disk
-/// and renamed over the target. Three properties fall out of that:
+/// The bytes go to a sibling temporary file that is created by this process and
+/// restricted to the account running it before a single byte is written, then
+/// flushed to disk and renamed over the target. Three properties fall out of
+/// that:
 ///
 /// * A crash or power loss leaves either the previous file or the new one. A
 ///   plain `fs::write` truncates first, so an interrupted save can leave a
@@ -15,25 +16,30 @@ use std::path::{Path, PathBuf};
 ///   left behind with looser permissions by an earlier version is replaced by a
 ///   restricted one on the next save. `rename` carries the temporary file's
 ///   permissions over to the target on both platforms.
-/// * The restriction is applied on the open handle rather than by path, so no
-///   other process can substitute a different file in between.
+/// * The temporary file is always a new one. Any leftover from an interrupted
+///   save is unlinked, and the open then refuses a file it did not create, so
+///   the object that gets renamed over the target is never one another process
+///   planted at the temporary path for this one to write through. That matters
+///   beyond the contents: a file object carries its ownership across a rename,
+///   and on Windows an owner outranks the DACL.
 ///
 /// The mechanism differs per platform because the permission models do:
 ///
 /// * Unix creates the temporary file with mode 0600.
 /// * Windows has no mode bits, so the temporary file gets an explicit protected
-///   DACL naming only the account that runs the process. The `owner_only`
-///   module documents why that is more than the ACL the user profile already
-///   supplies.
+///   DACL naming only the account that runs the process, and that same account
+///   written as the file's owner. The `owner_only` module documents why the
+///   DACL alone is neither what the user profile already supplies nor enough on
+///   its own.
 ///
 /// A filesystem that cannot hold the restriction fails the whole save rather
 /// than falling back to an unprotected write. `vault.json` is the only place
 /// private keys are persisted, so a store that cannot keep it to one account is
 /// a store this refuses to use; the previous file is left intact and the error
-/// reaches the caller.
+/// reaches the caller, naming the file and the reason it could not be written.
 pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| save_failed(path, e))?;
     }
 
     let tmp = temp_path(path);
@@ -41,9 +47,22 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
-            Err(e.into())
+            Err(save_failed(path, e))
         }
     }
+}
+
+/// Name the file a failed save was targeting. Every caller of `write_private`
+/// hands it a path the user never typed, so an unadorned `io::Error` — "the
+/// request is not supported", say — reaches the UI with nothing in it that
+/// identifies which of `vault.json`, `store.json` or `known_hosts.json` failed
+/// or where it lives.
+fn save_failed(path: &Path, error: std::io::Error) -> crate::CoreError {
+    std::io::Error::new(
+        error.kind(),
+        format!("could not save {}: {error}", path.display()),
+    )
+    .into()
 }
 
 /// Result of unlinking a private file. A directory-sync failure is reported
@@ -110,8 +129,17 @@ fn temp_path(path: &Path) -> PathBuf {
 }
 
 fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
+    // An interrupted save can leave a temporary file behind, and anyone who can
+    // add a file to the directory can put one there deliberately. Either way it
+    // is unlinked rather than written through, so the crash leftover never
+    // blocks a save and the planted one never becomes the target: `create_new`
+    // below opens nothing that already exists, which makes this process the
+    // creator — and therefore the owner — of the file it is about to rename
+    // into place.
+    remove_if_present(tmp)?;
+
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -120,13 +148,14 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
-        // Rewriting the DACL of the open handle needs WRITE_DAC, which
-        // GENERIC_WRITE does not carry. Asking for it up front keeps the whole
-        // operation on one handle, so the file that ends up restricted is
-        // provably the file that is about to be written.
+        // Rewriting the owner and the DACL of the open handle needs WRITE_OWNER
+        // and WRITE_DAC, neither of which GENERIC_WRITE carries. Asking for them
+        // up front keeps the whole operation on one handle, so the file that
+        // ends up restricted is provably the file that is about to be written.
         options.access_mode(
             windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_WRITE
-                | windows_sys::Win32::Storage::FileSystem::WRITE_DAC,
+                | windows_sys::Win32::Storage::FileSystem::WRITE_DAC
+                | windows_sys::Win32::Storage::FileSystem::WRITE_OWNER,
         );
     }
 
@@ -134,9 +163,25 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
     // The file is empty until this returns, so a DACL the parent directory
     // supplied never covers any of the contents.
     #[cfg(windows)]
-    owner_only::restrict_to_owner(&file)?;
+    owner_only::restrict_to_owner(&file).map_err(unrestrictable_volume)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()
+}
+
+/// Say what a failed restriction means. `SetSecurityInfo` answers
+/// `ERROR_NOT_SUPPORTED` on a volume with no access control at all — FAT32,
+/// exFAT, most network shares — and "the request is not supported" on its own
+/// names neither the request nor anything the user can do about it.
+#[cfg(windows)]
+fn unrestrictable_volume(error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "this volume cannot restrict a file to one account ({error}), and state is not \
+             written where any other account could read it; the app data directory has to live \
+             on a volume that supports access control, such as NTFS"
+        ),
+    )
 }
 
 /// Windows has no mode bits, and a file created under the user profile simply
@@ -146,8 +191,18 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
 /// `AppData` tree is a real, observable example — and any future inheritable
 /// ACE added anywhere above the app data directory lands on the vault too.
 ///
-/// Replacing the inherited DACL with a protected one closes that off: the file
-/// names exactly one account and inherits nothing.
+/// Replacing the inherited DACL with a protected one is most of the answer: the
+/// DACL then names exactly one account and inherits nothing. It is not all of
+/// it, because a DACL does not bind the file's owner. An owner keeps
+/// `READ_CONTROL` and `WRITE_DAC` over the object no matter what the DACL says,
+/// so an owner locked out by every ACE can still rewrite those ACEs and grant
+/// itself back whatever it was denied. A protected DACL naming one account on a
+/// file owned by another is a lock whose key is taped to the door.
+///
+/// So the owner is written in the same call as the DACL, naming the account the
+/// single ACE names. The DACL decides who may open the file; the owner decides
+/// who may change that decision, and after this both answers are the account
+/// that runs the app.
 #[cfg(windows)]
 mod owner_only {
     use std::fs::File;
@@ -158,13 +213,20 @@ mod owner_only {
     use windows_sys::Win32::Security::{
         AddAccessAllowedAce, GetLengthSid, GetTokenInformation, InitializeAcl, TokenUser,
         ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY, TOKEN_USER,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSID, TOKEN_QUERY,
+        TOKEN_USER,
     };
     use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// Give `file` a protected DACL whose only entry grants the account running
-    /// this process full access to it.
+    /// this process full access to it, and make that same account the file's
+    /// owner.
+    ///
+    /// Both halves go in one `SetSecurityInfo` call because either alone is
+    /// incomplete: the DACL without the owner leaves a principal that can
+    /// rewrite the DACL, and the owner without the DACL leaves every inherited
+    /// grant in place.
     ///
     /// SYSTEM and the local administrators are deliberately not named. Both
     /// already hold `SeBackupPrivilege` and `SeTakeOwnershipPrivilege`, so an
@@ -179,8 +241,10 @@ mod owner_only {
             SetSecurityInfo(
                 file.as_raw_handle() as HANDLE,
                 SE_FILE_OBJECT,
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-                std::ptr::null_mut(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                owner.as_psid(),
                 std::ptr::null_mut(),
                 acl.as_ptr(),
                 std::ptr::null(),
@@ -333,6 +397,22 @@ mod tests {
     }
 
     #[test]
+    fn a_leftover_temporary_file_does_not_block_the_next_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+        std::fs::write(&tmp, "half-written").expect("seed leftover");
+
+        write_private(&path, "{\"saved\":true}").expect("write");
+
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "{\"saved\":true}"
+        );
+        assert!(!tmp.exists());
+    }
+
+    #[test]
     fn remove_private_deletes_authoritative_and_crash_temp_copies() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.json");
@@ -413,18 +493,21 @@ mod windows_tests {
     use super::write_private;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
     use std::path::Path;
-    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS};
+    use windows_sys::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HANDLE};
     use windows_sys::Win32::Security::Authorization::{
         GetNamedSecurityInfoW, SetNamedSecurityInfoW, SE_FILE_OBJECT,
     };
     use windows_sys::Win32::Security::{
         AddAccessAllowedAceEx, CreateWellKnownSid, EqualSid, GetAce, GetLengthSid,
         GetSecurityDescriptorControl, InitializeAcl, WinWorldSid, ACCESS_ALLOWED_ACE, ACL,
-        ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE, PSID,
-        SE_DACL_PROTECTED,
+        ACL_REVISION, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, OBJECT_INHERIT_ACE,
+        OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
     };
-    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ALL_ACCESS,
+    };
 
     /// `ACCESS_ALLOWED_ACE_TYPE`. It lives in a `windows-sys` module this crate
     /// does not enable, which carries a quarter of a megabyte of unrelated
@@ -451,6 +534,14 @@ mod windows_tests {
             sids_match(entry.sid_bytes.as_slice(), owner.as_psid()),
             "the single entry does not name the account that wrote the file",
         );
+
+        // The DACL says who may open the file; the owner says who may rewrite
+        // the DACL. Both have to be the same account for the first answer to
+        // mean anything.
+        assert!(
+            sids_match(file_owner(&path).as_slice(), owner.as_psid()),
+            "the file is owned by an account the DACL does not name",
+        );
     }
 
     #[test]
@@ -467,6 +558,29 @@ mod windows_tests {
         assert!(
             !sids_match(acl.entries[0].sid_bytes.as_slice(), sid_ptr(&everyone)),
             "the inheritable grant reached the file",
+        );
+    }
+
+    #[test]
+    fn a_planted_temporary_file_does_not_become_the_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let tmp = dir.path().join("state.json.tmp");
+
+        // Anyone who can add a file to the directory can put one at the
+        // temporary path ahead of the save. Its identity is what must not
+        // survive: a file object carries its owner, and the owner holds
+        // WRITE_DAC over whatever DACL the save later puts on it.
+        std::fs::write(&tmp, "planted").expect("plant temporary file");
+        let planted = file_id(&tmp);
+
+        write_private(&path, "{}").expect("write");
+
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{}");
+        assert_ne!(
+            file_id(&path),
+            planted,
+            "the planted file object became the target, carrying its owner with it",
         );
     }
 
@@ -627,6 +741,53 @@ mod windows_tests {
             "SetNamedSecurityInfoW: {}",
             io::Error::from_raw_os_error(status as i32)
         );
+    }
+
+    /// The SID that owns the file at `path`, copied out before the security
+    /// descriptor it points into is freed.
+    fn file_owner(path: &Path) -> Vec<u8> {
+        let wide = wide(path);
+        let mut owner: PSID = std::ptr::null_mut();
+        let mut descriptor = std::ptr::null_mut();
+
+        let status = unsafe {
+            GetNamedSecurityInfoW(
+                wide.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                &mut owner,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        assert_eq!(
+            status,
+            ERROR_SUCCESS,
+            "GetNamedSecurityInfoW: {}",
+            io::Error::from_raw_os_error(status as i32)
+        );
+
+        let len = unsafe { GetLengthSid(owner) } as usize;
+        let bytes = unsafe { std::slice::from_raw_parts(owner.cast::<u8>(), len) }.to_vec();
+        unsafe { LocalFree(descriptor.cast()) };
+        bytes
+    }
+
+    /// The NTFS identity of the file at `path`: volume serial plus file index.
+    /// Two paths that report the same triple name the same file object, whatever
+    /// their names and whatever has been written through them since.
+    fn file_id(path: &Path) -> (u32, u32, u32) {
+        let file = std::fs::File::open(path).expect("open for file id");
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as HANDLE, &mut info) };
+        assert_ne!(ok, 0, "{}", io::Error::last_os_error());
+        (
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        )
     }
 
     fn well_known_sid(kind: i32) -> Vec<u8> {
