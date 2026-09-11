@@ -159,13 +159,38 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
         );
     }
 
-    let mut file = options.open(tmp)?;
+    let mut file = options.open(tmp).map_err(|e| occupied_temp_path(tmp, e))?;
     // The file is empty until this returns, so a DACL the parent directory
     // supplied never covers any of the contents.
     #[cfg(windows)]
     owner_only::restrict_to_owner(&file).map_err(unrestrictable_volume)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()
+}
+
+/// Say what a refused create means. `create_new` reports `AlreadyExists` —
+/// `ERROR_FILE_EXISTS` on Windows, `EEXIST` on Unix — only for a file that
+/// appeared at the temporary path after `write_temp`'s unlink cleared it, so
+/// it is one this process did not create. Refusing it is the point: a file
+/// object carries its permissions and its owner across a rename, so writing
+/// through a planted file and renaming it over the target would hand the state
+/// file an owner and an access decision chosen by whoever planted it. The save
+/// fails and the previous state file is left intact, but the bare error says
+/// none of that.
+fn occupied_temp_path(tmp: &Path, error: std::io::Error) -> std::io::Error {
+    if error.kind() != std::io::ErrorKind::AlreadyExists {
+        return error;
+    }
+    std::io::Error::new(
+        error.kind(),
+        format!(
+            "a file this process did not create occupies {} ({error}), and it is refused rather \
+             than written through and renamed over the target, which would give the saved file \
+             that file's owner; nothing was written, and a repeat means something else is \
+             creating files in the app data directory",
+            tmp.display()
+        ),
+    )
 }
 
 /// Say what a failed restriction means. `SetSecurityInfo` answers
