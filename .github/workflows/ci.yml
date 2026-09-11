@@ -43,6 +43,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The Cargo workspace root is the repository root (members: core,
+          # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
+          # at desktop/src-tauri caches a directory that never exists, which
+          # leaves every run recompiling from scratch.
+          workspaces: ". -> target"
       - name: Install Linux dependencies
         run: |
           # The Google Chrome apt repo pre-installed on GitHub-hosted runners can
@@ -96,6 +103,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target"
+          # No `shared-key`: the automatic key carries the job id plus the
+          # runner OS and architecture, so this job holds its own entry and
+          # never restores the Linux target directory that `rust-check` saves.
+          # The `macos-biometric` feature needs no key of its own — both
+          # feature sets are built in this one job, and cargo's fingerprints
+          # already keep their artifacts apart inside the target directory.
       - name: Cargo build (macOS shipping defaults)
         run: cargo build --workspace
       - name: Cargo build (macOS biometric implementation)
@@ -115,6 +131,13 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
+      # This job deliberately carries no Rust cache. It compiles none of the
+      # workspace, so there is no target directory worth keeping; all a cache
+      # would restore is `cargo-audit` itself and the registry index it
+      # resolves against. Cache entries are written by earlier runs and read
+      # across branches, and an audit that runs a restored binary reports on
+      # whatever that binary decides. The tool that judges the dependencies is
+      # built fresh, every run.
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: Audit Rust dependencies
