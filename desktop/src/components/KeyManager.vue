@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useKeysStore } from "../stores/keys";
+import { useVaultStore } from "../stores/vault";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
 import Input from "./ui/Input.vue";
@@ -24,6 +25,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
+const vault = useVaultStore();
 
 const showAdd = ref(false);
 const showPublic = ref<string | null>(null);
@@ -50,6 +52,14 @@ onMounted(() => {
 watch(showAdd, (open) => {
   if (!open) clearAddForm();
 }, { flush: "sync" });
+
+// This component stays mounted across lock/unlock, including automatic locks:
+// `useAutoLock` calls `vault.lock()` and nothing else, and the unlock modal is
+// a sibling of the view rather than a replacement for it, so neither the
+// visibility watcher above nor unmount fires at the lock. Close the dialog and
+// discard the key material synchronously at the session boundary so a lock
+// leaves no plaintext key in the form or in the rendered textarea.
+watch(() => vault.unlocked, resetForm, { flush: "sync" });
 
 // Only navigating away from this view unmounts the component today. Clearing
 // here means a future caller that keeps it mounted does not silently reopen
@@ -78,18 +88,26 @@ async function importKey() {
     resetForm();
   } catch (e) {
     console.error("Failed to import key:", e);
-    // A rejected key is still a key. Discard it here rather than leaving it
-    // resident for whatever the user does next.
-    resetForm();
+    // A rejected key is still a key, so the secret goes. The rest of the form
+    // stays: the usual rejection is a wrong passphrase on an encrypted key, and
+    // closing the dialog would also drop the label and bounce the user back to
+    // the Generate tab, leaving them to rebuild a form that was not the problem.
+    clearKeyMaterial();
     alert(`Failed to import key: ${e}`);
   }
+}
+
+// The secret half of the form, separable from the label and the tab selection
+// so a failure can drop the key material without discarding the user's context.
+function clearKeyMaterial() {
+  addForm.value.privateKey = "";
+  addForm.value.passphrase = "";
 }
 
 function clearAddForm() {
   addForm.value.label = "";
   addForm.value.import = false;
-  addForm.value.privateKey = "";
-  addForm.value.passphrase = "";
+  clearKeyMaterial();
 }
 
 function resetForm() {

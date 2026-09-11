@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import KeyManager from "./KeyManager.vue";
 import { useKeysStore } from "../stores/keys";
+import { useVaultStore } from "../stores/vault";
 import { setInvokeHandler } from "../test/setup";
 
 const PRIVATE_KEY =
@@ -60,7 +61,7 @@ describe("KeyManager add-key dialog", () => {
     expect((wrapper.get("#key-passphrase").element as HTMLInputElement).value).toBe("");
   });
 
-  it("drops the private key and passphrase when the import is rejected", async () => {
+  it("drops the private key and passphrase when the import is rejected, keeping the dialog and the label", async () => {
     const keys = useKeysStore();
     const importKey = vi
       .spyOn(keys, "importKey")
@@ -71,10 +72,32 @@ describe("KeyManager add-key dialog", () => {
     await flushPromises();
 
     expect(importKey).toHaveBeenCalledTimes(1);
-    await reopenImportTab();
 
+    // The dialog is still open on the Import tab, so the fields are reachable
+    // without reopening anything.
     expect((wrapper.get("#key-private").element as HTMLTextAreaElement).value).toBe("");
     expect((wrapper.get("#key-passphrase").element as HTMLInputElement).value).toBe("");
+    expect((wrapper.get("#key-label").element as HTMLInputElement).value).toBe("laptop");
+    expect(wrapper.findAll("button").some((b) => b.text() === "Import Key")).toBe(true);
+  });
+
+  it("closes the dialog and drops the private key and passphrase when the vault locks", async () => {
+    const vault = useVaultStore();
+    vault.unlocked = true;
+    await flushPromises();
+
+    await openImportTabWithKeyMaterial();
+
+    // What an auto-lock actually does: `useAutoLock` calls `vault.lock()` and
+    // touches nothing else. No unlock modal opens, and this view stays mounted.
+    vault.unlocked = false;
+    await flushPromises();
+
+    const addForm = (wrapper.vm as unknown as { addForm: Record<string, string> }).addForm;
+    expect(addForm.privateKey).toBe("");
+    expect(addForm.passphrase).toBe("");
+    expect(wrapper.find("#key-private").exists()).toBe(false);
+    expect(wrapper.html()).not.toContain("b3BlbnNzaC1rZXktdjEAAAAA");
   });
 
   it("drops the private key and passphrase when the view is unmounted", async () => {
