@@ -11,12 +11,18 @@ use std::time::{Duration, Instant};
 /// added to output that arrives while a batch is already in flight.
 pub const FLUSH_WINDOW: Duration = Duration::from_millis(6);
 
-/// Size at which a batch is due for delivery. The check happens after a chunk
-/// has been appended, so a released batch is at least this large and at most
-/// this size plus the last chunk. Caps the memory a stalled UI layer can hold
-/// per batch, and stays far enough above the size at which transports switch
-/// from an inline literal to a binary payload that a full batch always takes
-/// the binary path.
+/// Largest batch handed to the UI layer, and the size at which one becomes due
+/// for delivery.
+///
+/// A chunk is appended whole, so the buffer can exceed this; delivery is what
+/// enforces the limit, handing over at most this many bytes and keeping the
+/// rest for the next release. That keeps the cap a property of what the
+/// transport actually receives rather than of how the producer happened to
+/// packetise its output.
+///
+/// Caps the memory a stalled UI layer can hold per batch, and stays far enough
+/// above the size at which transports switch from an inline literal to a binary
+/// payload that a full batch always takes the binary path.
 pub const MAX_BATCH: usize = 64 * 1024;
 
 /// Accumulates terminal output into batches.
@@ -78,21 +84,33 @@ impl OutputBatcher {
         self.deadline
     }
 
-    /// Bytes waiting to be delivered.
+    /// Bytes to deliver now, never more than `MAX_BATCH`.
+    ///
+    /// A chunk that carries the buffer past the limit leaves a remainder, which
+    /// this withholds until the next release so no single batch exceeds the cap.
     pub fn batch(&self) -> &[u8] {
-        &self.buffer
+        &self.buffer[..self.buffer.len().min(MAX_BATCH)]
     }
 
     pub fn is_empty(&self) -> bool {
         self.buffer.is_empty()
     }
 
-    /// Drops the batch once its bytes have been handed to the UI layer. The
-    /// allocation is retained so steady output reuses one buffer.
+    /// Drops the bytes `batch` handed to the UI layer, keeping any remainder.
+    ///
+    /// A remainder is already overdue, so it is given a deadline of now rather
+    /// than a fresh window: it goes out on the next pass instead of waiting
+    /// behind output that has not arrived yet. That also preserves the
+    /// invariant that a non-empty buffer always has a deadline.
     pub fn mark_flushed(&mut self, now: Instant) {
-        self.buffer.clear();
-        self.deadline = None;
+        let delivered = self.buffer.len().min(MAX_BATCH);
+        self.buffer.drain(..delivered);
         self.last_flush = now;
+        self.deadline = if self.buffer.is_empty() {
+            None
+        } else {
+            Some(now)
+        };
     }
 }
 
@@ -125,6 +143,44 @@ mod tests {
         // held back just because it is large.
         assert!(batcher.push(&vec![b'z'; 32 * 1024], now));
         assert_eq!(batcher.deadline(), None);
+    }
+
+    #[test]
+    fn a_batch_never_exceeds_the_cap_and_the_remainder_follows_in_order() {
+        let start = Instant::now();
+        let mut batcher = OutputBatcher::new(start);
+        let now = idle_after(start);
+        // Spend the quiet-session allowance so the chunks below coalesce.
+        assert!(batcher.push(b"A", now));
+        batcher.mark_flushed(now);
+
+        let first = vec![b'x'; MAX_BATCH - 1];
+        assert!(!batcher.push(&first, now));
+        let second = vec![b'y'; 32 * 1024];
+        assert!(batcher.push(&second, now));
+
+        // The buffer holds more than the cap because the chunk was appended
+        // whole; a single delivery still must not.
+        assert_eq!(batcher.batch().len(), MAX_BATCH);
+        let mut delivered = batcher.batch().to_vec();
+        batcher.mark_flushed(now);
+
+        // The remainder is already overdue, so it is not made to wait behind
+        // output that has not arrived yet.
+        assert!(!batcher.is_empty());
+        assert_eq!(batcher.deadline(), Some(now));
+        delivered.extend_from_slice(batcher.batch());
+        batcher.mark_flushed(now);
+
+        assert!(batcher.is_empty());
+        assert_eq!(batcher.deadline(), None);
+
+        let mut expected = first;
+        expected.extend_from_slice(&second);
+        assert_eq!(
+            delivered, expected,
+            "splitting an oversized buffer must not lose or reorder bytes"
+        );
     }
 
     #[test]
