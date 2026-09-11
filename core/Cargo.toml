@@ -28,7 +28,7 @@ chrono = { workspace = true }
 base64 = "0.22"
 rand = "0.8"
 async-trait = "0.1"
-russh-sftp = "2.0"
+russh-sftp = "3.0"
 
 [dev-dependencies]
 tempfile = "3"
