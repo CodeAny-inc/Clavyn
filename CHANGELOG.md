@@ -4,6 +4,20 @@ All notable changes to Clavyn are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2-alpha.5] - 2026-09-11
+
+### Fixed
+
+- **Tab drag-and-drop now works in the shipped desktop app, not just in
+  the test harness.** Tauri's `dragDropEnabled` window flag defaults to
+  `true`, which installs a native drag-drop handler on the webview that
+  swallows every drag before it reaches the DOM — `dragstart`/`dragend`
+  fired, but `dragenter`/`dragover`/`drop` never did, leaving the split,
+  swap, and reorder handlers from alpha.4 as unreachable dead code. The
+  app registers no `tauri://drag-drop` listeners, so disabling the flag
+  removes nothing and fixes the issue on WKWebView, WebView2, and
+  WebKitGTK alike. (#34)
+
 ## [0.1.2-alpha.4] - 2026-09-10
 
 ### Fixed
@@ -72,6 +86,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Completed the OpenTermius → Clavyn rename and documented the unsigned-build
   warning workaround (`xattr -cr`). (38c6d3d)
 
+[0.1.2-alpha.5]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.5
 [0.1.2-alpha.4]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.4
 [0.1.2-alpha.3]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.3
 [0.1.2-alpha.2]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.2
