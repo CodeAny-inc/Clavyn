@@ -4,11 +4,53 @@ use clavyn_core::sftp::SftpManager;
 use clavyn_core::store::Store;
 use clavyn_core::vault::Vault;
 use clavyn_core::Result;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
+
+/// Sink a session's terminal output is delivered to.
+///
+/// Bytes travel as a raw IPC payload rather than a serialized event: a JSON
+/// array of decimal numbers costs roughly three times the wire size and is
+/// parsed as JavaScript source, which dominates the cost of bulk output. One
+/// sink per session also keeps a pane from receiving every other session's
+/// bytes only to discard them.
+pub type OutputSink = Channel<InvokeResponseBody>;
+
+/// Frame that marks the end of a session's output stream.
+///
+/// A batch is never empty, so a zero-length payload is unambiguous. It travels
+/// on the session's own sink, which stamps every frame with an index and holds
+/// a frame back until its predecessors have been delivered; that is what keeps
+/// the end of the stream behind the last batch even when the batch is large
+/// enough to take the transport's asynchronous route. The `session-closed`
+/// event carries no index and cannot provide that ordering on its own.
+pub fn end_of_output() -> InvokeResponseBody {
+    InvokeResponseBody::Raw(Vec::new())
+}
+
+/// Registry of live output sinks, keyed by session id.
+///
+/// Guarded by a blocking mutex because the core data callback is synchronous.
+/// It is only ever held long enough to look a sink up, never across delivery.
+pub type OutputSinks = Arc<std::sync::Mutex<HashMap<String, OutputSink>>>;
+
+/// Takes the sinks lock, recovering the map if the mutex is poisoned.
+///
+/// Nothing but a map lookup runs under this lock, so a panic elsewhere cannot
+/// leave the map half-updated and the recovered guard is always sound. Giving
+/// up on a poisoned mutex instead would silently drop whichever sink the caller
+/// wanted: on the close path that means never sending the frame that ends the
+/// stream, leaving the pane stopped with no reason for it.
+fn lock_sinks(
+    sinks: &std::sync::Mutex<HashMap<String, OutputSink>>,
+) -> std::sync::MutexGuard<'_, HashMap<String, OutputSink>> {
+    sinks.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Monotonic generation used to invalidate unlock attempts that started before
 /// a newer lock (or vault initialization) operation. The passphrase mutex still
@@ -55,7 +97,8 @@ pub struct AppState {
     pub biometric_mutation: Mutex<()>,
     pub sessions: Arc<SessionManager>,
     pub sftp: Arc<SftpManager>,
-    pub local_terminals: Mutex<std::collections::HashMap<String, LocalTerminal>>,
+    pub output_sinks: OutputSinks,
+    pub local_terminals: Mutex<HashMap<String, LocalTerminal>>,
     pub app_data_dir: PathBuf,
 }
 
@@ -76,20 +119,28 @@ impl AppState {
         let vault = Vault::open(app_data.join("vault.json"))?;
         let known_hosts = KnownHosts::load(app_data.join("known_hosts.json"))?;
 
-        let app_handle = app.clone();
+        let output_sinks: OutputSinks = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
+        let sinks = output_sinks.clone();
         let data_callback = Arc::new(move |sid: &str, data: &[u8]| {
-            let _ = app_handle.emit(
-                "session-data",
-                SessionDataEvent {
-                    session_id: sid.to_string(),
-                    data: data.to_vec(),
-                },
-            );
+            let sink = lock_sinks(&sinks).get(sid).cloned();
+            if let Some(sink) = sink {
+                let _ = sink.send(InvokeResponseBody::Raw(data.to_vec()));
+            }
         });
 
-        let app_handle2 = app.clone();
+        let sinks = output_sinks.clone();
+        let app_handle = app.clone();
         let close_callback = Arc::new(move |sid: &str, reason: &str| {
-            let _ = app_handle2.emit(
+            // End the stream on the sink itself before announcing the close, so
+            // the frontend can tell a batch that is still in flight from one
+            // that will never arrive. The event that follows says why the
+            // session ended; the frame says that nothing more is coming.
+            let sink = lock_sinks(&sinks).remove(sid);
+            if let Some(sink) = sink {
+                let _ = sink.send(end_of_output());
+            }
+            let _ = app_handle.emit(
                 "session-closed",
                 SessionClosedEvent {
                     session_id: sid.to_string(),
@@ -110,16 +161,22 @@ impl AppState {
             biometric_mutation: Mutex::new(()),
             sessions,
             sftp,
-            local_terminals: Mutex::new(std::collections::HashMap::new()),
+            output_sinks,
+            local_terminals: Mutex::new(HashMap::new()),
             app_data_dir: app_data,
         }))
     }
-}
 
-#[derive(Clone, serde::Serialize)]
-pub struct SessionDataEvent {
-    pub session_id: String,
-    pub data: Vec<u8>,
+    /// Routes a session's output to `sink` until the session ends.
+    pub fn register_output(&self, session_id: String, sink: OutputSink) {
+        lock_sinks(&self.output_sinks).insert(session_id, sink);
+    }
+
+    /// Stops routing output for a session. Safe to call for a session that was
+    /// never registered.
+    pub fn release_output(&self, session_id: &str) {
+        lock_sinks(&self.output_sinks).remove(session_id);
+    }
 }
 
 #[derive(Clone, serde::Serialize)]

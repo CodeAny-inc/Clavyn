@@ -84,7 +84,7 @@ vi.mock("../api", () => ({
   sessionWrite: vi.fn(() => Promise.resolve()),
   sessionResize: vi.fn(() => Promise.resolve()),
   listSessions: vi.fn(() => Promise.resolve([])),
-  onSessionData: vi.fn(() => Promise.resolve(() => {})),
+  sessionOutput: vi.fn(() => ({ onmessage: () => {} })),
   onSessionClosed: vi.fn(() => Promise.resolve(() => {})),
 }));
 
