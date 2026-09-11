@@ -32,6 +32,13 @@ pub enum CoreError {
     #[error("{path} is corrupt and was not loaded: {reason}")]
     CorruptState { path: String, reason: String },
 
+    /// The in-memory state serializes to a document this same version cannot
+    /// parse back. Writing it would leave a file that fails the fail-closed
+    /// load on the next start, so the write is refused and the previous file
+    /// stays intact.
+    #[error("{path} was not written: the serialized state cannot be loaded again ({reason})")]
+    UnwritableState { path: String, reason: String },
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
