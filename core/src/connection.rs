@@ -45,7 +45,9 @@ fn timed_out(stage: &str, addr: &str) -> CoreError {
 }
 
 /// Handler that verifies the server key against the known_hosts store (TOFU).
-/// On first sight: record + accept. On match: accept. On mismatch: reject.
+/// On first sight: record + accept. On match: accept. On mismatch: reject with
+/// `CoreError::HostKeyMismatch`, which russh propagates out of `connect` as the
+/// handler's own error type instead of the generic "unknown key" failure.
 pub struct SshHandler {
     host: String,
     port: u16,
@@ -61,15 +63,39 @@ impl client::Handler for SshHandler {
         server_public_key: &key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
         let mut kh = self.known_hosts.lock().await;
-        let trusted = kh.verify(&self.host, self.port, server_public_key)?;
-        if !trusted {
+        if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, server_public_key) {
+            // Hold the key so the user can accept this exact one after comparing
+            // fingerprints; unpinning the host would trust whatever answers next.
+            kh.hold_presented_key(&self.host, self.port, server_public_key);
             tracing::warn!(
                 "host key mismatch for {}:{} — rejecting",
                 self.host,
                 self.port
             );
+            return Err(mismatch);
         }
-        Ok(trusted)
+        kh.verify(&self.host, self.port, server_public_key)
+    }
+}
+
+/// Extra context for a key-exchange failure, which russh surfaces as the bare
+/// string "No common algorithm" with no hint at which algorithm list failed.
+///
+/// Clavyn builds russh without its `flate2` feature, so the client offers only
+/// `none` for compression. RFC 4253 section 6.2 makes `none` REQUIRED of every
+/// implementation, so a server that will not accept it is non-conforming — say
+/// so, otherwise the failure reads as a Clavyn bug.
+fn negotiation_hint(err: &CoreError) -> &'static str {
+    match err {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Compression,
+            ..
+        }) => {
+            " (compression: this server refuses the `none` compression that RFC 4253 \
+             section 6.2 requires every SSH implementation to support, and Clavyn offers \
+             nothing else)"
+        }
+        _ => "",
     }
 }
 
@@ -117,13 +143,22 @@ pub async fn connect(
     };
 
     let addr = format!("{}:{}", host.hostname, host.port);
+    // A changed host key keeps its own error variant: wrapping it in a generic
+    // connect failure would hide the two fingerprints that make the change
+    // legible.
     let mut session = tokio::time::timeout(
         CONNECT_TIMEOUT,
         client::connect(client_config(), &addr, handler),
     )
     .await
     .map_err(|_| timed_out("connect", &addr))?
-    .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
+    .map_err(|e| match e {
+        CoreError::HostKeyMismatch { .. } => e,
+        other => CoreError::Ssh(format!(
+            "connect {addr}: {other}{}",
+            negotiation_hint(&other)
+        )),
+    })?;
 
     // Authentication is bounded separately, and the two bounds cover disjoint
     // stages. `client::connect` does not return until russh has read the
@@ -221,5 +256,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
+    }
+
+    fn no_common_algo(kind: russh::AlgorithmKind) -> CoreError {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind,
+            ours: vec!["none".into()],
+            theirs: vec!["zlib".into()],
+        })
+    }
+
+    #[test]
+    fn compression_mismatch_is_explained_as_compression() {
+        let hint = negotiation_hint(&no_common_algo(russh::AlgorithmKind::Compression));
+        assert!(hint.contains("compression"));
+        assert!(hint.contains("RFC 4253"));
+    }
+
+    #[test]
+    fn other_algorithm_mismatches_are_left_alone() {
+        let cipher = no_common_algo(russh::AlgorithmKind::Cipher);
+        assert_eq!(negotiation_hint(&cipher), "");
+        assert_eq!(negotiation_hint(&CoreError::Ssh("plain".into())), "");
     }
 }
