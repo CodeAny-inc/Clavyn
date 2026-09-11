@@ -9,6 +9,10 @@ export const useHostsStore = defineStore("hosts", () => {
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
   let pendingLoad: Promise<void> | null = null;
+  // Bumped whenever a mutation has been applied locally. A load that started
+  // before the bump carries a snapshot taken before that change, so it is
+  // discarded rather than written over newer state.
+  let revision = 0;
 
   const filteredHosts = computed(() => {
     let result = hosts.value;
@@ -31,10 +35,18 @@ export const useHostsStore = defineStore("hosts", () => {
   // App startup and every host-facing view call load(). Concurrent callers share
   // one in-flight pair of reads rather than issuing duplicate IPC, and the two
   // reads are independent so they go out together.
+  //
+  // A load replaces both lists wholesale, so it must not land on top of a change
+  // that completed while it was in flight: adding a host during startup would
+  // otherwise see the new row appear and then vanish when the older snapshot
+  // arrived. Sharing one in-flight read across callers widens that window, so
+  // the result is dropped if anything was mutated after the read began.
   function load(): Promise<void> {
     if (pendingLoad) return pendingLoad;
+    const startedAt = revision;
     pendingLoad = Promise.all([api.listHosts(), api.listGroups()])
       .then(([loadedHosts, loadedGroups]) => {
+        if (revision !== startedAt) return;
         hosts.value = loadedHosts;
         groups.value = loadedGroups;
       })
@@ -46,12 +58,14 @@ export const useHostsStore = defineStore("hosts", () => {
 
   async function addHost(host: Host) {
     const saved = await api.addHost(host);
+    revision += 1;
     hosts.value.push(saved);
     return saved;
   }
 
   async function updateHost(host: Host) {
     const saved = await api.updateHost(host);
+    revision += 1;
     const idx = hosts.value.findIndex((h) => h.id === saved.id);
     if (idx >= 0) hosts.value[idx] = saved;
     return saved;
@@ -59,17 +73,20 @@ export const useHostsStore = defineStore("hosts", () => {
 
   async function deleteHost(id: string) {
     await api.deleteHost(id);
+    revision += 1;
     hosts.value = hosts.value.filter((h) => h.id !== id);
   }
 
   async function addGroup(name: string) {
     const group = await api.addGroup(name);
+    revision += 1;
     groups.value.push(group);
     return group;
   }
 
   async function deleteGroup(id: string) {
     await api.deleteGroup(id);
+    revision += 1;
     groups.value = groups.value.filter((g) => g.id !== id);
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;

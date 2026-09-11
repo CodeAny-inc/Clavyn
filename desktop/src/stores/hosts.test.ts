@@ -76,6 +76,28 @@ describe("hosts store", () => {
       expect(store.groups[0].name).toBe("Production");
     });
 
+    it("does not let an in-flight read overwrite a change that finished first", async () => {
+      // The snapshot this load returns was taken before the host below was
+      // added, so writing it back would make the new row appear and then vanish.
+      let releaseHosts: (hosts: Host[]) => void = () => {};
+      vi.mocked(api.listHosts).mockReturnValueOnce(
+        new Promise<Host[]>((resolve) => {
+          releaseHosts = resolve;
+        }),
+      );
+
+      const store = useHostsStore();
+      const inFlight = store.load();
+
+      await store.addHost({ ...mockHost, id: "host-3", label: "Added" });
+      expect(store.hosts.map((h) => h.label)).toContain("Added");
+
+      releaseHosts([{ ...mockHost }, { ...mockHost2 }]);
+      await inFlight;
+
+      expect(store.hosts.map((h) => h.label)).toContain("Added");
+    });
+
     it("reads hosts and groups in one round-trip", async () => {
       const store = useHostsStore();
       const order: string[] = [];
