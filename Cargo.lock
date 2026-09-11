@@ -4116,7 +4116,6 @@ dependencies = [
  "des",
  "digest",
  "elliptic-curve",
- "flate2",
  "futures",
  "generic-array",
  "hex-literal",

@@ -3,20 +3,51 @@
 # Everything listed here is a known advisory that has no drop-in fix today. The
 # point of the job is to fail on anything new, so this list should shrink and
 # should not grow without a note saying why.
+#
+# Tracking issue: https://github.com/CodeAny-inc/Clavyn/issues/18
+#
+# Every entry carries a `# review-by: YYYY-MM-DD` line. CI runs
+# `node scripts/verify/check-audit-expiry.mjs`, which fails once a date is
+# reached, so no suppression can sit here unexamined.
 
 [advisories]
 ignore = [
   # rsa 0.9.10, Marvin attack, CVE-2023-49092.
   # No 0.9.x release fixes it. Reaches the tree through russh-keys and only
   # applies when signing with a stored RSA key.
+  # review-by: 2026-12-31
   "RUSTSEC-2023-0071",
 
   # russh-cryptovec 0.7.3, unchecked allocation, CVE-2026-46673.
   # Fixed in 0.60.3, which is part of the russh 0.5x/0.6x API break.
+  #
+  # Vector: the advisory names two remote paths into CryptoVec growth,
+  # transport packet buffers and compression buffers. Only the second one is
+  # real for the version we ship.
+  #   - Transport reads are bounded. russh 0.46.0 rejects any packet whose
+  #     declared length exceeds MAXIMUM_PACKET_LEN (256 KiB) before it resizes
+  #     the read buffer, so a peer cannot drive an allocation from there.
+  #   - zlib decompression is not bounded. The decompress loop resizes its
+  #     output buffer to double its length on every partial-output status with
+  #     no ceiling, so a server that forces zlib can make the client allocate
+  #     until CryptoVec's realloc returns null and panics. Under the release
+  #     profile's `panic = "abort"` that takes down the process and every other
+  #     session in it, not just the one being attacked.
+  # Reach: a hostile or compromised server, not any network attacker. The
+  # client offers `none` first, so compression only turns on if the server
+  # advertises zlib alone.
+  # Residual: the workspace builds russh with `default-features = false`, which
+  # drops its `flate2` feature, and without that feature the decompress loop is
+  # compiled out and replaced by a pass-through. This entry now covers a
+  # version match only, and lifts with the 0.60.3 upgrade.
+  # review-by: 2026-12-31
   "RUSTSEC-2026-0153",
 
   # russh 0.46.0, unbounded 32-bit allocation, CVE-2026-46673.
   # Same upgrade. The described vector is the SSH agent protocol, which
-  # connection.rs rejects before opening a connection.
+  # connection.rs rejects before opening a connection. russh 0.46.0 also has no
+  # agent implementation of its own — the code the advisory describes lives in
+  # russh-keys 0.46.0, which Clavyn never routes into.
+  # review-by: 2026-12-31
   "RUSTSEC-2026-0154",
 ]
