@@ -1,0 +1,51 @@
+version: 2
+
+updates:
+  # Application dependencies. The production tree is gated by `npm audit
+  # --omit=dev` in CI; the development tree is only reported, so this is what
+  # actually moves it.
+  - package-ecosystem: npm
+    directory: /desktop
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      desktop-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Browser test harness. Separate lockfile, never covered by the desktop
+  # entry above.
+  - package-ecosystem: npm
+    directory: /desktop/e2e
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      e2e-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Cargo workspace root: core plus desktop/src-tauri.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Actions are pinned to commit SHAs, which nothing else moves. Without this
+  # entry a pinned action stays on the commit it was pinned to forever,
+  # security releases included. Dependabot rewrites both the SHA and the
+  # version comment beside it.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

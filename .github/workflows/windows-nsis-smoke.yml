@@ -40,16 +40,18 @@ jobs:
     name: Windows NSIS smoke test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           # The Cargo workspace root is the repository root (members: core,
           # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
@@ -58,7 +60,9 @@ jobs:
           workspaces: ". -> target"
       - name: Install frontend dependencies
         working-directory: desktop
-        run: npm ci
+        # This workflow runs on fork pull requests, where install scripts are
+        # arbitrary code from the pull request. Nothing in this tree needs them.
+        run: npm ci --ignore-scripts
       - name: Build NSIS installer
         working-directory: desktop
         shell: pwsh

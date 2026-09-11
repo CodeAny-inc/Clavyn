@@ -462,8 +462,11 @@ pub async fn create_workspace(
 #[tauri::command]
 pub async fn save_workspace(
     state: State<'_, Arc<AppState>>,
-    workspace: Workspace,
+    mut workspace: Workspace,
 ) -> ApiResult<Workspace> {
+    // Sanitize before the store does, so the caller gets back the layout that
+    // was actually persisted rather than the one it sent.
+    workspace.sanitize().map_err(err)?;
     let mut store = state.store.lock().await;
     store.update_workspace(workspace.clone()).map_err(err)?;
     Ok(workspace)
@@ -1157,6 +1160,21 @@ pub async fn install_update(
         )
         .await
         .map_err(|e| e.to_string())?;
+
+    // Release the single-instance guard for the one restart path that never
+    // reaches the plugin's own release. `request_restart` normally asks the
+    // runtime to exit, which emits `RunEvent::Exit`; the plugin releases the
+    // guard from that event, before the replacement process is spawned. When
+    // the runtime refuses the exit request, `request_restart` spawns the
+    // replacement straight from the caller's thread and no exit event is ever
+    // emitted — without this call the successor would find the guard held and
+    // exit on startup, leaving no Clavyn running after an update. Releasing an
+    // already-released guard is a no-op, so the ordinary path pays nothing.
+    // Guarded by the same condition as registration: a build that never
+    // claimed the guard must not release one an installed build is holding.
+    if crate::single_instance_guard_applies() {
+        tauri_plugin_single_instance::destroy(&app);
+    }
 
     // Restart the app to apply the update
     app.request_restart();

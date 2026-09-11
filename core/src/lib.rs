@@ -12,7 +12,9 @@
 //! Security rules enforced here, not in the UI layer:
 //! - private key material is zeroized on drop
 //! - vault ciphertext is the only thing ever persisted to disk
-//! - state files are written atomically and owner-only
+//! - state files are written atomically and restricted to the account that
+//!   runs the app: mode 0600 on Unix, and on Windows a protected single-entry
+//!   DACL together with a matching owner, because an owner outranks the DACL
 //! - host key mismatches never auto-accept
 
 pub mod connection;

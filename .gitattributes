@@ -1,0 +1,14 @@
+# Store every text file with LF in the repository and check it out with LF on
+# every platform, `core.autocrlf` notwithstanding. The scanners under
+# scripts/verify/ read source files line by line; a CRLF working tree changes
+# what they see, and a checkout-dependent verdict from a check that gates
+# commits is worse than no check at all. Shell scripts under scripts/ also
+# require LF to be executable at all.
+* text=auto eol=lf
+
+# Binary assets are never line-ending converted or diffed as text.
+*.png binary
+*.gif binary
+*.webm binary
+*.ico binary
+*.icns binary

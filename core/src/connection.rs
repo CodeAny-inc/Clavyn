@@ -43,6 +43,27 @@ impl client::Handler for SshHandler {
     }
 }
 
+/// Extra context for a key-exchange failure, which russh surfaces as the bare
+/// string "No common algorithm" with no hint at which algorithm list failed.
+///
+/// Clavyn builds russh without its `flate2` feature, so the client offers only
+/// `none` for compression. RFC 4253 section 6.2 makes `none` REQUIRED of every
+/// implementation, so a server that will not accept it is non-conforming — say
+/// so, otherwise the failure reads as a Clavyn bug.
+fn negotiation_hint(err: &CoreError) -> &'static str {
+    match err {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Compression,
+            ..
+        }) => {
+            " (compression: this server refuses the `none` compression that RFC 4253 \
+             section 6.2 requires every SSH implementation to support, and Clavyn offers \
+             nothing else)"
+        }
+        _ => "",
+    }
+}
+
 /// Open an authenticated SSH session and return the handle.
 /// The caller is responsible for opening a channel and starting the shell.
 ///
@@ -95,7 +116,10 @@ pub async fn connect(
         .await
         .map_err(|e| match e {
             CoreError::HostKeyMismatch { .. } => e,
-            other => CoreError::Ssh(format!("connect {addr}: {other}")),
+            other => CoreError::Ssh(format!(
+                "connect {addr}: {other}{}",
+                negotiation_hint(&other)
+            )),
         })?;
 
     let auth_ok = match auth {
@@ -181,5 +205,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
+    }
+
+    fn no_common_algo(kind: russh::AlgorithmKind) -> CoreError {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind,
+            ours: vec!["none".into()],
+            theirs: vec!["zlib".into()],
+        })
+    }
+
+    #[test]
+    fn compression_mismatch_is_explained_as_compression() {
+        let hint = negotiation_hint(&no_common_algo(russh::AlgorithmKind::Compression));
+        assert!(hint.contains("compression"));
+        assert!(hint.contains("RFC 4253"));
+    }
+
+    #[test]
+    fn other_algorithm_mismatches_are_left_alone() {
+        let cipher = no_common_algo(russh::AlgorithmKind::Cipher);
+        assert_eq!(negotiation_hint(&cipher), "");
+        assert_eq!(negotiation_hint(&CoreError::Ssh("plain".into())), "");
     }
 }
