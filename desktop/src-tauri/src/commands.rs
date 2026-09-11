@@ -395,11 +395,14 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
+    let rows = pty_dimension("rows", rows.unwrap_or(24))?;
+    let cols = pty_dimension("cols", cols.unwrap_or(80))?;
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
-            rows: rows.unwrap_or(24) as u16,
-            cols: cols.unwrap_or(80) as u16,
+            rows,
+            cols,
             pixel_width: 0,
             pixel_height: 0,
         })
@@ -517,12 +520,16 @@ pub async fn session_write(
 /// wire, so an absurd geometry is forwarded to the remote host verbatim and
 /// whatever it does with it is out of our hands. Both transports go through
 /// here so one caller-supplied value cannot mean two different things.
+///
+/// Creation goes through it too. Bounding only the resize path would leave the
+/// wrap reachable on the first geometry a session ever gets, which is the one
+/// the caller chooses outright.
 fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
     const MAX_PTY_DIMENSION: u16 = 10_000;
     match u16::try_from(value) {
         Ok(dimension) if (1..=MAX_PTY_DIMENSION).contains(&dimension) => Ok(dimension),
         _ => Err(format!(
-            "resize: {name} out of range: {value} (expected 1..={MAX_PTY_DIMENSION})"
+            "{name} out of range: {value} (expected 1..={MAX_PTY_DIMENSION})"
         )),
     }
 }
@@ -1040,6 +1047,23 @@ mod pty_dimension_tests {
     fn rejects_zero_and_oversized_dimensions() {
         assert!(pty_dimension("rows", 0).is_err());
         assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `create_local_terminal` defaults a missing dimension to 80x24 and then
+    // runs the supplied one through the same helper, so the geometry a PTY is
+    // opened with is bounded the same way a later resize is. Before this the
+    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    #[test]
+    fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
+        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
+        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(
+                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
+                "creation accepted {value}"
+            );
+        }
     }
 
     // `session_resize` widens the checked value back to the `u32` russh puts on
