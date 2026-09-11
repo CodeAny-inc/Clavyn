@@ -47,7 +47,10 @@ impl Store {
         &self.data
     }
 
-    pub fn save(&self) -> Result<()> {
+    /// Private so that every mutation reaches disk through `commit`, which is
+    /// what puts the rollback on the failure path. A caller holding a direct
+    /// `save` could leave memory holding a value the file does not.
+    fn save(&self) -> Result<()> {
         let raw = serde_json::to_string_pretty(&self.data)?;
         // Never write a document this same build could not read again. `load`
         // fails closed, and a failed load aborts startup, so an unloadable

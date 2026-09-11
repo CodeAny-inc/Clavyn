@@ -193,8 +193,27 @@ mod single_instance_guard_tests {
     /// release build, and the guard is keyed on that identifier, so claiming
     /// it here would make `tauri dev` hand focus to the installed window and
     /// exit instead of starting.
+    ///
+    /// The two profiles need separate assertions because `debug_assertions` is
+    /// itself one of the inputs: `cargo test` compiles this module with the
+    /// flag on and `cargo test --release` with it off, so a single assertion
+    /// can only ever hold under one of them. The release half is the one that
+    /// covers the profile the shipped artifacts are built with.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_debug_build_does_not_claim_the_guard() {
         assert!(!single_instance_guard_applies());
+    }
+
+    /// A release build is the one that must hold the guard, and the address
+    /// check is the only thing allowed to withhold it. Off Linux that check is
+    /// a constant `true`, so there the assertion reads as "always claims it".
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn a_release_build_claims_the_guard_whenever_the_plugin_could_hold_it() {
+        assert_eq!(
+            single_instance_guard_applies(),
+            super::session_bus_is_addressable()
+        );
     }
 }
