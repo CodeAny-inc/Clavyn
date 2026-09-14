@@ -28,30 +28,21 @@ pub async fn list_hosts(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<Host>>
 }
 
 #[tauri::command]
-pub async fn add_host(
-    state: State<'_, Arc<AppState>>,
-    host: Host,
-) -> ApiResult<Host> {
+pub async fn add_host(state: State<'_, Arc<AppState>>, host: Host) -> ApiResult<Host> {
     let mut store = state.store.lock().await;
     store.add_host(host.clone()).map_err(err)?;
     Ok(host)
 }
 
 #[tauri::command]
-pub async fn update_host(
-    state: State<'_, Arc<AppState>>,
-    host: Host,
-) -> ApiResult<Host> {
+pub async fn update_host(state: State<'_, Arc<AppState>>, host: Host) -> ApiResult<Host> {
     let mut store = state.store.lock().await;
     store.update_host(host.clone()).map_err(err)?;
     Ok(host)
 }
 
 #[tauri::command]
-pub async fn delete_host(
-    state: State<'_, Arc<AppState>>,
-    id: Uuid,
-) -> ApiResult<()> {
+pub async fn delete_host(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
     store.remove_host(id).map_err(err)
 }
@@ -67,10 +58,7 @@ pub async fn list_groups(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<HostG
 }
 
 #[tauri::command]
-pub async fn add_group(
-    state: State<'_, Arc<AppState>>,
-    name: String,
-) -> ApiResult<HostGroup> {
+pub async fn add_group(state: State<'_, Arc<AppState>>, name: String) -> ApiResult<HostGroup> {
     let group = HostGroup::new(name);
     let mut store = state.store.lock().await;
     store.add_group(group.clone()).map_err(err)?;
@@ -78,10 +66,7 @@ pub async fn add_group(
 }
 
 #[tauri::command]
-pub async fn delete_group(
-    state: State<'_, Arc<AppState>>,
-    id: Uuid,
-) -> ApiResult<()> {
+pub async fn delete_group(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
     store.remove_group(id).map_err(err)
 }
@@ -117,10 +102,7 @@ pub async fn update_identity(
 }
 
 #[tauri::command]
-pub async fn delete_identity(
-    state: State<'_, Arc<AppState>>,
-    id: Uuid,
-) -> ApiResult<()> {
+pub async fn delete_identity(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
     store.remove_identity(id).map_err(err)
 }
@@ -151,10 +133,7 @@ pub async fn list_keys(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<KeyMeta
 }
 
 #[tauri::command]
-pub async fn generate_key(
-    state: State<'_, Arc<AppState>>,
-    label: String,
-) -> ApiResult<KeyMeta> {
+pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> ApiResult<KeyMeta> {
     let (private, _public) = generate_ed25519().map_err(err)?;
     let (mut meta, _pair) = parse_openssh_private(&private, None).map_err(err)?;
     meta.label = label;
@@ -181,10 +160,7 @@ pub async fn import_key(
 }
 
 #[tauri::command]
-pub async fn delete_key(
-    state: State<'_, Arc<AppState>>,
-    key_id: Uuid,
-) -> ApiResult<()> {
+pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.remove_key(&key, &key_id.to_string()).map_err(err)
 }
@@ -201,9 +177,7 @@ pub struct KnownHostEntry {
 }
 
 #[tauri::command]
-pub async fn list_known_hosts(
-    state: State<'_, Arc<AppState>>,
-) -> ApiResult<Vec<KnownHostEntry>> {
+pub async fn list_known_hosts(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<KnownHostEntry>> {
     let kh = state.known_hosts.lock().await;
     Ok(kh
         .list()
@@ -263,16 +237,21 @@ pub async fn forget_known_host(
     let state = state.inner().clone();
     let gate = state.clone();
     let label = format!("{host}:{port}");
-    forget_confirmed(&state.known_hosts, &host, port, move |fingerprint| async move {
-        host_key_prompt::confirm(
-            &app,
-            &gate.host_key_prompt,
-            "Forget host key",
-            &host_key_prompt::forget_message(&label, &fingerprint),
-            "Forget the key",
-        )
-        .await
-    })
+    forget_confirmed(
+        &state.known_hosts,
+        &host,
+        port,
+        move |fingerprint| async move {
+            host_key_prompt::confirm(
+                &app,
+                &gate.host_key_prompt,
+                "Forget host key",
+                &host_key_prompt::forget_message(&label, &fingerprint),
+                "Forget the key",
+            )
+            .await
+        },
+    )
     .await
 }
 
@@ -355,20 +334,26 @@ pub async fn replace_known_host(
 ) -> ApiResult<()> {
     let state = state.inner().clone();
     let gate = state.clone();
-    replace_confirmed(&state.known_hosts, &host, port, &fingerprint, move |change| async move {
-        host_key_prompt::confirm(
-            &app,
-            &gate.host_key_prompt,
-            "Host key changed",
-            &host_key_prompt::trust_message(
-                &change.host,
-                &change.pinned_fingerprint,
-                &change.presented_fingerprint,
-            ),
-            "Trust the new key",
-        )
-        .await
-    })
+    replace_confirmed(
+        &state.known_hosts,
+        &host,
+        port,
+        &fingerprint,
+        move |change| async move {
+            host_key_prompt::confirm(
+                &app,
+                &gate.host_key_prompt,
+                "Host key changed",
+                &host_key_prompt::trust_message(
+                    &change.host,
+                    &change.pinned_fingerprint,
+                    &change.presented_fingerprint,
+                ),
+                "Trust the new key",
+            )
+            .await
+        },
+    )
     .await
 }
 
@@ -404,7 +389,9 @@ where
     let shown = change.clone();
     confirm(change).await?;
     let mut kh = known_hosts.lock().await;
-    let current = kh.confirmable_change(host, port, fingerprint).map_err(err)?;
+    let current = kh
+        .confirmable_change(host, port, fingerprint)
+        .map_err(err)?;
     if current.pinned_fingerprint != shown.pinned_fingerprint
         || current.presented_fingerprint != shown.presented_fingerprint
     {
@@ -450,19 +437,13 @@ pub async fn save_workspace(
 }
 
 #[tauri::command]
-pub async fn delete_workspace(
-    state: State<'_, Arc<AppState>>,
-    id: Uuid,
-) -> ApiResult<()> {
+pub async fn delete_workspace(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
     store.remove_workspace(id).map_err(err)
 }
 
 #[tauri::command]
-pub async fn set_active_workspace(
-    state: State<'_, Arc<AppState>>,
-    id: Uuid,
-) -> ApiResult<()> {
+pub async fn set_active_workspace(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
     store.set_active_workspace(id).map_err(err)
 }
@@ -484,10 +465,14 @@ fn ssh_connection_info(
     identity: Option<&Identity>,
     expected_username: Option<&str>,
 ) -> ApiResult<SshConnectionInfo> {
-    let username = identity.map(|item| item.username.as_str()).unwrap_or(&host.username);
+    let username = identity
+        .map(|item| item.username.as_str())
+        .unwrap_or(&host.username);
     // Reject changed accounts before submitting credentials or opening a network connection.
     if expected_username.is_some_and(|expected| expected != username) {
-        return Err("SSH identity changed. Reload identities and reconnect to review the account.".into());
+        return Err(
+            "SSH identity changed. Reload identities and reconnect to review the account.".into(),
+        );
     }
     Ok(SshConnectionInfo {
         username: username.to_owned(),
@@ -806,7 +791,9 @@ pub async fn session_write(
     let mut locals = state.local_terminals.lock().await;
     if let Some(term) = locals.get_live_mut(&session_id) {
         use std::io::Write;
-        term.writer.write_all(&data).map_err(|e| format!("write: {e}"))?;
+        term.writer
+            .write_all(&data)
+            .map_err(|e| format!("write: {e}"))?;
         term.writer.flush().map_err(|e| format!("flush: {e}"))?;
         return Ok(());
     }
@@ -872,10 +859,7 @@ pub async fn session_resize(
 }
 
 #[tauri::command]
-pub async fn close_session(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> ApiResult<()> {
+pub async fn close_session(state: State<'_, Arc<AppState>>, session_id: String) -> ApiResult<()> {
     // Try SSH session
     if state.sessions.list().await.contains(&session_id) {
         return state.sessions.close(&session_id).await.map_err(err);
@@ -983,11 +967,7 @@ pub async fn sftp_create_dir(
     session_id: String,
     path: String,
 ) -> ApiResult<()> {
-    state
-        .sftp
-        .create_dir(&session_id, &path)
-        .await
-        .map_err(err)
+    state.sftp.create_dir(&session_id, &path).await.map_err(err)
 }
 
 #[tauri::command]
@@ -1009,11 +989,7 @@ pub async fn sftp_remove_dir(
     session_id: String,
     path: String,
 ) -> ApiResult<()> {
-    state
-        .sftp
-        .remove_dir(&session_id, &path)
-        .await
-        .map_err(err)
+    state.sftp.remove_dir(&session_id, &path).await.map_err(err)
 }
 
 #[tauri::command]
@@ -1031,10 +1007,7 @@ pub async fn sftp_rename(
 }
 
 #[tauri::command]
-pub async fn sftp_close(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-) -> ApiResult<()> {
+pub async fn sftp_close(state: State<'_, Arc<AppState>>, session_id: String) -> ApiResult<()> {
     state.sftp.close(&session_id).await.map_err(err)
 }
 
@@ -1228,9 +1201,7 @@ pub fn get_app_info(app: AppHandle) -> AppInfo {
 /// check and owns the notification state, so the backend never announces an
 /// update on its own.
 #[tauri::command]
-pub async fn check_for_updates(
-    app: AppHandle,
-) -> ApiResult<UpdateInfo> {
+pub async fn check_for_updates(app: AppHandle) -> ApiResult<UpdateInfo> {
     tracing::info!("check_for_updates command invoked");
     let current = app.package_info().version.to_string();
 
@@ -1259,9 +1230,7 @@ pub async fn check_for_updates(
 /// Download and install the update, then restart the app.
 /// Emits "update-progress" events with download progress.
 #[tauri::command]
-pub async fn install_update(
-    app: AppHandle,
-) -> ApiResult<()> {
+pub async fn install_update(app: AppHandle) -> ApiResult<()> {
     let update = check_with_prerelease_endpoint(&app)
         .await
         .map_err(|e| e.to_string())?
@@ -1445,13 +1414,15 @@ mod ssh_connection_info_tests {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::nil(), "label": "Fixture", "hostname": "server.example.test",
             "port": 22, "username": "deploy", "auth": "agent", "tags": []
-        })).unwrap()
+        }))
+        .unwrap()
     }
     fn identity() -> Identity {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::nil(), "label": "Fixture identity", "username": "root",
             "auth": "agent", "tags": []
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -1468,8 +1439,18 @@ mod ssh_connection_info_tests {
 
     #[test]
     fn supports_missing_identity_fallback_and_legacy_callers() {
-        assert_eq!(ssh_connection_info(&host(), None, Some("deploy")).unwrap().username, "deploy");
-        assert_eq!(ssh_connection_info(&host(), Some(&identity()), None).unwrap().username, "root");
+        assert_eq!(
+            ssh_connection_info(&host(), None, Some("deploy"))
+                .unwrap()
+                .username,
+            "deploy"
+        );
+        assert_eq!(
+            ssh_connection_info(&host(), Some(&identity()), None)
+                .unwrap()
+                .username,
+            "root"
+        );
     }
 
     #[test]
@@ -1882,7 +1863,10 @@ mod known_host_confirmation_tests {
 
         // `remove` drops the held key, so there is nothing left to trust: the
         // dialog compared against a pin that is no longer live.
-        assert!(error.contains("no unreviewed host key"), "unexpected: {error}");
+        assert!(
+            error.contains("no unreviewed host key"),
+            "unexpected: {error}"
+        );
         assert!(
             store.lock().await.list().is_empty(),
             "a removed host was restored to the trusted list"
@@ -1969,7 +1953,10 @@ mod known_host_confirmation_tests {
             burst.spawn(async move {
                 // The connection path holds the changed key mid-burst.
                 if i == 200 {
-                    store.lock().await.hold_presented_key(HOST, PORT, &presented);
+                    store
+                        .lock()
+                        .await
+                        .hold_presented_key(HOST, PORT, &presented);
                     return;
                 }
                 let _ = replace_confirmed(&store, HOST, PORT, &fingerprint, |_| async move {

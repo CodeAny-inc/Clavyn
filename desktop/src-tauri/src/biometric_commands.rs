@@ -53,8 +53,7 @@ fn enrollment_is_current(
     vault: &Vault,
     binding_id: &str,
 ) -> bool {
-    auth_generation.is_current(expected_generation)
-        && vault.binding_id() == Some(binding_id)
+    auth_generation.is_current(expected_generation) && vault.binding_id() == Some(binding_id)
 }
 
 #[cfg(all(target_os = "macos", feature = "macos-biometric"))]
@@ -87,10 +86,8 @@ mod platform {
     }
 
     fn password_options(binding_id: &str) -> PasswordOptions {
-        let mut options = PasswordOptions::new_generic_password(
-            SERVICE,
-            &account_for_binding(binding_id),
-        );
+        let mut options =
+            PasswordOptions::new_generic_password(SERVICE, &account_for_binding(binding_id));
         options.use_protected_keychain();
         options
     }
@@ -186,9 +183,7 @@ async fn probe_credential(binding_id: &str) -> ApiResult<CredentialState> {
 /// serialized with reset/enable/disable, and the vault binding is revalidated
 /// after the blocking Keychain call before any durable tracking state is changed.
 #[tauri::command]
-pub async fn biometric_passphrase_stored(
-    state: State<'_, Arc<AppState>>,
-) -> ApiResult<bool> {
+pub async fn biometric_passphrase_stored(state: State<'_, Arc<AppState>>) -> ApiResult<bool> {
     let _mutation = state.biometric_mutation.lock().await;
     let binding_id = {
         let vault = state.vault.lock().await;
@@ -302,12 +297,7 @@ pub async fn store_biometric_passphrase(
 
     let still_current = {
         let vault = state.vault.lock().await;
-        enrollment_is_current(
-            &state.auth_generation,
-            generation,
-            &vault,
-            &binding_id,
-        )
+        enrollment_is_current(&state.auth_generation, generation, &vault, &binding_id)
     };
 
     if !still_current {
@@ -357,9 +347,7 @@ async fn authorize_biometric_disable(
 /// Locks are taken in the same order the rest of the biometric surface uses:
 /// `biometric_mutation` → `vault` → `passphrase`.
 #[tauri::command]
-pub async fn clear_biometric_passphrase(
-    state: State<'_, Arc<AppState>>,
-) -> ApiResult<()> {
+pub async fn clear_biometric_passphrase(state: State<'_, Arc<AppState>>) -> ApiResult<()> {
     let _mutation = state.biometric_mutation.lock().await;
     let generation = state.auth_generation.current();
 
@@ -373,12 +361,8 @@ pub async fn clear_biometric_passphrase(
         return Err("biometric disable was superseded by a newer vault state".into());
     }
 
-    crate::vault_keychain_cleanup::clear_bound_credential(
-        &state.app_data_dir,
-        &binding_id,
-        false,
-    )
-    .await?;
+    crate::vault_keychain_cleanup::clear_bound_credential(&state.app_data_dir, &binding_id, false)
+        .await?;
     crate::vault_keychain_cleanup::clear_legacy_best_effort("biometric disable").await;
     Ok(())
 }
@@ -406,7 +390,10 @@ mod tests {
         let error = authorize_biometric_disable(&vault, None)
             .await
             .expect_err("a locked vault must not authorize credential deletion");
-        assert!(error.contains("vault is locked"), "unexpected error: {error}");
+        assert!(
+            error.contains("vault is locked"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -463,8 +450,18 @@ mod tests {
         let binding = vault.binding_id().unwrap().to_owned();
         let generation = AuthGeneration::new();
         let expected = generation.current();
-        assert!(enrollment_is_current(&generation, expected, &vault, &binding));
+        assert!(enrollment_is_current(
+            &generation,
+            expected,
+            &vault,
+            &binding
+        ));
         generation.invalidate();
-        assert!(!enrollment_is_current(&generation, expected, &vault, &binding));
+        assert!(!enrollment_is_current(
+            &generation,
+            expected,
+            &vault,
+            &binding
+        ));
     }
 }
