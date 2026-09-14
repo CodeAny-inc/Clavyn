@@ -33,10 +33,16 @@ async fn contain_open_sessions(
     local_terminals: &Mutex<LocalTerminals>,
     budget: Duration,
 ) -> bool {
+    // The three teardowns run together rather than in turn: a stalled SFTP or
+    // SSH close cannot consume the shared budget before the others have even
+    // started, so a remote end that never answers cannot keep a pre-reset
+    // session reachable once the budget lapses.
     tokio::time::timeout(budget, async {
-        local_terminals.lock().await.clear();
-        sftp.close_all().await;
-        sessions.close_all().await;
+        tokio::join!(
+            async { local_terminals.lock().await.clear() },
+            sftp.close_all(),
+            sessions.close_all(),
+        );
     })
     .await
     .is_ok()
@@ -46,16 +52,12 @@ fn reset_crossed_destructive_boundary(reset_result: &ApiResult<()>, vault: &Vaul
     reset_result.is_ok() || !vault.is_initialized()
 }
 
-fn normalize_reset_result(
-    reset_result: clavyn_core::Result<()>,
-    vault: &Vault,
-) -> ApiResult<()> {
+fn normalize_reset_result(reset_result: clavyn_core::Result<()>, vault: &Vault) -> ApiResult<()> {
     match reset_result {
         Ok(()) => Ok(()),
-        Err(error) if !vault.is_initialized() => Err(CoreError::VaultResetDurability(
-            error.to_string(),
-        )
-        .to_string()),
+        Err(error) if !vault.is_initialized() => {
+            Err(CoreError::VaultResetDurability(error.to_string()).to_string())
+        }
         Err(error) => Err(err(error)),
     }
 }
@@ -262,7 +264,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
         let result = normalize_reset_result(
-            Err(CoreError::Io(std::io::Error::other("directory sync failed"))),
+            Err(CoreError::Io(std::io::Error::other(
+                "directory sync failed",
+            ))),
             &vault,
         );
 
