@@ -1,5 +1,12 @@
+use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Divider positions a split may hold. The renderer keeps drags inside this
+/// band so neither half collapses to nothing; the same bounds are enforced
+/// here because layouts also arrive straight from the frontend IPC surface.
+pub const MIN_RATIO: f32 = 0.1;
+pub const MAX_RATIO: f32 = 0.9;
 
 /// A workspace is a collection of saved terminal layouts (tabs + panes),
 /// associated hosts, and metadata. Users can switch between workspaces to
@@ -86,6 +93,20 @@ impl Workspace {
             auto_connect: false,
         }
     }
+
+    /// Bring an untrusted layout into the range the renderer maintains.
+    ///
+    /// A finite ratio outside the band is snapped, because a stale or
+    /// rounded-off value is not worth failing a save over. A non-finite one is
+    /// rejected instead: `serde_json` turns `f32::INFINITY` and `NaN` into JSON
+    /// `null`, and `#[serde(default)]` only covers a *missing* field, so a
+    /// stored `null` makes the whole store file unloadable on the next start.
+    pub fn sanitize(&mut self) -> Result<()> {
+        for tab in &mut self.tabs {
+            tab.layout.sanitize()?;
+        }
+        Ok(())
+    }
 }
 
 impl TabLayout {
@@ -118,5 +139,136 @@ impl PaneLayout {
             first: Box::new(first),
             second: Box::new(second),
         }
+    }
+
+    /// Validate every split in the tree. See `Workspace::sanitize`.
+    pub fn sanitize(&mut self) -> Result<()> {
+        match self {
+            PaneLayout::Pane { .. } => Ok(()),
+            PaneLayout::Split {
+                ratio,
+                first,
+                second,
+                ..
+            } => {
+                if !ratio.is_finite() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "split ratio must be a finite number between {MIN_RATIO} and {MAX_RATIO}, got {ratio}"
+                    )));
+                }
+                *ratio = ratio.clamp(MIN_RATIO, MAX_RATIO);
+                first.sanitize()?;
+                second.sanitize()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PaneLayout, SplitDirection, TabLayout, Workspace, MAX_RATIO, MIN_RATIO};
+
+    /// Nest `depth` splits, putting `ratio` on the innermost one so a caller
+    /// can place a bad value at the bottom of a tree.
+    fn split_with(ratio: f32, depth: usize) -> PaneLayout {
+        let mut node = PaneLayout::Split {
+            direction: SplitDirection::Horizontal,
+            ratio,
+            first: Box::new(PaneLayout::pane(None)),
+            second: Box::new(PaneLayout::pane(None)),
+        };
+        for _ in 1..depth {
+            node = PaneLayout::Split {
+                direction: SplitDirection::Vertical,
+                ratio: 0.5,
+                first: Box::new(PaneLayout::pane(None)),
+                second: Box::new(node),
+            };
+        }
+        node
+    }
+
+    fn workspace_with(layout: PaneLayout) -> Workspace {
+        let mut ws = Workspace::new("test");
+        ws.tabs.push(TabLayout::new("tab", layout));
+        ws
+    }
+
+    fn innermost_ratio(layout: &PaneLayout) -> f32 {
+        match layout {
+            PaneLayout::Split { ratio, second, .. } => match second.as_ref() {
+                nested @ PaneLayout::Split { .. } => innermost_ratio(nested),
+                PaneLayout::Pane { .. } => *ratio,
+            },
+            PaneLayout::Pane { .. } => unreachable!("expected a split"),
+        }
+    }
+
+    #[test]
+    fn a_non_finite_ratio_is_rejected() {
+        for bad in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            let mut ws = workspace_with(split_with(bad, 1));
+            let error = ws
+                .sanitize()
+                .expect_err("a non-finite ratio must not be accepted");
+            assert!(
+                error.to_string().contains("finite"),
+                "unexpected error for {bad}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_finite_ratio_deep_inside_the_tree_is_rejected() {
+        let mut ws = workspace_with(split_with(f32::INFINITY, 40));
+        assert!(
+            ws.sanitize().is_err(),
+            "a bad ratio 40 levels down must not be accepted"
+        );
+    }
+
+    #[test]
+    fn a_finite_ratio_is_clamped_to_the_renderer_range() {
+        for (input, expected) in [(-3.0_f32, MIN_RATIO), (0.0, MIN_RATIO), (7.5, MAX_RATIO)] {
+            let mut ws = workspace_with(split_with(input, 1));
+            ws.sanitize()
+                .expect("a finite ratio is snapped, not refused");
+            assert_eq!(innermost_ratio(&ws.tabs[0].layout), expected);
+        }
+    }
+
+    #[test]
+    fn an_in_range_ratio_is_left_alone() {
+        let mut ws = workspace_with(split_with(0.42, 3));
+        ws.sanitize().expect("sanitize");
+        assert_eq!(innermost_ratio(&ws.tabs[0].layout), 0.42);
+    }
+
+    // `serde_json` rejects `1e400` as out of range but silently widens `1e39`
+    // to `f32::INFINITY`, which it then writes back out as `null`.
+    #[test]
+    fn an_overflowing_json_literal_is_rejected_before_it_can_be_serialized() {
+        let hostile = r#"{
+            "id": "22222222-2222-2222-2222-222222222222",
+            "name": "hostile",
+            "tabs": [{
+                "id": "33333333-3333-3333-3333-333333333333",
+                "title": "tab",
+                "layout": {
+                    "type": "split",
+                    "direction": "horizontal",
+                    "ratio": 1e39,
+                    "first": { "type": "pane", "terminal_type": "local" },
+                    "second": { "type": "pane", "terminal_type": "local" }
+                }
+            }]
+        }"#;
+
+        let mut ws: Workspace = serde_json::from_str(hostile).expect("1e39 parses as a float");
+        assert!(innermost_ratio(&ws.tabs[0].layout).is_infinite());
+        assert!(serde_json::to_string(&ws)
+            .expect("serialize")
+            .contains("\"ratio\":null"));
+        assert!(ws.sanitize().is_err());
     }
 }

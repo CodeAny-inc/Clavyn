@@ -1,4 +1,4 @@
-use crate::state::AppState;
+use crate::state::{AppState, VaultSession};
 use clavyn_core::{vault::Vault, CoreError};
 use std::sync::Arc;
 use tauri::State;
@@ -38,15 +38,34 @@ pub async fn secure_unlock_vault(
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
-    let vault = state.vault.lock().await;
-    vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+    let mut vault = state.vault.lock().await;
+    // Verification derives the master key; keep it for the unlocked session so
+    // later vault operations do not each repeat the Argon2 work.
+    let key = vault
+        .verify_passphrase(passphrase.as_str())
+        .await
+        .map_err(err)?;
+    let binding_id = vault
+        .binding_id()
+        .ok_or_else(|| "vault binding is unavailable".to_string())?
+        .to_owned();
+    // A vault stored in an older on-disk format is rewritten in the
+    // authenticated one here, the one moment the master key is available. The
+    // rewrite is atomic and preserves the salt, so a failure leaves the file and
+    // any bound Keychain credential intact and must not fail the unlock.
+    if let Err(error) = vault.migrate_to_current_format(&key) {
+        tracing::warn!("vault format upgrade deferred: {error}");
+    }
     drop(vault);
 
-    let mut pw = state.passphrase.lock().await;
-    if !state.auth_generation.is_current(generation) {
+    let session = VaultSession::new(passphrase, key, binding_id);
+    if !state
+        .vault_session
+        .unlock_if_current(&state.auth_generation, generation, session)
+        .await
+    {
         return Err("vault unlock was superseded by a newer lock".into());
     }
-    *pw = Some(passphrase);
     Ok(())
 }
 
@@ -56,8 +75,7 @@ pub async fn secure_unlock_vault(
 #[tauri::command]
 pub async fn secure_lock_vault(state: State<'_, Arc<AppState>>) -> ApiResult<()> {
     state.auth_generation.invalidate();
-    let mut pw = state.passphrase.lock().await;
-    *pw = None;
+    state.vault_session.clear().await;
     Ok(())
 }
 
@@ -89,7 +107,10 @@ pub async fn secure_reset_vault(
 
     // Authorization gate: prove knowledge of the current passphrase before
     // touching the on-disk file or any biometric credential.
-    vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+    vault
+        .verify_passphrase(passphrase.as_str())
+        .await
+        .map_err(err)?;
 
     // Delete the authoritative vault-bound Keychain item before erasing the
     // binding id needed to address it. The durable enrollment marker prevents a
@@ -109,13 +130,13 @@ pub async fn secure_reset_vault(
 
     // Once the authoritative file has been unlinked, invalidate authentication
     // even if the subsequent directory fsync reported a durability error. The
-    // process must never keep an in-memory passphrase for a vault that is gone.
+    // process must never keep an in-memory passphrase, or the key derived from
+    // it, for a vault that is gone.
     state.auth_generation.invalidate();
     drop(vault);
     drop(passphrase);
 
-    let mut pw = state.passphrase.lock().await;
-    *pw = None;
+    state.vault_session.clear().await;
 
     reset_result
 }
@@ -123,21 +144,33 @@ pub async fn secure_reset_vault(
 #[cfg(test)]
 mod tests {
     use super::{normalize_reset_result, reset_crossed_destructive_boundary};
-    use crate::state::AuthGeneration;
+    use crate::state::{AuthGeneration, VaultSession, VaultSessionSlot};
     use clavyn_core::{vault::Vault, CoreError};
 
-    #[test]
-    fn reset_epoch_invalidates_older_authentication_before_slot_cleanup() {
+    #[tokio::test]
+    async fn reset_epoch_invalidates_older_authentication_before_slot_cleanup() {
         let generation = AuthGeneration::new();
         let older_attempt = generation.current();
-        let mut slot = Some(zeroize::Zeroizing::new("secret".to_string()));
+        let slot = VaultSessionSlot::new();
+        slot.unlock_if_current(
+            &generation,
+            older_attempt,
+            VaultSession::new(
+                zeroize::Zeroizing::new("secret".to_string()),
+                zeroize::Zeroizing::new([1u8; 32]),
+                "binding".to_string(),
+            ),
+        )
+        .await;
 
-        // Mirrors the reset boundary: generation first, passphrase slot second.
+        // Mirrors the reset boundary: generation first, credentials second.
         generation.invalidate();
         assert!(!generation.is_current(older_attempt));
-        slot = None;
+        slot.clear().await;
 
-        assert!(slot.is_none());
+        assert!(!slot.is_unlocked().await);
+        assert!(slot.passphrase().await.is_none());
+        assert!(slot.key_for("binding").await.is_none());
     }
 
     #[test]
@@ -149,13 +182,14 @@ mod tests {
         assert!(reset_crossed_destructive_boundary(&reset_result, &vault));
     }
 
-    #[test]
-    fn reset_error_before_destructive_boundary_keeps_auth_state_retryable() {
+    #[tokio::test]
+    async fn reset_error_before_destructive_boundary_keeps_auth_state_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.json");
         let mut vault = Vault::open(path).expect("open vault");
         vault
             .initialize("correct horse battery staple")
+            .await
             .expect("initialize vault");
         let reset_result = Err::<(), String>("unlink failed".into());
 

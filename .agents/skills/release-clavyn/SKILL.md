@@ -1,7 +1,7 @@
 ---
 name: release-clavyn
 description: Cut a Clavyn release end-to-end — maintain CHANGELOG.md (Keep a Changelog), bump the version across Cargo.toml/package.json/tauri.conf.json, run the verification suite, tag, and publish a signed multi-platform GitHub release via the tag-driven CI workflow with rich release notes. Use whenever asked to release, ship, tag, bump the version, write a changelog, or draft release notes for Clavyn.
-license: Proprietary. LICENSE.txt has complete terms
+license: GPL-3.0-or-later. LICENSE has complete terms
 compatibility: Requires git, gh CLI (authenticated), cargo, Node.js/npm. Signing happens in CI via the TAURI_SIGNING_PRIVATE_KEY repo secret; a local key is only needed for scripts/release.sh.
 metadata:
   author: CodeAny-inc

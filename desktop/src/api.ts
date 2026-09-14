@@ -7,6 +7,7 @@ import type {
   Identity,
   KeyMeta,
   KnownHostEntry,
+  PendingHostKeyChange,
   Workspace,
   SessionDataEvent,
   SessionClosedEvent,
@@ -44,6 +45,11 @@ export const importKey = (label: string, opensshPrivate: string, keyPassphrase: 
 export const deleteKey = (keyId: string) => invoke<void>("delete_key", { keyId });
 export const listKnownHosts = () => invoke<KnownHostEntry[]>("list_known_hosts");
 export const removeKnownHost = (host: string, port: number) => invoke<void>("remove_known_host", { host, port });
+export const listRemovedKnownHosts = () => invoke<KnownHostEntry[]>("list_removed_known_hosts");
+export const forgetKnownHost = (host: string, port: number) => invoke<void>("forget_known_host", { host, port });
+export const listHostKeyChanges = () => invoke<PendingHostKeyChange[]>("list_host_key_changes");
+export const replaceKnownHost = (host: string, port: number, fingerprint: string) =>
+  invoke<void>("replace_known_host", { host, port, fingerprint });
 export const listWorkspaces = () => invoke<Workspace[]>("list_workspaces");
 export const createWorkspace = (name: string) => invoke<Workspace>("create_workspace", { name });
 export const saveWorkspace = (workspace: Workspace) => invoke<Workspace>("save_workspace", { workspace });

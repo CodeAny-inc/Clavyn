@@ -1,7 +1,7 @@
 ---
 name: check-comments
 description: Scan Clavyn source for history/attribution comments that should be documentation instead. Use after writing or editing code to catch comments that narrate history ("This implements…", "Added…", "Changed from X to Y") or attribute work ("John asked for this", "per discussion", "PR #5") and fix them before committing. Activates on prompts about comment hygiene, code comments, history comments, or pre-commit checks.
-license: Proprietary. LICENSE.txt has complete terms
+license: GPL-3.0-or-later. LICENSE has complete terms
 compatibility: Requires Node.js. Designed for any Agent Skills-compatible agent (VS Code, Copilot, Claude Code, Cursor, Codex, Gemini CLI, Goose, OpenHands, Devin, etc.).
 metadata:
   author: CodeAny-inc
