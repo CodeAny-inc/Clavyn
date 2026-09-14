@@ -345,6 +345,23 @@ impl SftpManager {
     pub async fn list(&self) -> Vec<String> {
         self.sessions.lock().await.keys().cloned().collect()
     }
+
+    /// Close every active SFTP session and return how many were live.
+    ///
+    /// The map is drained under the lock and the guard is released before any
+    /// network work, so a channel stops being addressable the moment this is
+    /// called even if the remote never answers the close.
+    pub async fn close_all(&self) -> usize {
+        let drained: Vec<SftpConnection> = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.drain().map(|(_, conn)| conn).collect()
+        };
+        let count = drained.len();
+        for conn in &drained {
+            let _ = conn.sftp.close().await;
+        }
+        count
+    }
 }
 
 impl Default for SftpManager {

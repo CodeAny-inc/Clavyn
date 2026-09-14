@@ -247,6 +247,17 @@ impl LocalTerminals {
         removed
     }
 
+    /// Drops every live terminal and forgets every reservation. Live terminals
+    /// are disowned first so a still-running reader cannot speak for an id a
+    /// later session reuses, and a reservation left behind would hold a slot
+    /// for a terminal nobody wants any more.
+    pub fn clear(&mut self) {
+        for (_, terminal) in self.live.drain() {
+            terminal.disown();
+        }
+        self.opening.clear();
+    }
+
     /// Takes out the terminals `exited` reports as finished, returning them so
     /// the caller can drop them with the lock released. A reservation has no
     /// child to poll, so it is never reaped.

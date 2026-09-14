@@ -1216,6 +1216,10 @@ pub fn get_app_info(app: AppHandle) -> AppInfo {
 /// Unlike the default Tauri updater (which uses `releases/latest` and
 /// thus skips prereleases), this queries the GitHub API to find the
 /// newest release — including prereleases — and uses its `latest.json`.
+///
+/// This is the only path that reports availability: the renderer drives the
+/// check and owns the notification state, so the backend never announces an
+/// update on its own.
 #[tauri::command]
 pub async fn check_for_updates(
     app: AppHandle,
@@ -1451,6 +1455,64 @@ mod ssh_connection_info_tests {
         assert!(result.unwrap_err().contains("SSH identity changed"));
     }
 }
+
+#[cfg(test)]
+mod pty_dimension_tests {
+    use super::pty_dimension;
+
+    #[test]
+    fn accepts_ordinary_terminal_geometry() {
+        assert_eq!(pty_dimension("cols", 120).unwrap(), 120);
+        assert_eq!(pty_dimension("rows", 1).unwrap(), 1);
+        assert_eq!(pty_dimension("cols", 10_000).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn rejects_values_a_u16_cast_would_wrap() {
+        for value in [65_536_u32, 65_537, 131_072, u32::MAX] {
+            let error = pty_dimension("cols", value).unwrap_err();
+            assert!(error.contains("out of range"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_dimensions() {
+        assert!(pty_dimension("rows", 0).is_err());
+        assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `create_local_terminal` defaults a missing dimension to 80x24 and then
+    // runs the supplied one through the same helper, so the geometry a PTY is
+    // opened with is bounded the same way a later resize is. Before this the
+    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    #[test]
+    fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
+        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
+        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(
+                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
+                "creation accepted {value}"
+            );
+        }
+    }
+
+    // `session_resize` widens the checked value back to the `u32` russh puts on
+    // the wire, so the SSH path can only ever emit a geometry this helper
+    // accepted. Nothing else bounds it: russh forwards the number unchanged.
+    #[test]
+    fn checked_dimensions_widen_back_into_the_ssh_range() {
+        for value in [1_u32, 80, 24, 10_000] {
+            let checked: u32 = pty_dimension("cols", value).unwrap().into();
+            assert_eq!(checked, value);
+        }
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(pty_dimension("cols", value).is_err(), "accepted {value}");
+        }
+    }
+}
+
 
 #[cfg(test)]
 mod connect_lock_tests {

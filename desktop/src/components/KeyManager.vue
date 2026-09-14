@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useKeysStore } from "../stores/keys";
+import { useVaultStore } from "../stores/vault";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
 import Input from "./ui/Input.vue";
@@ -24,6 +25,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
+const vault = useVaultStore();
 
 const showAdd = ref(false);
 const showPublic = ref<string | null>(null);
@@ -40,6 +42,43 @@ const addForm = ref({
 onMounted(() => {
   keys.load();
 });
+
+// The dialog's contents are destroyed by `v-if`, but `addForm` is not: a
+// private key left there is rendered straight back into the plaintext textarea
+// the next time the dialog opens, with no vault authentication in between and
+// no lock to clear it. Every exit from the dialog discards the key material,
+// not just the successful ones. Synchronous so nothing can observe the ref
+// between the close and the clear.
+watch(showAdd, (open) => {
+  if (!open) clearAddForm();
+}, { flush: "sync" });
+
+// This component stays mounted across lock/unlock, including automatic locks:
+// `useAutoLock` calls `vault.lock()` and nothing else, and the unlock modal is
+// a sibling of the view rather than a replacement for it, so neither the
+// visibility watcher above nor unmount fires at the lock. Close the dialog and
+// discard the key material synchronously at the lock so it leaves no plaintext
+// key in the form or in the rendered textarea.
+//
+// The lock direction only. `resetForm` also closes the dialog and drops the
+// label, which is containment for a session that ended but pure loss for one
+// that just began: this view is reachable while locked, so an unlock can land
+// on a half-typed import belonging to the very person who just authenticated.
+// The synchronous flush still observes every transition through `false`, so a
+// lock and an unlock within one tick clears on the lock rather than slipping
+// past.
+watch(
+  () => vault.unlocked,
+  (unlocked) => {
+    if (!unlocked) resetForm();
+  },
+  { flush: "sync" },
+);
+
+// Only navigating away from this view unmounts the component today. Clearing
+// here means a future caller that keeps it mounted does not silently reopen
+// the retention window.
+onUnmounted(clearAddForm);
 
 async function generateKey() {
   if (!addForm.value.label.trim()) return;
@@ -63,13 +102,31 @@ async function importKey() {
     resetForm();
   } catch (e) {
     console.error("Failed to import key:", e);
+    // A rejected key is still a key, so the secret goes. The rest of the form
+    // stays: the usual rejection is a wrong passphrase on an encrypted key, and
+    // closing the dialog would also drop the label and bounce the user back to
+    // the Generate tab, leaving them to rebuild a form that was not the problem.
+    clearKeyMaterial();
     alert(`Failed to import key: ${e}`);
   }
 }
 
+// The secret half of the form, separable from the label and the tab selection
+// so a failure can drop the key material without discarding the user's context.
+function clearKeyMaterial() {
+  addForm.value.privateKey = "";
+  addForm.value.passphrase = "";
+}
+
+function clearAddForm() {
+  addForm.value.label = "";
+  addForm.value.import = false;
+  clearKeyMaterial();
+}
+
 function resetForm() {
   showAdd.value = false;
-  addForm.value = { label: "", import: false, privateKey: "", passphrase: "" };
+  clearAddForm();
 }
 
 async function deleteKey(key: KeyMeta) {
@@ -202,7 +259,7 @@ async function browseForKeyFile() {
       :title="addForm.import ? 'Import Key' : 'Generate Key'"
       description="Create or import an SSH key. Keys are encrypted at rest in the vault."
       width="520px"
-      @close="showAdd = false"
+      @close="resetForm"
     >
       <div class="flex flex-col gap-4">
         <div class="flex gap-1 p-1 rounded-md bg-muted">
@@ -261,7 +318,7 @@ async function browseForKeyFile() {
       </div>
 
       <template #footer>
-        <Button variant="ghost" @click="showAdd = false">Cancel</Button>
+        <Button variant="ghost" @click="resetForm">Cancel</Button>
         <Button v-if="!addForm.import" :disabled="!addForm.label.trim()" @click="generateKey">
           Generate Key
         </Button>
