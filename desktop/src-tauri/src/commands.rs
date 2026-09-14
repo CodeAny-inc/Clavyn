@@ -636,21 +636,21 @@ pub async fn create_local_terminal(
         // slots. Reaping first makes the cap bound live shells rather than map
         // entries.
         let dead = locals.reap_exited(|term| local_shell_exited(term.child.try_wait()));
-        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids);
         // Claim the id and the slot before releasing the lock. The PTY and the
         // shell below are slow and blocking, so they cannot be started under it;
         // checking here and inserting afterwards would let every request in a
         // burst pass the check and spawn, with the surplus refused only once the
-        // processes already existed.
-        if admission.is_ok() {
-            locals.reserve(session_id.clone());
-        }
+        // processes already existed. The reservation carries a token so a close
+        // that drops it — and a re-open that claims the id again — cannot be
+        // answered by this request's later `fulfil` or `release`.
+        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids)
+            .map(|()| locals.reserve(session_id.clone()));
         (dead, admission)
     };
     // Tearing down the reaped PTYs can block, so it happens with the lock
     // released rather than in front of every other pane's keystrokes.
     drop(dead);
-    admission?;
+    let reservation = admission?;
 
     // From here every failure has to give the reservation back, or the slot
     // stays claimed for a terminal that will never exist.
@@ -659,7 +659,11 @@ pub async fn create_local_terminal(
             match $result {
                 Ok(value) => value,
                 Err(e) => {
-                    state.local_terminals.lock().await.release(&session_id);
+                    state
+                        .local_terminals
+                        .lock()
+                        .await
+                        .release(&session_id, reservation);
                     return Err(format!(concat!($context, ": {}"), e));
                 }
             }
@@ -698,11 +702,13 @@ pub async fn create_local_terminal(
     // On Unix this is the correct pattern — the child has its own copy.
     drop(pair.slave);
 
-    // The lock is taken again to turn the reservation into a live terminal. The
-    // id and the slot were claimed before any of the blocking work above, so
-    // neither can have been taken in the meantime; only the SSH half of the
-    // check can have changed, because `connect_ssh` never consults the local
-    // map and so cannot be held off by a reservation.
+    // The lock is taken again to turn the reservation into a live terminal.
+    // A close in the meantime drops this request's reservation — possibly for
+    // a newer open on the same id — and `fulfil` matches the token, not the id
+    // alone, so a superseded request can neither install its terminal nor free
+    // the newer request's slot. Only the SSH half of the check needs
+    // re-checking, because `connect_ssh` never consults the local map and so
+    // cannot be held off by a reservation.
     let ssh_session_ids = state.sessions.list().await;
     let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let terminal = LocalTerminal {
@@ -714,15 +720,16 @@ pub async fn create_local_terminal(
     let refused = {
         let mut locals = state.local_terminals.lock().await;
         if ssh_session_ids.iter().any(|id| id == &session_id) {
-            locals.release(&session_id);
+            locals.release(&session_id, reservation);
             Some((
                 "session id is already in use by an SSH session".to_string(),
                 terminal,
             ))
         } else {
-            // A reservation that is no longer there means the session was closed
-            // while its shell was starting, so this terminal is not wanted.
-            match locals.fulfil(&session_id, terminal) {
+            // A reservation that is no longer this request's means the session
+            // was closed while its shell was starting, so this terminal is not
+            // wanted.
+            match locals.fulfil(&session_id, reservation, terminal) {
                 Ok(()) => None,
                 Err(unwanted) => Some((
                     "session was closed while the terminal was starting".to_string(),
@@ -1372,11 +1379,27 @@ mod admit_local_terminal_tests {
     /// spawn would shrink the cap for the rest of the session.
     #[test]
     fn releasing_a_reservation_returns_its_slot() {
-        let mut locals = opening(MAX_LOCAL_TERMINALS);
+        let mut locals = opening(MAX_LOCAL_TERMINALS - 1);
+        let reservation = locals.reserve("release-me".to_string());
         assert!(admit_local_terminal("fresh", &locals, &[]).is_err());
-        locals.release("local-0");
+        locals.release("release-me", reservation);
         assert!(admit_local_terminal("fresh", &locals, &[]).is_ok());
-        assert!(admit_local_terminal("local-0", &locals, &[]).is_ok());
+        assert!(admit_local_terminal("release-me", &locals, &[]).is_ok());
+    }
+
+    /// A superseded request must not free the slot a newer request claimed for
+    /// the same id — matching by id alone would let the old `release` consume
+    /// the new reservation.
+    #[test]
+    fn releasing_with_a_superseded_reservation_keeps_the_newer_claim() {
+        let mut locals = LocalTerminals::default();
+        let stale = locals.reserve("local-0".to_string());
+        locals.remove("local-0");
+        locals.reserve("local-0".to_string());
+
+        locals.release("local-0", stale);
+        assert!(locals.contains("local-0"));
+        assert_eq!(locals.len(), 1);
     }
 
     /// A reserved id is claimed but not usable yet: `session_write` and
