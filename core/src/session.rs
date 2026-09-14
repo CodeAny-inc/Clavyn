@@ -187,4 +187,25 @@ impl SessionManager {
     pub async fn list(&self) -> Vec<String> {
         self.sessions.lock().await.keys().cloned().collect()
     }
+
+    /// Close every active session and return how many were live.
+    ///
+    /// The map is drained under the lock and the guard is released before any
+    /// network work, so a session stops being addressable the moment this is
+    /// called. A remote that never acknowledges the disconnect can therefore
+    /// only delay the polite goodbye, never keep a session reachable.
+    pub async fn close_all(&self) -> usize {
+        let drained: Vec<SshSession> = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.drain().map(|(_, session)| session).collect()
+        };
+        let count = drained.len();
+        for session in &drained {
+            let handle = session.handle.lock().await;
+            let _ = handle
+                .disconnect(russh::Disconnect::ByApplication, "", "en")
+                .await;
+        }
+        count
+    }
 }
