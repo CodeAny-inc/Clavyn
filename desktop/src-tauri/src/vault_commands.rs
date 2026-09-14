@@ -1,8 +1,7 @@
-use crate::state::{AppState, VaultSession};
+use crate::state::{AppState, LocalTerminals, VaultSession};
 use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
 use clavyn_core::{vault::Vault, CoreError};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::State;
@@ -28,13 +27,10 @@ fn err(e: impl std::fmt::Display) -> String {
 /// never leave a session that `session_write` or the `sftp_*` commands can
 /// still address. Nothing here reports an error: the vault is already gone,
 /// and a stubborn connection must not be able to describe that as a failure.
-///
-/// The budget is a parameter and the local-terminal map is generic in its
-/// value so the teardown contract can be exercised without a real PTY.
-async fn contain_open_sessions<T>(
+async fn contain_open_sessions(
     sessions: &SessionManager,
     sftp: &SftpManager,
-    local_terminals: &Mutex<HashMap<String, T>>,
+    local_terminals: &Mutex<LocalTerminals>,
     budget: Duration,
 ) -> bool {
     // The three teardowns run together rather than in turn: a stalled SFTP or
@@ -197,14 +193,11 @@ pub async fn secure_reset_vault(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        contain_open_sessions, normalize_reset_result, reset_crossed_destructive_boundary,
-    };
-    use crate::state::{AuthGeneration, VaultSession, VaultSessionSlot};
+    use super::{contain_open_sessions, normalize_reset_result, reset_crossed_destructive_boundary};
+    use crate::state::{AuthGeneration, LocalTerminals, VaultSession, VaultSessionSlot};
     use clavyn_core::session::SessionManager;
     use clavyn_core::sftp::SftpManager;
     use clavyn_core::{vault::Vault, CoreError};
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -214,10 +207,7 @@ mod tests {
     const TEST_BUDGET: Duration = Duration::from_millis(200);
 
     fn session_manager() -> SessionManager {
-        SessionManager::new(
-            Arc::new(|_: &str, _: &[u8]| {}),
-            Arc::new(|_: &str, _: &str| {}),
-        )
+        SessionManager::new(Arc::new(|_: &str, _: &[u8]| {}), Arc::new(|_: &str, _: &str| {}))
     }
 
     #[tokio::test]
@@ -288,20 +278,22 @@ mod tests {
     async fn reset_containment_drops_every_session_and_local_terminal() {
         let sessions = session_manager();
         let sftp = SftpManager::new();
-        let locals = Mutex::new(HashMap::from([("local-1".to_string(), ())]));
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
 
         assert!(contain_open_sessions(&sessions, &sftp, &locals, TEST_BUDGET).await);
 
         assert!(sessions.list().await.is_empty());
         assert!(sftp.list().await.is_empty());
-        assert!(locals.lock().await.is_empty());
+        assert_eq!(locals.lock().await.len(), 0);
     }
 
     #[tokio::test]
     async fn a_teardown_that_never_completes_still_returns_to_the_reset() {
         let sessions = session_manager();
         let sftp = SftpManager::new();
-        let locals = Mutex::new(HashMap::from([("local-1".to_string(), ())]));
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
 
         // A teardown step that never finishes: the reset has already destroyed
         // the vault, so the command has to come back regardless.
@@ -315,16 +307,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
         let reset_result = normalize_reset_result(
-            Err(CoreError::Io(std::io::Error::other(
-                "directory sync failed",
-            ))),
+            Err(CoreError::Io(std::io::Error::other("directory sync failed"))),
             &vault,
         );
         assert!(reset_crossed_destructive_boundary(&reset_result, &vault));
 
         let sessions = session_manager();
         let sftp = SftpManager::new();
-        let locals = Mutex::new(HashMap::from([("local-1".to_string(), ())]));
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
         let stuck = locals.lock().await;
         assert!(!contain_open_sessions(&sessions, &sftp, &locals, TEST_BUDGET).await);
         drop(stuck);

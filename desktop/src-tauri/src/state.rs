@@ -6,7 +6,7 @@ use clavyn_core::store::Store;
 use clavyn_core::vault::{Vault, VaultKey};
 use clavyn_core::Result;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
@@ -167,15 +167,164 @@ pub struct AppState {
     pub biometric_mutation: Mutex<()>,
     pub sessions: Arc<SessionManager>,
     pub sftp: Arc<SftpManager>,
-    pub local_terminals: Mutex<std::collections::HashMap<String, LocalTerminal>>,
+    pub local_terminals: Mutex<LocalTerminals>,
     pub app_data_dir: PathBuf,
+}
+
+/// Live local terminals and the ids currently being opened.
+///
+/// Opening a terminal has to release the lock to spawn a PTY and a shell, which
+/// is slow and blocking. Checking the cap and then spawning would let every
+/// request in a burst pass the check before any of them inserted, so the shells
+/// would already exist by the time the surplus was refused. A reservation is
+/// taken under the same lock as the check instead, so the id and the slot are
+/// claimed before anything is spawned and the cap bounds processes rather than
+/// map entries.
+#[derive(Default)]
+pub struct LocalTerminals {
+    live: std::collections::HashMap<String, LocalTerminal>,
+    opening: std::collections::HashMap<String, u64>,
+    next_reservation: u64,
+}
+
+/// Identifies one in-flight open. Session ids are reusable: a close drops the
+/// pending reservation, and a new open can claim the same id while the first
+/// shell is still starting. Keying the reservation by id alone would let the
+/// earlier request's `fulfil` or `release` then consume the newer request's
+/// claim, so each reservation carries a unique token that both must match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Reservation(u64);
+
+impl LocalTerminals {
+    /// Slots in use, counting terminals still being opened.
+    pub fn len(&self) -> usize {
+        self.live.len() + self.opening.len()
+    }
+
+    /// Whether an id is taken, whether or not its shell exists yet.
+    pub fn contains(&self, session_id: &str) -> bool {
+        self.live.contains_key(session_id) || self.opening.contains_key(session_id)
+    }
+
+    /// Ids of terminals that are ready to use. A reserved id is deliberately
+    /// absent: nothing can be written to it yet.
+    pub fn live_ids(&self) -> impl Iterator<Item = &String> {
+        self.live.keys()
+    }
+
+    pub fn get_live(&self, session_id: &str) -> Option<&LocalTerminal> {
+        self.live.get(session_id)
+    }
+
+    pub fn get_live_mut(&mut self, session_id: &str) -> Option<&mut LocalTerminal> {
+        self.live.get_mut(session_id)
+    }
+
+    /// Claims a session id for a terminal that has not spawned yet. The
+    /// returned token is the only proof the claim is still this request's —
+    /// a `fulfil` or `release` carrying an older token leaves a reservation
+    /// that has since been taken over by a new open untouched.
+    pub fn reserve(&mut self, session_id: String) -> Reservation {
+        let reservation = Reservation(self.next_reservation);
+        self.next_reservation = self.next_reservation.wrapping_add(1);
+        self.opening.insert(session_id, reservation.0);
+        reservation
+    }
+
+    /// Turns a reservation into a usable terminal. Returns the terminal back if
+    /// the reservation is gone or now belongs to a newer open, which means the
+    /// session was closed while its shell was starting and the caller has to
+    /// tear it down.
+    pub fn fulfil(
+        &mut self,
+        session_id: &str,
+        reservation: Reservation,
+        terminal: LocalTerminal,
+    ) -> std::result::Result<(), LocalTerminal> {
+        if self.opening.get(session_id) != Some(&reservation.0) {
+            return Err(terminal);
+        }
+        self.opening.remove(session_id);
+        self.live.insert(session_id.to_string(), terminal);
+        Ok(())
+    }
+
+    /// Drops a reservation whose shell never started. A token that no longer
+    /// matches — the request was closed and the id possibly re-reserved — is
+    /// ignored rather than consuming the newer request's claim.
+    pub fn release(&mut self, session_id: &str, reservation: Reservation) {
+        if self.opening.get(session_id) == Some(&reservation.0) {
+            self.opening.remove(session_id);
+        }
+    }
+
+    /// Removes a session, live or still opening. The removed terminal gives up
+    /// its session id here rather than when it is dropped, so the id is free of
+    /// its old reader before the lock this runs under is released.
+    pub fn remove(&mut self, session_id: &str) -> Option<LocalTerminal> {
+        self.opening.remove(session_id);
+        let removed = self.live.remove(session_id);
+        if let Some(terminal) = &removed {
+            terminal.disown();
+        }
+        removed
+    }
+
+    /// Drops every live terminal and forgets every reservation. Live terminals
+    /// are disowned first so a still-running reader cannot speak for an id a
+    /// later session reuses, and a reservation left behind would hold a slot
+    /// for a terminal nobody wants any more.
+    pub fn clear(&mut self) {
+        for (_, terminal) in self.live.drain() {
+            terminal.disown();
+        }
+        self.opening.clear();
+    }
+
+    /// Takes out the terminals `exited` reports as finished, returning them so
+    /// the caller can drop them with the lock released. A reservation has no
+    /// child to poll, so it is never reaped.
+    pub fn reap_exited(
+        &mut self,
+        exited: impl Fn(&mut LocalTerminal) -> bool,
+    ) -> Vec<LocalTerminal> {
+        let finished: Vec<String> = self
+            .live
+            .iter_mut()
+            .filter_map(|(id, term)| exited(term).then(|| id.clone()))
+            .collect();
+        finished
+            .iter()
+            .filter_map(|id| self.live.remove(id))
+            .inspect(|terminal| terminal.disown())
+            .collect()
+    }
 }
 
 /// A local terminal session backed by portable-pty.
 pub struct LocalTerminal {
     pub writer: Box<dyn std::io::Write + Send>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
-    pub _child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Kept alive so the shell is not reaped, and polled with `try_wait` to
+    /// tell a live terminal from one whose shell has already exited.
+    pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Cleared when this terminal stops holding its session id.
+    ///
+    /// The thread draining the PTY outlives the map entry: it is detached, and
+    /// a shell that has exited is only noticed when the entry is reaped, by
+    /// which time the reader may still have buffered output to deliver and a
+    /// closing notice to send. Session ids are reusable, and both events carry
+    /// nothing but the id, so a replacement terminal on the same id would
+    /// receive the old shell's output and then be disconnected by its
+    /// `session-closed`. The reader checks this before it emits.
+    pub owns_session_id: Arc<AtomicBool>,
+}
+
+impl LocalTerminal {
+    /// Marks the terminal as no longer holding its session id.
+    pub fn disown(&self) {
+        self.owns_session_id.store(false, Ordering::Release);
+    }
 }
 
 impl AppState {
@@ -223,7 +372,7 @@ impl AppState {
             biometric_mutation: Mutex::new(()),
             sessions,
             sftp,
-            local_terminals: Mutex::new(std::collections::HashMap::new()),
+            local_terminals: Mutex::new(LocalTerminals::default()),
             app_data_dir: app_data,
         }))
     }
@@ -260,6 +409,124 @@ pub struct SessionDataEvent {
 pub struct SessionClosedEvent {
     pub session_id: String,
     pub reason: String,
+}
+
+#[cfg(test)]
+mod local_terminal_ownership_tests {
+    use super::*;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+
+    /// A real terminal, plus the flag its reader thread would consult. The PTY
+    /// handles are what the map stores, so there is no way to exercise removal
+    /// without them.
+    fn terminal() -> (LocalTerminal, Arc<AtomicBool>) {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let shell = if cfg!(target_os = "windows") {
+            "cmd.exe"
+        } else {
+            "/bin/sh"
+        };
+        let child = pair
+            .slave
+            .spawn_command(CommandBuilder::new(shell))
+            .expect("a shell can be spawned");
+        let writer = pair.master.take_writer().expect("the master has a writer");
+        let owns_session_id = Arc::new(AtomicBool::new(true));
+        (
+            LocalTerminal {
+                writer,
+                master: pair.master,
+                child,
+                owns_session_id: owns_session_id.clone(),
+            },
+            owns_session_id,
+        )
+    }
+
+    fn live(locals: &mut LocalTerminals, session_id: &str) -> Arc<AtomicBool> {
+        let (terminal, owns) = terminal();
+        let reservation = locals.reserve(session_id.to_string());
+        assert!(locals.fulfil(session_id, reservation, terminal).is_ok());
+        owns
+    }
+
+    #[test]
+    fn closing_a_terminal_hands_its_session_id_back() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+        assert!(owns.load(Ordering::Acquire));
+
+        // The id is free for reuse from here, so the reader still draining the
+        // old shell must stop addressing it.
+        let mut closed = locals.remove("local-0").expect("the terminal was live");
+        assert!(!owns.load(Ordering::Acquire));
+        let _ = closed.child.kill();
+    }
+
+    #[test]
+    fn reaping_an_exited_terminal_hands_its_session_id_back() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+
+        let reaped = locals.reap_exited(|_| true);
+        assert_eq!(reaped.len(), 1);
+        assert!(!owns.load(Ordering::Acquire));
+        for mut terminal in reaped {
+            let _ = terminal.child.kill();
+        }
+    }
+
+    #[test]
+    fn a_terminal_that_stays_open_keeps_its_session_id() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+
+        assert!(locals.reap_exited(|_| false).is_empty());
+        assert!(locals.remove("other").is_none());
+        assert!(owns.load(Ordering::Acquire));
+
+        let mut open = locals.remove("local-0").expect("the terminal was live");
+        let _ = open.child.kill();
+    }
+
+    /// The window the token closes: a close drops the first open's
+    /// reservation, a second open claims the same id while the first shell is
+    /// still starting, and the first request's `release` or `fulfil` must not
+    /// consume the reservation that now belongs to the second.
+    #[test]
+    fn a_superseded_reservation_cannot_consume_the_newer_one() {
+        let mut locals = LocalTerminals::default();
+        let stale = locals.reserve("local-0".to_string());
+        locals.remove("local-0");
+        let current = locals.reserve("local-0".to_string());
+
+        // A late release from the first request leaves the slot claimed.
+        locals.release("local-0", stale);
+        assert!(locals.contains("local-0"));
+
+        // And its fulfil installs nothing — the caller tears the shell down.
+        let (stale_terminal, _) = terminal();
+        let mut refused = locals
+            .fulfil("local-0", stale, stale_terminal)
+            .expect_err("the reservation is no longer the first request's");
+        let _ = refused.child.kill();
+        assert!(locals.contains("local-0"));
+        assert!(locals.get_live("local-0").is_none());
+
+        let (live_terminal, owns) = terminal();
+        assert!(locals.fulfil("local-0", current, live_terminal).is_ok());
+        assert!(owns.load(Ordering::Acquire));
+
+        let mut open = locals.remove("local-0").expect("the terminal is live");
+        let _ = open.child.kill();
+    }
 }
 
 #[cfg(test)]
