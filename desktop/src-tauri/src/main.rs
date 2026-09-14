@@ -12,8 +12,6 @@ mod vault_keychain_cleanup;
 
 use state::AppState;
 use tauri::Manager;
-#[cfg(not(debug_assertions))]
-use tauri::Emitter;
 
 /// Whether this build claims the single-instance guard.
 ///
@@ -111,15 +109,6 @@ fn main() {
             let state = AppState::init(app.handle(), app_data)?;
             app.manage(state);
 
-            #[cfg(not(debug_assertions))]
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    check_for_updates_silent(handle).await;
-                });
-            }
-
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -184,26 +173,6 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running Clavyn");
 }
-
-#[cfg(not(debug_assertions))]
-async fn check_for_updates_silent(app: tauri::AppHandle) {
-    match commands::check_with_prerelease_endpoint(&app).await {
-        Ok(Some(update)) => {
-            let current = app.package_info().version.to_string();
-            tracing::info!("update available: v{} (current: {})", update.version, current);
-            let _ = app.emit("update-available", serde_json::json!({
-                "available": true,
-                "version": update.version,
-                "current_version": current,
-                "date": update.date.map(|d| d.to_string()),
-                "body": update.body,
-            }));
-        }
-        Ok(None) => tracing::debug!("no update available"),
-        Err(e) => tracing::warn!("update check failed: {e}"),
-    }
-}
-
 #[cfg(test)]
 mod single_instance_guard_tests {
     use super::guard_applies;
