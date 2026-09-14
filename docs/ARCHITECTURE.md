@@ -31,9 +31,20 @@ shell.
   material is wrapped in `PrivateKeyMaterial` which `Zeroize`s on drop.
 - `vault` — Argon2id(passphrase, salt) -> AES-256-GCM. The only thing
   written to disk is ciphertext + salt + public metadata.
-- `known_hosts` — TOFU. `verify()` records on first sight, compares
-  thereafter, returns `HostKeyMismatch` on divergence. `replace()` is the
-  only way to overwrite, and is called only after user confirmation.
+- `known_hosts` — TOFU. `verify()` records on first sight and compares
+  thereafter; `check_mismatch()` returns `HostKeyMismatch` with both
+  fingerprints and runs first, so the connection handler fails with that error
+  rather than a generic unknown-key rejection. The presented key is held in
+  memory and `trust_presented_key()` — the only caller of `replace()` — pins it
+  after the user confirms the fingerprint that was displayed. `remove()`
+  tombstones an entry instead of deleting it, so unpinning cannot silently
+  downgrade a host back to first-use. `removed()` lists the tombstones and
+  `forget()` erases one, which is the only path back to first-use and refuses a
+  live pin, so it always takes two deliberate steps. The commands wrapping
+  `forget()` and `trust_presented_key()` show a native dialog first
+  (`desktop/src-tauri/src/host_key_prompt.rs`), carrying the fingerprint read
+  from the store rather than from the caller's arguments; `remove()` does not,
+  because the tombstone it leaves keeps the host under the mismatch check.
 - `connection` — `russh` async client. Auth resolved from `AuthMethod` +
   vault + (optional) password. The returned `Handle` is owned by the shell,
   which streams channel data to the UI.
