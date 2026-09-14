@@ -329,13 +329,14 @@ pub async fn store_biometric_passphrase(
 /// access to every stored key. It therefore demands the same proof of the
 /// master passphrase that enrollment does: the vault must be unlocked and the
 /// held passphrase must still verify against the current vault payload.
-fn authorize_biometric_disable(
+async fn authorize_biometric_disable(
     vault: &Vault,
     held_passphrase: Option<&str>,
 ) -> ApiResult<String> {
     let passphrase = held_passphrase.ok_or_else(|| "vault is locked".to_string())?;
     vault
         .verify_passphrase(passphrase)
+        .await
         .map_err(|error| error.to_string())?;
     vault_binding_id(vault)
 }
@@ -357,8 +358,8 @@ pub async fn clear_biometric_passphrase(
 
     let binding_id = {
         let vault = state.vault.lock().await;
-        let held = state.passphrase.lock().await;
-        authorize_biometric_disable(&vault, held.as_ref().map(|p| p.as_str()))?
+        let held = state.vault_session.passphrase().await;
+        authorize_biometric_disable(&vault, held.as_ref().map(|p| p.as_str())).await?
     };
 
     if !state.auth_generation.is_current(generation) {
@@ -381,51 +382,60 @@ mod tests {
     use crate::state::AuthGeneration;
     use clavyn_core::vault::Vault;
 
-    fn initialized_vault(dir: &std::path::Path, passphrase: &str) -> Vault {
+    async fn initialized_vault(dir: &std::path::Path, passphrase: &str) -> Vault {
         let mut vault = Vault::open(dir.join("vault.json")).expect("open vault");
-        vault.initialize(passphrase).expect("initialize vault");
+        vault
+            .initialize(passphrase)
+            .await
+            .expect("initialize vault");
         vault
     }
 
-    #[test]
-    fn disable_is_rejected_while_the_vault_is_locked() {
+    #[tokio::test]
+    async fn disable_is_rejected_while_the_vault_is_locked() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let vault = initialized_vault(dir.path(), "correct horse battery staple");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
 
         let error = authorize_biometric_disable(&vault, None)
+            .await
             .expect_err("a locked vault must not authorize credential deletion");
         assert!(error.contains("vault is locked"), "unexpected error: {error}");
     }
 
-    #[test]
-    fn disable_is_rejected_for_a_passphrase_that_does_not_verify() {
+    #[tokio::test]
+    async fn disable_is_rejected_for_a_passphrase_that_does_not_verify() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let vault = initialized_vault(dir.path(), "correct horse battery staple");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
 
         assert!(
-            authorize_biometric_disable(&vault, Some("wrong passphrase")).is_err(),
+            authorize_biometric_disable(&vault, Some("wrong passphrase"))
+                .await
+                .is_err(),
             "a passphrase that does not decrypt the vault must not authorize deletion"
         );
     }
 
-    #[test]
-    fn disable_is_rejected_when_no_vault_exists() {
+    #[tokio::test]
+    async fn disable_is_rejected_when_no_vault_exists() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
 
         assert!(
-            authorize_biometric_disable(&vault, Some("any passphrase")).is_err(),
+            authorize_biometric_disable(&vault, Some("any passphrase"))
+                .await
+                .is_err(),
             "an uninitialized vault must not authorize deletion"
         );
     }
 
-    #[test]
-    fn disable_resolves_the_binding_id_for_the_verified_passphrase() {
+    #[tokio::test]
+    async fn disable_resolves_the_binding_id_for_the_verified_passphrase() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let vault = initialized_vault(dir.path(), "correct horse battery staple");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
         let expected = vault.binding_id().expect("binding id").to_owned();
 
         let binding_id = authorize_biometric_disable(&vault, Some("correct horse battery staple"))
+            .await
             .expect("verified passphrase authorizes disable");
         assert_eq!(binding_id, expected);
     }
