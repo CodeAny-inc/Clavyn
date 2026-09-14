@@ -6,6 +6,13 @@ use tauri::State;
 
 type ApiResult<T> = std::result::Result<T, String>;
 
+/// Only the Touch ID platform module distinguishes a stored credential from an
+/// invalidated one; every other build resolves to the stub that reports
+/// `Missing`, so those two variants are constructed on macOS alone.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-biometric")),
+    allow(dead_code)
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialState {
     Stored,
