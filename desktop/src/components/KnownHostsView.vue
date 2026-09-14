@@ -4,15 +4,20 @@ import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
+import Button from "./ui/Button.vue";
 import {
   ShieldCheck,
+  ShieldAlert,
+  ShieldOff,
   Trash2,
   Search,
   Fingerprint,
 } from "lucide-vue-next";
-import type { KnownHostEntry } from "../types";
+import type { KnownHostEntry, PendingHostKeyChange } from "../types";
 
 const hosts = ref<KnownHostEntry[]>([]);
+const removedHosts = ref<KnownHostEntry[]>([]);
+const changes = ref<PendingHostKeyChange[]>([]);
 const search = ref("");
 const loading = ref(false);
 const { maskAddress } = useMaskedAddress();
@@ -24,7 +29,14 @@ onMounted(async () => {
 async function load() {
   loading.value = true;
   try {
-    hosts.value = await api.listKnownHosts();
+    const [known, removed, pending] = await Promise.all([
+      api.listKnownHosts(),
+      api.listRemovedKnownHosts(),
+      api.listHostKeyChanges(),
+    ]);
+    hosts.value = known;
+    removedHosts.value = removed;
+    changes.value = pending;
   } finally {
     loading.value = false;
   }
@@ -40,23 +52,68 @@ const filteredHosts = computed(() => {
   );
 });
 
+// An entry is stored as "host:port", where the host is whatever was connected
+// to and may itself contain colons. Everything up to the last colon is the host,
+// so the pair rebuilds the entry it came from: "::1:22" is ::1 on port 22, and
+// "[::1]:22" keeps its brackets rather than losing them on the way back.
 function parseHostPort(entry: string): [string, number] {
-  // known_hosts entries may be "host" or "host:port" or "[host]:port"
-  const m = entry.match(/^\[([^\]]+)\]:(\d+)$/);
-  if (m) return [m[1], parseInt(m[2], 10)];
-  const parts = entry.split(":");
-  if (parts.length === 2 && /^\d+$/.test(parts[1])) {
-    return [parts[0], parseInt(parts[1], 10)];
+  const lastColon = entry.lastIndexOf(":");
+  const port = entry.slice(lastColon + 1);
+  const host = entry.slice(0, lastColon);
+  // A host made of nothing but colons is not a host, so "::1" with no port at
+  // all reads as the address rather than as ":" on port 1.
+  if (lastColon > 0 && /^\d+$/.test(port) && /[^:]/.test(host)) {
+    return [host, parseInt(port, 10)];
   }
   return [entry, 22];
 }
 
+// Cancelling the native confirmation is an answer, not a failure, so it is not
+// reported as one. The tag is set by the backend that raises it.
+const DECLINED = "[host-key-confirmation-declined]";
+
+async function run(error: { value: string }, action: () => Promise<void>) {
+  error.value = "";
+  try {
+    await action();
+  } catch (cause) {
+    const message = String(cause);
+    if (!message.includes(DECLINED)) error.value = message;
+  }
+  await load();
+}
+
+const removeError = ref("");
+
 async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
-  if (confirm(`Remove known host "${entry.host}"?`)) {
-    await api.removeKnownHost(host, port);
-    await load();
-  }
+  // The key is retained, not erased, so this asks in the page. Erasing it is
+  // "Forget permanently", which the backend confirms natively.
+  if (!confirm(`Remove known host "${entry.host}"?`)) return;
+  await run(removeError, () => api.removeKnownHost(host, port));
+}
+
+const forgetError = ref("");
+
+// No page-level confirmation: `forget_known_host` shows a native dialog with the
+// fingerprint it is about to erase. A second question here would only be one
+// more click on the way to the one that counts.
+async function forget(entry: KnownHostEntry) {
+  const [host, port] = parseHostPort(entry.host);
+  await run(forgetError, () => api.forgetKnownHost(host, port));
+}
+
+const trustError = ref("");
+
+async function trust(change: PendingHostKeyChange) {
+  const [host, port] = parseHostPort(change.host);
+  // Send back the fingerprint that was shown, so a key that arrived after this
+  // view rendered cannot be trusted on the strength of the old one. The native
+  // dialog raised by `replace_known_host` prints both fingerprints as the
+  // backend holds them.
+  await run(trustError, () =>
+    api.replaceKnownHost(host, port, change.presented_fingerprint),
+  );
 }
 </script>
 
@@ -80,6 +137,80 @@ async function remove(entry: KnownHostEntry) {
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
+      <!-- Key changes awaiting review. A host listed here is refusing to connect
+           until the presented key is trusted or the server is fixed. Held back
+           while a reload is in flight, so a stale list never sits above the
+           loading indicator. -->
+      <div v-if="!loading && changes.length" class="mb-3 flex flex-col gap-1.5">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Host key changes
+        </div>
+        <div
+          v-for="change in changes"
+          :key="change.host"
+          class="flex items-start gap-3 rounded-md border border-destructive/40 bg-destructive/5 p-3"
+          data-testid="host-key-change"
+        >
+          <div class="flex h-9 w-9 items-center justify-center rounded-md shrink-0 bg-destructive/10">
+            <ShieldAlert class="size-4 text-destructive" :stroke-width="1.75" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-medium truncate font-mono">{{ maskAddress(change.host) }}</span>
+              <Badge>{{ change.key_type }}</Badge>
+            </div>
+            <p class="mt-1 text-[12px] text-foreground">
+              The key this host presents is not the pinned one. Connections stay
+              blocked until you confirm the change with whoever runs the server.
+            </p>
+            <div class="mt-1.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
+              <span class="font-mono truncate">Pinned: {{ change.pinned_fingerprint }}</span>
+              <span class="font-mono truncate">Presented: {{ change.presented_fingerprint }}</span>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" @click="trust(change)">
+            Trust new key
+          </Button>
+        </div>
+        <p v-if="trustError" class="text-[12px] text-destructive">{{ trustError }}</p>
+      </div>
+
+      <!-- Removed hosts whose last key is still retained. Kept visible so the
+           record can be erased from here instead of by hand. -->
+      <div v-if="!loading && removedHosts.length" class="mb-3 flex flex-col gap-1.5">
+        <div class="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+          Removed hosts
+        </div>
+        <div
+          v-for="entry in removedHosts"
+          :key="entry.host"
+          class="flex items-start gap-3 rounded-md border border-border bg-card p-3"
+          data-testid="removed-known-host"
+        >
+          <div class="flex h-9 w-9 items-center justify-center rounded-md shrink-0 bg-muted">
+            <ShieldOff class="size-4 text-muted-foreground" :stroke-width="1.75" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2">
+              <span class="text-[13px] font-medium truncate font-mono">{{ maskAddress(entry.host) }}</span>
+              <Badge>{{ entry.key_type }}</Badge>
+            </div>
+            <p class="mt-1 text-[12px] text-muted-foreground">
+              No longer trusted. The key it was pinned to is still remembered, so
+              a different key is reported as a change rather than a first contact.
+            </p>
+            <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
+              <Fingerprint class="size-3" :stroke-width="1.75" />
+              <span class="font-mono truncate">{{ entry.fingerprint }}</span>
+            </div>
+          </div>
+          <Button variant="outline" size="sm" class="shrink-0" @click="forget(entry)">
+            Forget permanently
+          </Button>
+        </div>
+        <p v-if="forgetError" class="text-[12px] text-destructive">{{ forgetError }}</p>
+      </div>
+
       <div v-if="loading" class="py-12 text-center text-[13px] text-muted-foreground">Loading...</div>
 
       <div v-else-if="filteredHosts.length" class="flex flex-col gap-1.5">
@@ -109,10 +240,29 @@ async function remove(entry: KnownHostEntry) {
             <Trash2 class="size-3.5" :stroke-width="1.75" />
           </button>
         </div>
+        <p v-if="removeError" class="text-[12px] text-destructive">{{ removeError }}</p>
+      </div>
+
+      <!-- A search that matches nothing says so, even when the sections above
+           it have content: silence would read as a broken list. -->
+      <div
+        v-else-if="search.trim()"
+        class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center"
+      >
+        <Search class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">No trusted hosts match</p>
+          <p class="text-[12px] text-muted-foreground mt-1">
+            Nothing here matches "{{ search.trim() }}"
+          </p>
+        </div>
       </div>
 
       <!-- Empty state -->
-      <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
+      <div
+        v-else-if="!changes.length && !removedHosts.length"
+        class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center"
+      >
         <ShieldCheck class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
           <p class="text-[14px] font-medium text-foreground">No known hosts</p>
