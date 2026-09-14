@@ -6,6 +6,13 @@ use tauri::State;
 
 type ApiResult<T> = std::result::Result<T, String>;
 
+/// Only the Touch ID platform module distinguishes a stored credential from an
+/// invalidated one; every other build resolves to the stub that reports
+/// `Missing`, so those two variants are constructed on macOS alone.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-biometric")),
+    allow(dead_code)
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CredentialState {
     Stored,
@@ -229,6 +236,7 @@ pub async fn store_biometric_passphrase(
         let vault = state.vault.lock().await;
         vault
             .verify_passphrase(passphrase.as_str())
+            .await
             .map_err(|error| error.to_string())?;
         vault_binding_id(&vault)?
     };
@@ -322,44 +330,136 @@ pub async fn store_biometric_passphrase(
     crate::vault_keychain_cleanup::finish_enrollment(&state.app_data_dir, &binding_id).await
 }
 
+/// Authorize a destructive biometric disable and resolve the binding id whose
+/// credential may be deleted. Deleting the protected Keychain item is
+/// irreversible and, for a user whose practical unlock path is Touch ID, costs
+/// access to every stored key. It therefore demands the same proof of the
+/// master passphrase that enrollment does: the vault must be unlocked and the
+/// held passphrase must still verify against the current vault payload.
+async fn authorize_biometric_disable(
+    vault: &Vault,
+    held_passphrase: Option<&str>,
+) -> ApiResult<String> {
+    let passphrase = held_passphrase.ok_or_else(|| "vault is locked".to_string())?;
+    vault
+        .verify_passphrase(passphrase)
+        .await
+        .map_err(|error| error.to_string())?;
+    vault_binding_id(vault)
+}
+
+/// Disable biometric unlock by authoritatively deleting the vault-bound
+/// protected credential. Authorization is enforced before any destructive
+/// action, mirroring enable and reset. The auth generation is rechecked after
+/// the passphrase mutex is released so a lock that lands while this command is
+/// waiting on a mutex cannot be overtaken by an already-authorized disable.
+///
+/// Locks are taken in the same order the rest of the biometric surface uses:
+/// `biometric_mutation` → `vault` → `passphrase`.
 #[tauri::command]
 pub async fn clear_biometric_passphrase(
     state: State<'_, Arc<AppState>>,
 ) -> ApiResult<()> {
     let _mutation = state.biometric_mutation.lock().await;
+    let generation = state.auth_generation.current();
+
     let binding_id = {
         let vault = state.vault.lock().await;
-        vault.binding_id().map(str::to_owned)
+        let held = state.vault_session.passphrase().await;
+        authorize_biometric_disable(&vault, held.as_ref().map(|p| p.as_str())).await?
     };
 
-    if let Some(binding_id) = binding_id {
-        crate::vault_keychain_cleanup::clear_bound_credential(
-            &state.app_data_dir,
-            &binding_id,
-            false,
-        )
-        .await?;
+    if !state.auth_generation.is_current(generation) {
+        return Err("biometric disable was superseded by a newer vault state".into());
     }
+
+    crate::vault_keychain_cleanup::clear_bound_credential(
+        &state.app_data_dir,
+        &binding_id,
+        false,
+    )
+    .await?;
     crate::vault_keychain_cleanup::clear_legacy_best_effort("biometric disable").await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{enrollment_is_current, CredentialState};
+    use super::{authorize_biometric_disable, enrollment_is_current, CredentialState};
     use crate::state::AuthGeneration;
     use clavyn_core::vault::Vault;
+
+    async fn initialized_vault(dir: &std::path::Path, passphrase: &str) -> Vault {
+        let mut vault = Vault::open(dir.join("vault.json")).expect("open vault");
+        vault
+            .initialize(passphrase)
+            .await
+            .expect("initialize vault");
+        vault
+    }
+
+    #[tokio::test]
+    async fn disable_is_rejected_while_the_vault_is_locked() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
+
+        let error = authorize_biometric_disable(&vault, None)
+            .await
+            .expect_err("a locked vault must not authorize credential deletion");
+        assert!(error.contains("vault is locked"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn disable_is_rejected_for_a_passphrase_that_does_not_verify() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
+
+        assert!(
+            authorize_biometric_disable(&vault, Some("wrong passphrase"))
+                .await
+                .is_err(),
+            "a passphrase that does not decrypt the vault must not authorize deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_is_rejected_when_no_vault_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
+
+        assert!(
+            authorize_biometric_disable(&vault, Some("any passphrase"))
+                .await
+                .is_err(),
+            "an uninitialized vault must not authorize deletion"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_resolves_the_binding_id_for_the_verified_passphrase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = initialized_vault(dir.path(), "correct horse battery staple").await;
+        let expected = vault.binding_id().expect("binding id").to_owned();
+
+        let binding_id = authorize_biometric_disable(&vault, Some("correct horse battery staple"))
+            .await
+            .expect("verified passphrase authorizes disable");
+        assert_eq!(binding_id, expected);
+    }
 
     #[test]
     fn credential_states_keep_missing_distinct_from_invalidated() {
         assert_ne!(CredentialState::Missing, CredentialState::Invalidated);
     }
 
-    #[test]
-    fn generation_change_invalidates_enrollment_commit() {
+    #[tokio::test]
+    async fn generation_change_invalidates_enrollment_commit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-        vault.initialize("passphrase").expect("initialize vault");
+        vault
+            .initialize("passphrase")
+            .await
+            .expect("initialize vault");
         let binding = vault.binding_id().unwrap().to_owned();
         let generation = AuthGeneration::new();
         let expected = generation.current();

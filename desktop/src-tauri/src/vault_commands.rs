@@ -1,12 +1,45 @@
-use crate::state::AppState;
+use crate::state::{AppState, LocalTerminals, VaultSession};
+use clavyn_core::session::SessionManager;
+use clavyn_core::sftp::SftpManager;
 use clavyn_core::{vault::Vault, CoreError};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::State;
+use tokio::sync::Mutex;
 
 type ApiResult<T> = std::result::Result<T, String>;
 
+/// How long the post-reset teardown may spend waiting on connections that are
+/// no longer reachable anyway. The vault is already destroyed by then, so the
+/// command must return even if a stalled remote never lets go.
+const CONTAINMENT_BUDGET: Duration = Duration::from_secs(5);
+
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
+}
+
+/// Drop every connection the destroyed vault's keys authenticated, along with
+/// the local terminals opened beside them. Returns whether the teardown
+/// finished inside `budget`.
+///
+/// Each manager severs reachability by draining its map before it does any
+/// network work, so exhausting the budget can only cost a polite disconnect —
+/// never leave a session that `session_write` or the `sftp_*` commands can
+/// still address. Nothing here reports an error: the vault is already gone,
+/// and a stubborn connection must not be able to describe that as a failure.
+async fn contain_open_sessions(
+    sessions: &SessionManager,
+    sftp: &SftpManager,
+    local_terminals: &Mutex<LocalTerminals>,
+    budget: Duration,
+) -> bool {
+    tokio::time::timeout(budget, async {
+        local_terminals.lock().await.clear();
+        sftp.close_all().await;
+        sessions.close_all().await;
+    })
+    .await
+    .is_ok()
 }
 
 fn reset_crossed_destructive_boundary(reset_result: &ApiResult<()>, vault: &Vault) -> bool {
@@ -38,15 +71,34 @@ pub async fn secure_unlock_vault(
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
-    let vault = state.vault.lock().await;
-    vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+    let mut vault = state.vault.lock().await;
+    // Verification derives the master key; keep it for the unlocked session so
+    // later vault operations do not each repeat the Argon2 work.
+    let key = vault
+        .verify_passphrase(passphrase.as_str())
+        .await
+        .map_err(err)?;
+    let binding_id = vault
+        .binding_id()
+        .ok_or_else(|| "vault binding is unavailable".to_string())?
+        .to_owned();
+    // A vault stored in an older on-disk format is rewritten in the
+    // authenticated one here, the one moment the master key is available. The
+    // rewrite is atomic and preserves the salt, so a failure leaves the file and
+    // any bound Keychain credential intact and must not fail the unlock.
+    if let Err(error) = vault.migrate_to_current_format(&key) {
+        tracing::warn!("vault format upgrade deferred: {error}");
+    }
     drop(vault);
 
-    let mut pw = state.passphrase.lock().await;
-    if !state.auth_generation.is_current(generation) {
+    let session = VaultSession::new(passphrase, key, binding_id);
+    if !state
+        .vault_session
+        .unlock_if_current(&state.auth_generation, generation, session)
+        .await
+    {
         return Err("vault unlock was superseded by a newer lock".into());
     }
-    *pw = Some(passphrase);
     Ok(())
 }
 
@@ -56,15 +108,15 @@ pub async fn secure_unlock_vault(
 #[tauri::command]
 pub async fn secure_lock_vault(state: State<'_, Arc<AppState>>) -> ApiResult<()> {
     state.auth_generation.invalidate();
-    let mut pw = state.passphrase.lock().await;
-    *pw = None;
+    state.vault_session.clear().await;
     Ok(())
 }
 
 /// Permanently destroy the vault after proving knowledge of the current master
 /// passphrase. Every encrypted private key and credential is irrecoverably
-/// lost, the on-disk vault file is deleted, and in-memory state is reset to
-/// uninitialized.
+/// lost, the on-disk vault file is deleted, in-memory state is reset to
+/// uninitialized, and every SSH session, SFTP channel and local terminal is
+/// torn down.
 ///
 /// Authorization is enforced before any destructive action: a wrong passphrase
 /// never destroys the vault. The current vault-bound biometric credential is
@@ -89,7 +141,10 @@ pub async fn secure_reset_vault(
 
     // Authorization gate: prove knowledge of the current passphrase before
     // touching the on-disk file or any biometric credential.
-    vault.verify_passphrase(passphrase.as_str()).map_err(err)?;
+    vault
+        .verify_passphrase(passphrase.as_str())
+        .await
+        .map_err(err)?;
 
     // Delete the authoritative vault-bound Keychain item before erasing the
     // binding id needed to address it. The durable enrollment marker prevents a
@@ -109,35 +164,74 @@ pub async fn secure_reset_vault(
 
     // Once the authoritative file has been unlinked, invalidate authentication
     // even if the subsequent directory fsync reported a durability error. The
-    // process must never keep an in-memory passphrase for a vault that is gone.
+    // process must never keep an in-memory passphrase, or the key derived from
+    // it, for a vault that is gone.
     state.auth_generation.invalidate();
     drop(vault);
     drop(passphrase);
 
-    let mut pw = state.passphrase.lock().await;
-    *pw = None;
+    state.vault_session.clear().await;
+
+    // The reset destroys the credentials, so it must also drop the access those
+    // credentials bought: a user resetting under suspicion is told the keys are
+    // gone, and a still-writable session would make that untrue. This runs only
+    // past the destructive boundary, and its outcome is deliberately discarded
+    // so a connection that will not close cannot turn a completed reset into a
+    // reported failure.
+    contain_open_sessions(
+        &state.sessions,
+        &state.sftp,
+        &state.local_terminals,
+        CONTAINMENT_BUDGET,
+    )
+    .await;
 
     reset_result
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_reset_result, reset_crossed_destructive_boundary};
-    use crate::state::AuthGeneration;
+    use super::{contain_open_sessions, normalize_reset_result, reset_crossed_destructive_boundary};
+    use crate::state::{AuthGeneration, LocalTerminals, VaultSession, VaultSessionSlot};
+    use clavyn_core::session::SessionManager;
+    use clavyn_core::sftp::SftpManager;
     use clavyn_core::{vault::Vault, CoreError};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
 
-    #[test]
-    fn reset_epoch_invalidates_older_authentication_before_slot_cleanup() {
+    /// Long enough that an unobstructed teardown always finishes, short enough
+    /// that an obstructed one does not stall the suite.
+    const TEST_BUDGET: Duration = Duration::from_millis(200);
+
+    fn session_manager() -> SessionManager {
+        SessionManager::new(Arc::new(|_: &str, _: &[u8]| {}), Arc::new(|_: &str, _: &str| {}))
+    }
+
+    #[tokio::test]
+    async fn reset_epoch_invalidates_older_authentication_before_slot_cleanup() {
         let generation = AuthGeneration::new();
         let older_attempt = generation.current();
-        let mut slot = Some(zeroize::Zeroizing::new("secret".to_string()));
+        let slot = VaultSessionSlot::new();
+        slot.unlock_if_current(
+            &generation,
+            older_attempt,
+            VaultSession::new(
+                zeroize::Zeroizing::new("secret".to_string()),
+                zeroize::Zeroizing::new([1u8; 32]),
+                "binding".to_string(),
+            ),
+        )
+        .await;
 
-        // Mirrors the reset boundary: generation first, passphrase slot second.
+        // Mirrors the reset boundary: generation first, credentials second.
         generation.invalidate();
         assert!(!generation.is_current(older_attempt));
-        slot = None;
+        slot.clear().await;
 
-        assert!(slot.is_none());
+        assert!(!slot.is_unlocked().await);
+        assert!(slot.passphrase().await.is_none());
+        assert!(slot.key_for("binding").await.is_none());
     }
 
     #[test]
@@ -149,13 +243,14 @@ mod tests {
         assert!(reset_crossed_destructive_boundary(&reset_result, &vault));
     }
 
-    #[test]
-    fn reset_error_before_destructive_boundary_keeps_auth_state_retryable() {
+    #[tokio::test]
+    async fn reset_error_before_destructive_boundary_keeps_auth_state_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.json");
         let mut vault = Vault::open(path).expect("open vault");
         vault
             .initialize("correct horse battery staple")
+            .await
             .expect("initialize vault");
         let reset_result = Err::<(), String>("unlink failed".into());
 
@@ -173,5 +268,58 @@ mod tests {
 
         let error = result.unwrap_err();
         assert!(error.contains("[vault-reset-durability]"));
+    }
+
+    #[tokio::test]
+    async fn reset_containment_drops_every_session_and_local_terminal() {
+        let sessions = session_manager();
+        let sftp = SftpManager::new();
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
+
+        assert!(contain_open_sessions(&sessions, &sftp, &locals, TEST_BUDGET).await);
+
+        assert!(sessions.list().await.is_empty());
+        assert!(sftp.list().await.is_empty());
+        assert_eq!(locals.lock().await.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_teardown_that_never_completes_still_returns_to_the_reset() {
+        let sessions = session_manager();
+        let sftp = SftpManager::new();
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
+
+        // A teardown step that never finishes: the reset has already destroyed
+        // the vault, so the command has to come back regardless.
+        let stuck = locals.lock().await;
+        assert!(!contain_open_sessions(&sessions, &sftp, &locals, TEST_BUDGET).await);
+        drop(stuck);
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_teardown_leaves_the_reset_outcome_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
+        let reset_result = normalize_reset_result(
+            Err(CoreError::Io(std::io::Error::other("directory sync failed"))),
+            &vault,
+        );
+        assert!(reset_crossed_destructive_boundary(&reset_result, &vault));
+
+        let sessions = session_manager();
+        let sftp = SftpManager::new();
+        let locals = Mutex::new(LocalTerminals::default());
+        locals.lock().await.reserve("local-1".to_string());
+        let stuck = locals.lock().await;
+        assert!(!contain_open_sessions(&sessions, &sftp, &locals, TEST_BUDGET).await);
+        drop(stuck);
+
+        // Whatever the teardown managed, the caller still reports the outcome
+        // it computed at the destructive boundary.
+        assert!(reset_result
+            .unwrap_err()
+            .contains("[vault-reset-durability]"));
     }
 }

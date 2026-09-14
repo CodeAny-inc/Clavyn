@@ -53,6 +53,14 @@ export interface KnownHostEntry {
   fingerprint: string;
 }
 
+/** A server key that differs from the pinned one and awaits the user's review. */
+export interface PendingHostKeyChange {
+  host: string;
+  key_type: string;
+  pinned_fingerprint: string;
+  presented_fingerprint: string;
+}
+
 export interface Workspace {
   id: Uuid;
   name: string;

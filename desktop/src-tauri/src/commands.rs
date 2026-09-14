@@ -1,7 +1,9 @@
-use crate::state::{end_of_output, AppState, LocalTerminal, OutputSink};
+use crate::host_key_prompt;
+use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
+use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
 use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
 use clavyn_core::workspace::Workspace;
@@ -9,6 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tauri::ipc::InvokeResponseBody;
 use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 type ApiResult<T> = std::result::Result<T, String>;
@@ -137,8 +140,7 @@ pub async fn vault_is_initialized(state: State<'_, Arc<AppState>>) -> ApiResult<
 
 #[tauri::command]
 pub async fn is_vault_unlocked(state: State<'_, Arc<AppState>>) -> ApiResult<bool> {
-    let pw = state.passphrase.lock().await;
-    Ok(pw.is_some())
+    Ok(state.vault_session.is_unlocked().await)
 }
 
 // ============================================================
@@ -159,16 +161,8 @@ pub async fn generate_key(
     let (private, _public) = generate_ed25519().map_err(err)?;
     let (mut meta, _pair) = parse_openssh_private(&private, None).map_err(err)?;
     meta.label = label;
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
-    vault
-        .add_key(&passphrase, meta.clone(), &private)
-        .map_err(err)?;
+    let (key, mut vault) = state.unlocked_vault().await?;
+    vault.add_key(&key, meta.clone(), &private).map_err(err)?;
     Ok(meta)
 }
 
@@ -182,15 +176,9 @@ pub async fn import_key(
     let (mut meta, _pair) =
         parse_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
     meta.label = label;
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
+    let (key, mut vault) = state.unlocked_vault().await?;
     vault
-        .add_key(&passphrase, meta.clone(), &openssh_private)
+        .add_key(&key, meta.clone(), &openssh_private)
         .map_err(err)?;
     Ok(meta)
 }
@@ -200,16 +188,8 @@ pub async fn delete_key(
     state: State<'_, Arc<AppState>>,
     key_id: Uuid,
 ) -> ApiResult<()> {
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref()
-            .map(|p| p.to_string())
-            .ok_or_else(|| "vault is locked".to_string())?
-    };
-    let mut vault = state.vault.lock().await;
-    vault
-        .remove_key(&passphrase, &key_id.to_string())
-        .map_err(err)
+    let (key, mut vault) = state.unlocked_vault().await?;
+    vault.remove_key(&key, &key_id.to_string()).map_err(err)
 }
 
 // ============================================================
@@ -239,6 +219,10 @@ pub async fn list_known_hosts(
         .collect())
 }
 
+/// Stop trusting a host. No native confirmation: `remove` tombstones the entry
+/// and keeps its key, so the host stays protected by the mismatch check and
+/// this call on its own cannot downgrade anything. Erasing the retained key is
+/// `forget_known_host`, and that one does ask.
 #[tauri::command]
 pub async fn remove_known_host(
     state: State<'_, Arc<AppState>>,
@@ -247,6 +231,191 @@ pub async fn remove_known_host(
 ) -> ApiResult<()> {
     let mut kh = state.known_hosts.lock().await;
     kh.remove(&host, port).map_err(err)
+}
+
+/// Hosts with no live pin whose last key is still retained, so a different key
+/// is reported as a change. Listed separately from the trusted hosts, because
+/// what the app retains has to be visible to be erasable.
+#[tauri::command]
+pub async fn list_removed_known_hosts(
+    state: State<'_, Arc<AppState>>,
+) -> ApiResult<Vec<KnownHostEntry>> {
+    let kh = state.known_hosts.lock().await;
+    Ok(kh
+        .removed()
+        .into_iter()
+        .map(|(host, key_type, fingerprint)| KnownHostEntry {
+            host,
+            key_type,
+            fingerprint,
+        })
+        .collect())
+}
+
+/// Erase the key retained for a tombstoned host. That puts the host back on
+/// trust-on-first-use, so it is confirmed in a native dialog that prints the
+/// fingerprint about to be erased: the webview can reach this command, but it
+/// cannot answer for the user.
+#[tauri::command]
+pub async fn forget_known_host(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    port: u16,
+) -> ApiResult<()> {
+    let state = state.inner().clone();
+    let gate = state.clone();
+    let label = format!("{host}:{port}");
+    forget_confirmed(&state.known_hosts, &host, port, move |fingerprint| async move {
+        host_key_prompt::confirm(
+            &app,
+            &gate.host_key_prompt,
+            "Forget host key",
+            &host_key_prompt::forget_message(&label, &fingerprint),
+            "Forget the key",
+        )
+        .await
+    })
+    .await
+}
+
+/// `forget_known_host` without the dialog, so the ordering the command relies on
+/// can be tested: read the retained fingerprint, confirm it, then check that it
+/// is still the one on record before erasing anything.
+///
+/// The lock is taken twice and never held across the question — a dialog can
+/// stay open for minutes, and the store has to keep serving connections — so
+/// each half has to stand on its own. `forgettable_fingerprint` decides and
+/// refuses without touching anything, which keeps the branch that asks nothing
+/// from being a branch that erases something; the recheck after the dialog is
+/// what makes the second acquisition safe.
+async fn forget_confirmed<F, Fut>(
+    known_hosts: &Mutex<KnownHosts>,
+    host: &str,
+    port: u16,
+    confirm: F,
+) -> ApiResult<()>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    // Nothing retained means nothing to confirm, and the refusal says why: a
+    // live pin has to be removed first, and an unknown host was never here.
+    let fingerprint = known_hosts
+        .lock()
+        .await
+        .forgettable_fingerprint(host, port)
+        .map_err(err)?;
+    confirm(fingerprint.clone()).await?;
+    let mut kh = known_hosts.lock().await;
+    if kh.retained_fingerprint(host, port).as_deref() != Some(fingerprint.as_str()) {
+        return Err(format!(
+            "the key retained for {host}:{port} changed while the confirmation was open; review it again"
+        ));
+    }
+    kh.forget(host, port).map_err(err)
+}
+
+#[derive(serde::Serialize)]
+pub struct PendingHostKeyChange {
+    pub host: String,
+    pub key_type: String,
+    pub pinned_fingerprint: String,
+    pub presented_fingerprint: String,
+}
+
+#[tauri::command]
+pub async fn list_host_key_changes(
+    state: State<'_, Arc<AppState>>,
+) -> ApiResult<Vec<PendingHostKeyChange>> {
+    let kh = state.known_hosts.lock().await;
+    Ok(kh
+        .pending_changes()
+        .into_iter()
+        .map(|change| PendingHostKeyChange {
+            host: change.host,
+            key_type: change.key_type,
+            pinned_fingerprint: change.pinned_fingerprint,
+            presented_fingerprint: change.presented_fingerprint,
+        })
+        .collect())
+}
+
+/// Pin the key a server presented in place of the recorded one. `fingerprint`
+/// is the value the caller displayed: it is checked against the held key so a
+/// view rendered before another key arrived cannot trust an unreviewed one.
+///
+/// That check is a guard against a stale view, not against a script, so the pin
+/// itself is confirmed in a native dialog that prints both fingerprints as the
+/// store holds them.
+#[tauri::command]
+pub async fn replace_known_host(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    host: String,
+    port: u16,
+    fingerprint: String,
+) -> ApiResult<()> {
+    let state = state.inner().clone();
+    let gate = state.clone();
+    replace_confirmed(&state.known_hosts, &host, port, &fingerprint, move |change| async move {
+        host_key_prompt::confirm(
+            &app,
+            &gate.host_key_prompt,
+            "Host key changed",
+            &host_key_prompt::trust_message(
+                &change.host,
+                &change.pinned_fingerprint,
+                &change.presented_fingerprint,
+            ),
+            "Trust the new key",
+        )
+        .await
+    })
+    .await
+}
+
+/// `replace_known_host` without the dialog. The change handed to `confirm` comes
+/// from the held key, so what is shown is what the server presented rather than
+/// what the caller passed.
+///
+/// Same two halves as `forget_confirmed`, and the same reason for them: the
+/// question is decided without the power to answer it, and what the dialog
+/// showed is compared with what the store holds before anything is pinned. Both
+/// fingerprints are checked, not just the presented one — a pin that moved while
+/// the dialog was open means the user was comparing against a record that is no
+/// longer there.
+async fn replace_confirmed<F, Fut>(
+    known_hosts: &Mutex<KnownHosts>,
+    host: &str,
+    port: u16,
+    fingerprint: &str,
+    confirm: F,
+) -> ApiResult<()>
+where
+    F: FnOnce(HostKeyChange) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<()>>,
+{
+    // Either no key is being held or the caller named a different one: both are
+    // refused here, because asking about a key that is not going to be pinned
+    // would only train the user to dismiss the dialog.
+    let change = known_hosts
+        .lock()
+        .await
+        .confirmable_change(host, port, fingerprint)
+        .map_err(err)?;
+    let shown = change.clone();
+    confirm(change).await?;
+    let mut kh = known_hosts.lock().await;
+    let current = kh.confirmable_change(host, port, fingerprint).map_err(err)?;
+    if current.pinned_fingerprint != shown.pinned_fingerprint
+        || current.presented_fingerprint != shown.presented_fingerprint
+    {
+        return Err(format!(
+            "the host keys for {host}:{port} changed while the confirmation was open; review them again"
+        ));
+    }
+    kh.trust_presented_key(host, port, fingerprint).map_err(err)
 }
 
 // ============================================================
@@ -273,8 +442,11 @@ pub async fn create_workspace(
 #[tauri::command]
 pub async fn save_workspace(
     state: State<'_, Arc<AppState>>,
-    workspace: Workspace,
+    mut workspace: Workspace,
 ) -> ApiResult<Workspace> {
+    // Sanitize before the store does, so the caller gets back the layout that
+    // was actually persisted rather than the one it sent.
+    workspace.sanitize().map_err(err)?;
     let mut store = state.store.lock().await;
     store.update_workspace(workspace.clone()).map_err(err)?;
     Ok(workspace)
@@ -330,7 +502,6 @@ fn ssh_connection_info(
 #[tauri::command]
 pub async fn connect_ssh(
     state: State<'_, Arc<AppState>>,
-    _app: AppHandle,
     session_id: String,
     host: Host,
     password: Option<String>,
@@ -341,10 +512,7 @@ pub async fn connect_ssh(
 ) -> ApiResult<SshConnectionInfo> {
     // The owned input is transient and wiped on every exit; never persist or log it.
     let password = password.map(zeroize::Zeroizing::new);
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref().map(|p| p.to_string())
-    };
+    let passphrase = state.vault_session.passphrase().await;
 
     // Resolve identity if the host references one
     let identity = if let Some(identity_id) = host.identity_id {
@@ -365,8 +533,16 @@ pub async fn connect_ssh(
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
         None => matches!(host.auth, AuthMethod::PublicKey),
     };
-    let vault = state.vault.lock().await;
-    let vault_ref = if needs_vault { Some(&*vault) } else { None };
+    // Read the key material out under the lock and release it before the
+    // network call. Holding the vault mutex across a connect lets one
+    // unresponsive host block every other vault operation — unlock, reset, and
+    // all key management — for as long as it stays unresponsive.
+    let vault = if needs_vault {
+        let (key, vault) = state.unlocked_vault().await?;
+        Some(vault.snapshot(key))
+    } else {
+        None
+    };
     let known_hosts = state.known_hosts.clone();
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
@@ -381,8 +557,8 @@ pub async fn connect_ssh(
             &host,
             identity.as_ref(),
             known_hosts,
-            vault_ref,
-            passphrase.as_deref(),
+            vault.as_ref(),
+            passphrase.as_ref().map(|value| value.as_str()),
             password.as_ref().map(|value| value.as_str()),
             cols,
             rows,
@@ -393,6 +569,54 @@ pub async fn connect_ssh(
     }
     started.map_err(err)?;
     Ok(info)
+}
+
+/// Upper bound on local terminals held open at once. Each one owns a PTY, a
+/// child shell and a reader thread, so an unbounded map is an unbounded
+/// resource claim on the machine.
+const MAX_LOCAL_TERMINALS: usize = 16;
+
+/// Decide whether a new local terminal may take `session_id`.
+///
+/// `session_write`, `session_resize` and the `session-data` event stream all
+/// address sessions by id alone, so a second session on a live id silently
+/// repoints one of those channels at the other session — for a local id the
+/// previous entry is dropped, hanging up its shell, and for an SSH id writes
+/// keep going to SSH while the new PTY's output is rendered in the SSH pane.
+/// Refuse the collision here instead of resolving it arbitrarily.
+///
+/// This guards local-terminal creation only. `connect_ssh` performs no such
+/// check and `SessionManager::create_ssh_session` inserts unconditionally, so
+/// an SSH session can still be opened on an id a local terminal already holds,
+/// or on top of another SSH session. Uniqueness is therefore a property of this
+/// entry point, not an invariant of session ids in general.
+fn admit_local_terminal(
+    session_id: &str,
+    locals: &LocalTerminals,
+    ssh_session_ids: &[String],
+) -> ApiResult<()> {
+    if locals.contains(session_id) {
+        return Err("session id is already in use by a local terminal".into());
+    }
+    if ssh_session_ids.iter().any(|id| id == session_id) {
+        return Err("session id is already in use by an SSH session".into());
+    }
+    if locals.len() >= MAX_LOCAL_TERMINALS {
+        return Err(format!(
+            "too many local terminals open (limit {MAX_LOCAL_TERMINALS}); close one first"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether a local terminal's shell has finished, given the result of
+/// `Child::try_wait`.
+///
+/// A child whose status cannot be read counts as live. A failed read is not
+/// evidence that the shell exited, and treating it as one would discard a
+/// terminal the user is still typing into.
+fn local_shell_exited(status: std::io::Result<Option<portable_pty::ExitStatus>>) -> bool {
+    matches!(status, Ok(Some(_)))
 }
 
 #[tauri::command]
@@ -406,15 +630,61 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
+    let rows = pty_dimension("rows", rows.unwrap_or(24))?;
+    let cols = pty_dimension("cols", cols.unwrap_or(80))?;
+
+    // `SessionManager::list` takes and releases its own lock and returns a copy,
+    // so this snapshot is stale by the time the local map is locked: the guard
+    // below covers the local map and the cap, not the SSH half of the check.
+    // Taking it first is deliberate — every site that touches both maps drops
+    // the `sessions` guard before taking `local_terminals`, and nesting them
+    // here would be the only place with the opposite order.
+    let ssh_session_ids = state.sessions.list().await;
+    let (dead, admission) = {
+        let mut locals = state.local_terminals.lock().await;
+        // An entry outlives its shell: nothing removes it before `close_session`
+        // or the pane unmounting, so panes left sitting disconnected keep their
+        // slots. Reaping first makes the cap bound live shells rather than map
+        // entries.
+        let dead = locals.reap_exited(|term| local_shell_exited(term.child.try_wait()));
+        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids);
+        // Claim the id and the slot before releasing the lock. The PTY and the
+        // shell below are slow and blocking, so they cannot be started under it;
+        // checking here and inserting afterwards would let every request in a
+        // burst pass the check and spawn, with the surplus refused only once the
+        // processes already existed.
+        if admission.is_ok() {
+            locals.reserve(session_id.clone());
+        }
+        (dead, admission)
+    };
+    // Tearing down the reaped PTYs can block, so it happens with the lock
+    // released rather than in front of every other pane's keystrokes.
+    drop(dead);
+    admission?;
+
+    // From here every failure has to give the reservation back, or the slot
+    // stays claimed for a terminal that will never exist.
+    macro_rules! release_on_err {
+        ($result:expr, $context:literal) => {
+            match $result {
+                Ok(value) => value,
+                Err(e) => {
+                    state.local_terminals.lock().await.release(&session_id);
+                    return Err(format!(concat!($context, ": {}"), e));
+                }
+            }
+        };
+    }
+
     let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: rows.unwrap_or(24) as u16,
-            cols: cols.unwrap_or(80) as u16,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|e| format!("openpty: {e}"))?;
+    let pair = pty_system.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    });
+    let pair = release_on_err!(pair, "openpty");
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| {
         if cfg!(target_os = "windows") {
@@ -427,20 +697,11 @@ pub async fn create_local_terminal(
     let mut cmd = CommandBuilder::new(&shell);
     cmd.env("TERM", "xterm-256color");
 
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|e| format!("spawn: {e}"))?;
+    let child = release_on_err!(pair.slave.spawn_command(cmd), "spawn");
 
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|e| format!("clone reader: {e}"))?;
+    let mut reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
 
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|e| format!("take writer: {e}"))?;
+    let writer = release_on_err!(pair.master.take_writer(), "take writer");
 
     let master = pair.master;
 
@@ -448,9 +709,53 @@ pub async fn create_local_terminal(
     // On Unix this is the correct pattern — the child has its own copy.
     drop(pair.slave);
 
+    // The lock is taken again to turn the reservation into a live terminal. The
+    // id and the slot were claimed before any of the blocking work above, so
+    // neither can have been taken in the meantime; only the SSH half of the
+    // check can have changed, because `connect_ssh` never consults the local
+    // map and so cannot be held off by a reservation.
+    let ssh_session_ids = state.sessions.list().await;
+    let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let terminal = LocalTerminal {
+        writer,
+        master,
+        child,
+        owns_session_id: owns_session_id.clone(),
+    };
+    let refused = {
+        let mut locals = state.local_terminals.lock().await;
+        if ssh_session_ids.iter().any(|id| id == &session_id) {
+            locals.release(&session_id);
+            Some((
+                "session id is already in use by an SSH session".to_string(),
+                terminal,
+            ))
+        } else {
+            // A reservation that is no longer there means the session was closed
+            // while its shell was starting, so this terminal is not wanted.
+            match locals.fulfil(&session_id, terminal) {
+                Ok(()) => None,
+                Err(unwanted) => Some((
+                    "session was closed while the terminal was starting".to_string(),
+                    unwanted,
+                )),
+            }
+        }
+    };
+    if let Some((error, _refused)) = refused {
+        // Torn down with the lock released, for the same reason the reaped
+        // entries are.
+        return Err(error);
+    }
+
     // The PTY read is blocking, so coalescing happens on a second thread that
     // can wait on a deadline as well as on the next chunk.
     let (chunks, incoming) = std::sync::mpsc::channel::<Vec<u8>>();
+
+    let app_handle = app.clone();
+    let sid = session_id;
+    let owns = owns_session_id.clone();
+
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 8192];
@@ -471,8 +776,6 @@ pub async fn create_local_terminal(
         }
     });
 
-    let app_handle = app.clone();
-    let sid = session_id.clone();
     std::thread::spawn(move || {
         use std::sync::mpsc::RecvTimeoutError;
         let mut batcher = OutputBatcher::new(Instant::now());
@@ -504,26 +807,18 @@ pub async fn create_local_terminal(
                 }
             }
         }
-        let _ = app_handle.emit(
-            "session-closed",
-            crate::state::SessionClosedEvent {
-                session_id: sid,
-                reason: "local terminal closed".to_string(),
-            },
-        );
+        // Announcing this shell's exit on an id that now belongs to a
+        // replacement would disconnect the replacement.
+        if owns.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = app_handle.emit(
+                "session-closed",
+                crate::state::SessionClosedEvent {
+                    session_id: sid,
+                    reason: "local terminal closed".to_string(),
+                },
+            );
+        }
     });
-
-    // Store the master and child for writing, resizing, and keeping
-    // the child process alive.
-    let mut locals = state.local_terminals.lock().await;
-    locals.insert(
-        session_id,
-        LocalTerminal {
-            writer,
-            master,
-            _child: child,
-        },
-    );
 
     Ok(())
 }
@@ -540,13 +835,37 @@ pub async fn session_write(
     }
     // Try local terminal
     let mut locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get_mut(&session_id) {
+    if let Some(term) = locals.get_live_mut(&session_id) {
         use std::io::Write;
         term.writer.write_all(&data).map_err(|e| format!("write: {e}"))?;
         term.writer.flush().map_err(|e| format!("flush: {e}"))?;
         return Ok(());
     }
     Err("session not found".into())
+}
+
+/// Narrow a webview-supplied terminal dimension to the `u16` the local PTY
+/// layer takes. A plain `as` cast wraps, so a caller asking for 65536 columns
+/// would silently get a 0-column PTY; reject anything outside the usable range
+/// instead.
+///
+/// SSH sessions need the same gate for a different reason: russh does not
+/// validate or clamp a window-change request, it just writes the `u32` onto the
+/// wire, so an absurd geometry is forwarded to the remote host verbatim and
+/// whatever it does with it is out of our hands. Both transports go through
+/// here so one caller-supplied value cannot mean two different things.
+///
+/// Creation goes through it too. Bounding only the resize path would leave the
+/// wrap reachable on the first geometry a session ever gets, which is the one
+/// the caller chooses outright.
+fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
+    const MAX_PTY_DIMENSION: u16 = 10_000;
+    match u16::try_from(value) {
+        Ok(dimension) if (1..=MAX_PTY_DIMENSION).contains(&dimension) => Ok(dimension),
+        _ => Err(format!(
+            "{name} out of range: {value} (expected 1..={MAX_PTY_DIMENSION})"
+        )),
+    }
 }
 
 #[tauri::command]
@@ -556,18 +875,24 @@ pub async fn session_resize(
     cols: u32,
     rows: u32,
 ) -> ApiResult<()> {
+    let cols = pty_dimension("cols", cols)?;
+    let rows = pty_dimension("rows", rows)?;
     // Try SSH session first
     if state.sessions.list().await.contains(&session_id) {
-        return state.sessions.resize(&session_id, cols, rows).await.map_err(err);
+        return state
+            .sessions
+            .resize(&session_id, cols.into(), rows.into())
+            .await
+            .map_err(err);
     }
     // Try local terminal
     let locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get(&session_id) {
+    if let Some(term) = locals.get_live(&session_id) {
         use portable_pty::PtySize;
         term.master
             .resize(PtySize {
-                rows: rows as u16,
-                cols: cols as u16,
+                rows,
+                cols,
                 pixel_width: 0,
                 pixel_height: 0,
             })
@@ -600,7 +925,7 @@ pub async fn close_session(
 pub async fn list_sessions(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<String>> {
     let mut sessions = state.sessions.list().await;
     let locals = state.local_terminals.lock().await;
-    sessions.extend(locals.keys().cloned());
+    sessions.extend(locals.live_ids().cloned());
     Ok(sessions)
 }
 
@@ -618,10 +943,7 @@ pub async fn sftp_connect(
 ) -> ApiResult<()> {
     // Match terminal SSH: do not retain the owned password after this command exits.
     let password = password.map(zeroize::Zeroizing::new);
-    let passphrase = {
-        let pw = state.passphrase.lock().await;
-        pw.as_ref().map(|p| p.to_string())
-    };
+    let passphrase = state.vault_session.passphrase().await;
 
     let identity = if let Some(identity_id) = host.identity_id {
         let store = state.store.lock().await;
@@ -643,8 +965,14 @@ pub async fn sftp_connect(
         Some(id) => matches!(id.auth, AuthMethod::PublicKey),
         None => matches!(host.auth, AuthMethod::PublicKey),
     };
-    let vault = state.vault.lock().await;
-    let vault_ref = if needs_vault { Some(&*vault) } else { None };
+    // As in `connect_ssh`: take the key material, then drop the vault lock so a
+    // stalled SFTP host cannot wedge every other vault operation.
+    let vault = if needs_vault {
+        let (key, vault) = state.unlocked_vault().await?;
+        Some(vault.snapshot(key))
+    } else {
+        None
+    };
     let known_hosts = state.known_hosts.clone();
 
     state
@@ -654,8 +982,8 @@ pub async fn sftp_connect(
             &host,
             identity.as_ref(),
             known_hosts,
-            vault_ref,
-            passphrase.as_deref(),
+            vault.as_ref(),
+            passphrase.as_ref().map(|value| value.as_str()),
             password.as_ref().map(|value| value.as_str()),
         )
         .await
@@ -680,29 +1008,6 @@ pub async fn sftp_canonicalize(
     state
         .sftp
         .canonicalize(&session_id, &path)
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn sftp_read_file(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    path: String,
-) -> ApiResult<Vec<u8>> {
-    state.sftp.read_file(&session_id, &path).await.map_err(err)
-}
-
-#[tauri::command]
-pub async fn sftp_write_file(
-    state: State<'_, Arc<AppState>>,
-    session_id: String,
-    path: String,
-    data: Vec<u8>,
-) -> ApiResult<()> {
-    state
-        .sftp
-        .write_file(&session_id, &path, &data)
         .await
         .map_err(err)
 }
@@ -953,6 +1258,10 @@ pub fn get_app_info(app: AppHandle) -> AppInfo {
 /// Unlike the default Tauri updater (which uses `releases/latest` and
 /// thus skips prereleases), this queries the GitHub API to find the
 /// newest release — including prereleases — and uses its `latest.json`.
+///
+/// This is the only path that reports availability: the renderer drives the
+/// check and owns the notification state, so the backend never announces an
+/// update on its own.
 #[tauri::command]
 pub async fn check_for_updates(
     app: AppHandle,
@@ -1012,10 +1321,139 @@ pub async fn install_update(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Release the single-instance guard for the one restart path that never
+    // reaches the plugin's own release. `request_restart` normally asks the
+    // runtime to exit, which emits `RunEvent::Exit`; the plugin releases the
+    // guard from that event, before the replacement process is spawned. When
+    // the runtime refuses the exit request, `request_restart` spawns the
+    // replacement straight from the caller's thread and no exit event is ever
+    // emitted — without this call the successor would find the guard held and
+    // exit on startup, leaving no Clavyn running after an update. Releasing an
+    // already-released guard is a no-op, so the ordinary path pays nothing.
+    // Guarded by the same condition as registration: a build that never
+    // claimed the guard must not release one an installed build is holding.
+    if crate::single_instance_guard_applies() {
+        tauri_plugin_single_instance::destroy(&app);
+    }
+
     // Restart the app to apply the update
     app.request_restart();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod admit_local_terminal_tests {
+    use super::*;
+
+    /// `count` terminals mid-open. A reservation is how a caller holds a slot
+    /// while its shell starts, and it is the only occupancy a test can build:
+    /// a live entry owns a real PTY.
+    fn opening(count: usize) -> LocalTerminals {
+        let mut locals = LocalTerminals::default();
+        for i in 0..count {
+            locals.reserve(format!("local-{i}"));
+        }
+        locals
+    }
+
+    #[test]
+    fn accepts_a_fresh_id_while_slots_remain() {
+        assert!(admit_local_terminal("fresh", &opening(1), &["ssh-a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_a_local_terminal() {
+        let error = admit_local_terminal("local-0", &opening(2), &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
+
+    #[test]
+    fn rejects_an_id_already_held_by_an_ssh_session() {
+        let error =
+            admit_local_terminal("ssh-a", &LocalTerminals::default(), &["ssh-a".to_string()])
+                .unwrap_err();
+        assert!(error.contains("SSH session"), "{error}");
+    }
+
+    #[test]
+    fn rejects_a_fresh_id_once_the_concurrent_limit_is_reached() {
+        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), &[]).is_ok());
+        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(error.contains("too many local terminals"), "{error}");
+    }
+
+    #[test]
+    fn reports_the_collision_rather_than_the_limit_when_both_apply() {
+        let error =
+            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(error.contains("local terminal"), "{error}");
+    }
+
+    /// The window this closes: the shell is spawned with the lock released, so
+    /// a burst that only checked the cap would have every request pass before
+    /// any of them inserted, and the surplus would be refused with the
+    /// processes already running. Occupancy has to be claimed by the check
+    /// itself.
+    #[test]
+    fn a_burst_of_admissions_claims_slots_as_it_goes_rather_than_all_passing() {
+        let mut locals = LocalTerminals::default();
+        let mut admitted = 0;
+        for i in 0..MAX_LOCAL_TERMINALS * 2 {
+            let id = format!("burst-{i}");
+            if admit_local_terminal(&id, &locals, &[]).is_ok() {
+                locals.reserve(id);
+                admitted += 1;
+            }
+        }
+        assert_eq!(admitted, MAX_LOCAL_TERMINALS);
+        assert_eq!(locals.len(), MAX_LOCAL_TERMINALS);
+    }
+
+    /// A reservation that is never fulfilled has to free its slot, or a failed
+    /// spawn would shrink the cap for the rest of the session.
+    #[test]
+    fn releasing_a_reservation_returns_its_slot() {
+        let mut locals = opening(MAX_LOCAL_TERMINALS);
+        assert!(admit_local_terminal("fresh", &locals, &[]).is_err());
+        locals.release("local-0");
+        assert!(admit_local_terminal("fresh", &locals, &[]).is_ok());
+        assert!(admit_local_terminal("local-0", &locals, &[]).is_ok());
+    }
+
+    /// A reserved id is claimed but not usable yet: `session_write` and
+    /// `list_sessions` must not see it, or the UI would address a terminal
+    /// whose shell does not exist.
+    #[test]
+    fn a_reserved_id_is_claimed_but_not_yet_addressable() {
+        let locals = opening(2);
+        assert!(locals.contains("local-0"));
+        assert!(locals.get_live("local-0").is_none());
+        assert_eq!(locals.live_ids().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod local_terminal_reaping_tests {
+    use super::*;
+    use portable_pty::ExitStatus;
+
+    #[test]
+    fn a_child_that_reported_an_exit_is_finished() {
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(0)))));
+        assert!(local_shell_exited(Ok(Some(ExitStatus::with_exit_code(1)))));
+    }
+
+    #[test]
+    fn a_child_that_has_not_exited_is_live() {
+        assert!(!local_shell_exited(Ok(None)));
+    }
+
+    #[test]
+    fn a_child_whose_status_cannot_be_read_is_live() {
+        let unreadable = std::io::Error::new(std::io::ErrorKind::Other, "status unavailable");
+        assert!(!local_shell_exited(Err(unreadable)));
+    }
 }
 
 #[cfg(test)]
@@ -1057,5 +1495,579 @@ mod ssh_connection_info_tests {
     fn rejects_changed_identity_before_a_network_connection_can_start() {
         let result = ssh_connection_info(&host(), Some(&identity()), Some("deploy"));
         assert!(result.unwrap_err().contains("SSH identity changed"));
+    }
+}
+
+#[cfg(test)]
+mod pty_dimension_tests {
+    use super::pty_dimension;
+
+    #[test]
+    fn accepts_ordinary_terminal_geometry() {
+        assert_eq!(pty_dimension("cols", 120).unwrap(), 120);
+        assert_eq!(pty_dimension("rows", 1).unwrap(), 1);
+        assert_eq!(pty_dimension("cols", 10_000).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn rejects_values_a_u16_cast_would_wrap() {
+        for value in [65_536_u32, 65_537, 131_072, u32::MAX] {
+            let error = pty_dimension("cols", value).unwrap_err();
+            assert!(error.contains("out of range"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_dimensions() {
+        assert!(pty_dimension("rows", 0).is_err());
+        assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `create_local_terminal` defaults a missing dimension to 80x24 and then
+    // runs the supplied one through the same helper, so the geometry a PTY is
+    // opened with is bounded the same way a later resize is. Before this the
+    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    #[test]
+    fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
+        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
+        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(
+                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
+                "creation accepted {value}"
+            );
+        }
+    }
+
+    // `session_resize` widens the checked value back to the `u32` russh puts on
+    // the wire, so the SSH path can only ever emit a geometry this helper
+    // accepted. Nothing else bounds it: russh forwards the number unchanged.
+    #[test]
+    fn checked_dimensions_widen_back_into_the_ssh_range() {
+        for value in [1_u32, 80, 24, 10_000] {
+            let checked: u32 = pty_dimension("cols", value).unwrap().into();
+            assert_eq!(checked, value);
+        }
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(pty_dimension("cols", value).is_err(), "accepted {value}");
+        }
+    }
+}
+
+
+#[cfg(test)]
+mod connect_lock_tests {
+    use super::*;
+    use crate::state::VaultSession;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    /// A peer that completes the TCP handshake and then says nothing, which is
+    /// how a half-dead host or a dropped VPN looks to the client.
+    async fn silent_peer() -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let mut accepted = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                accepted.push(stream);
+            }
+        });
+        addr
+    }
+
+    /// A connect to an unresponsive host must not keep the vault mutex, or the
+    /// whole key store — unlock, reset, and every key operation — stays blocked
+    /// until the process is restarted.
+    #[tokio::test]
+    async fn a_stalled_connect_leaves_the_vault_usable() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let (private, _public) = generate_ed25519().expect("generate");
+        let (meta, _) = parse_openssh_private(&private, None).expect("parse");
+        let key_id = meta.id;
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            vault.add_key(&master, meta, &private).expect("add key");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+
+        let addr = silent_peer().await;
+        let mut host = Host::new("stalled", addr.ip().to_string(), addr.port(), "deploy");
+        host.auth = AuthMethod::PublicKey;
+        host.key_id = Some(key_id);
+
+        app.manage(state);
+        let connecting = connect_ssh(
+            app.state(),
+            "session".to_string(),
+            host,
+            None,
+            None,
+            None,
+            None,
+            tauri::ipc::Channel::new(|_| Ok(())),
+        );
+
+        let vault_stays_available = async {
+            // Give the connect long enough to reach the network before asking
+            // the vault a question it can only answer with the mutex free.
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            tokio::time::timeout(Duration::from_secs(5), list_keys(app.state())).await
+        };
+
+        tokio::select! {
+            keys = vault_stays_available => {
+                assert_eq!(keys.expect("vault answered while a connect was in flight")
+                    .expect("list keys")
+                    .len(), 1);
+            }
+            connected = connecting => {
+                panic!("the silent peer unexpectedly finished a connection: {connected:?}");
+            }
+        }
+    }
+}
+
+/// The command bodies are exercised here with the confirmation stubbed out. The
+/// `#[tauri::command]` wrappers add nothing but the native dialog, so what these
+/// cover is the ordering the dialog depends on: the fingerprint is read before
+/// the question, nothing is written when the answer is no, and a key that moved
+/// while the dialog was open is not the one that gets used.
+#[cfg(test)]
+mod known_host_confirmation_tests {
+    use super::{forget_confirmed, replace_confirmed};
+    use clavyn_core::known_hosts::KnownHosts;
+    use russh_keys::key::{KeyPair, PublicKey};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+    use tokio::task::JoinSet;
+
+    const HOST: &str = "prod.example.com";
+    const PORT: u16 = 22;
+    const DECLINED: &str = "Forget host key: cancelled";
+
+    fn server_key() -> PublicKey {
+        KeyPair::generate_ed25519()
+            .clone_public_key()
+            .expect("public key")
+    }
+
+    fn store(dir: &std::path::Path) -> Mutex<KnownHosts> {
+        Mutex::new(KnownHosts::load(dir.join("known_hosts.json")).expect("load"))
+    }
+
+    async fn removed_host(store: &Mutex<KnownHosts>, key: &PublicKey) {
+        let mut kh = store.lock().await;
+        kh.verify(HOST, PORT, key).expect("first use");
+        kh.remove(HOST, PORT).expect("remove");
+    }
+
+    #[tokio::test]
+    async fn a_declined_confirmation_leaves_the_retained_key_in_place() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        removed_host(&store, &pinned).await;
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async { Err(DECLINED.to_string()) })
+            .await
+            .expect_err("a declined confirmation erased the key anyway");
+
+        assert_eq!(error, DECLINED);
+        let kh = store.lock().await;
+        assert_eq!(
+            kh.retained_fingerprint(HOST, PORT),
+            Some(pinned.fingerprint()),
+            "the retained key did not survive the refusal"
+        );
+        // Still remembered, so a different key is reported as a change rather
+        // than trusted as a first contact.
+        assert!(kh.check_mismatch(HOST, PORT, &server_key()).is_err());
+    }
+
+    #[tokio::test]
+    async fn forgetting_confirms_the_fingerprint_it_is_about_to_erase() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        removed_host(&store, &pinned).await;
+
+        let shown = std::cell::RefCell::new(String::new());
+        forget_confirmed(&store, HOST, PORT, |fingerprint| {
+            *shown.borrow_mut() = fingerprint;
+            async { Ok(()) }
+        })
+        .await
+        .expect("forget");
+
+        assert_eq!(shown.into_inner(), pinned.fingerprint());
+        assert_eq!(store.lock().await.retained_fingerprint(HOST, PORT), None);
+    }
+
+    #[tokio::test]
+    async fn a_key_that_changes_while_the_dialog_is_open_is_not_erased() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        removed_host(&store, &server_key()).await;
+        let replacement = server_key();
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async {
+            // The host is re-pinned to another key and removed again while the
+            // user is still reading the first fingerprint.
+            let mut kh = store.lock().await;
+            kh.replace(HOST, PORT, &replacement).expect("replace");
+            kh.remove(HOST, PORT).expect("remove");
+            Ok(())
+        })
+        .await
+        .expect_err("a key nobody was shown was erased");
+
+        assert!(error.contains("changed while the confirmation was open"));
+        assert_eq!(
+            store.lock().await.retained_fingerprint(HOST, PORT),
+            Some(replacement.fingerprint())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_live_pin_is_refused_without_asking_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &server_key())
+            .expect("first use");
+
+        let error = forget_confirmed(&store, HOST, PORT, |_| async {
+            panic!("a live pin should never reach a confirmation");
+        })
+        .await
+        .expect_err("a live pin was forgotten");
+
+        assert!(error.contains("still trusted"));
+    }
+
+    #[tokio::test]
+    async fn a_declined_confirmation_leaves_the_pin_intact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            Err("Host key changed: cancelled".to_string())
+        })
+        .await
+        .expect_err("a declined confirmation pinned the presented key anyway");
+
+        assert_eq!(error, "Host key changed: cancelled");
+        let kh = store.lock().await;
+        assert!(
+            kh.check_mismatch(HOST, PORT, &pinned).is_ok(),
+            "the original pin was replaced"
+        );
+        assert!(kh.check_mismatch(HOST, PORT, &presented).is_err());
+    }
+
+    #[tokio::test]
+    async fn trusting_confirms_the_fingerprints_the_store_holds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let shown = std::cell::RefCell::new(None);
+        replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |change| {
+            *shown.borrow_mut() = Some(change);
+            async { Ok(()) }
+        })
+        .await
+        .expect("trust");
+
+        let change = shown.into_inner().expect("nothing was confirmed");
+        assert_eq!(change.host, "prod.example.com:22");
+        assert_eq!(change.pinned_fingerprint, pinned.fingerprint());
+        assert_eq!(change.presented_fingerprint, presented.fingerprint());
+        assert!(store
+            .lock()
+            .await
+            .check_mismatch(HOST, PORT, &presented)
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_fingerprint_that_is_not_the_held_one_never_reaches_a_dialog() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let pinned = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &pinned).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &server_key());
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &server_key().fingerprint(), |_| async {
+            panic!("a key that is not going to be pinned should never be asked about");
+        })
+        .await
+        .expect_err("an unreviewed key was pinned");
+
+        assert!(error.contains("not the one that was reviewed"));
+    }
+
+    #[tokio::test]
+    async fn a_pin_that_changes_while_the_dialog_is_open_is_not_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &server_key()).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+        let repinned = server_key();
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            // The host is pinned to a third key while the user is still
+            // comparing the two the dialog printed.
+            store
+                .lock()
+                .await
+                .replace(HOST, PORT, &repinned)
+                .expect("replace");
+            Ok(())
+        })
+        .await
+        .expect_err("a key was pinned against a comparison that no longer held");
+
+        assert!(error.contains("changed while the confirmation was open"));
+        assert!(
+            store
+                .lock()
+                .await
+                .check_mismatch(HOST, PORT, &repinned)
+                .is_ok(),
+            "the pin made while the dialog was open was overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_removed_while_the_dialog_is_open_is_not_re_pinned() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = store(dir.path());
+        let presented = server_key();
+        {
+            let mut kh = store.lock().await;
+            kh.verify(HOST, PORT, &server_key()).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented);
+        }
+
+        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+            store.lock().await.remove(HOST, PORT).expect("remove");
+            Ok(())
+        })
+        .await
+        .expect_err("a tombstoned host was pinned back to a key the dialog never showed");
+
+        // `remove` drops the held key, so there is nothing left to trust: the
+        // dialog compared against a pin that is no longer live.
+        assert!(error.contains("no unreviewed host key"), "unexpected: {error}");
+        assert!(
+            store.lock().await.list().is_empty(),
+            "a removed host was restored to the trusted list"
+        );
+    }
+
+    /// The dialog is the only thing between a scripted `invoke` and a host going
+    /// back to trust-on-first-use, so "is there anything to confirm?" and the
+    /// erase have to be one decision. Read under one lock and acted on under
+    /// another they are two: a burst that answers "nothing is retained" against
+    /// a live pin, plus a single `remove` landing in the middle of it, leaves
+    /// calls holding a stale answer that erase a key nobody was ever shown.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_around_a_removal_cannot_forget_a_key_without_confirming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(store(dir.path()));
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &server_key())
+            .expect("first use");
+
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut burst = JoinSet::new();
+        for i in 0..400 {
+            let store = Arc::clone(&store);
+            let asked = Arc::clone(&asked);
+            burst.spawn(async move {
+                // The removal lands mid-burst, so calls that started on either
+                // side of it are in flight at the same time.
+                if i == 200 {
+                    store.lock().await.remove(HOST, PORT).expect("remove");
+                    return;
+                }
+                let _ = forget_confirmed(&store, HOST, PORT, |_| async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    // Stands in for a user who says no and for a dialog that
+                    // never appeared alike: neither may erase anything.
+                    Err(DECLINED.to_string())
+                })
+                .await;
+            });
+        }
+        while burst.join_next().await.is_some() {}
+
+        // Whatever order the calls landed in, the key is still on record, so a
+        // brand-new key is a change to review rather than a first contact.
+        assert!(
+            store
+                .lock()
+                .await
+                .check_mismatch(HOST, PORT, &server_key())
+                .is_err(),
+            "{HOST} was put back on trust-on-first-use by a burst that confirmed nothing \
+             ({} confirmations shown)",
+            asked.load(Ordering::SeqCst)
+        );
+    }
+
+    /// The same split in the pin path, and a worse outcome: the key that wins is
+    /// the one the server presented. A man in the middle knows the fingerprint
+    /// it is about to offer, so the burst can be armed with it before the key is
+    /// ever held.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_burst_around_a_presented_key_cannot_pin_it_without_confirming_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(store(dir.path()));
+        let pinned = server_key();
+        let presented = server_key();
+        store
+            .lock()
+            .await
+            .verify(HOST, PORT, &pinned)
+            .expect("first use");
+
+        let fingerprint = presented.fingerprint();
+        let asked = Arc::new(AtomicUsize::new(0));
+        let mut burst = JoinSet::new();
+        for i in 0..400 {
+            let store = Arc::clone(&store);
+            let asked = Arc::clone(&asked);
+            let fingerprint = fingerprint.clone();
+            let presented = presented.clone();
+            burst.spawn(async move {
+                // The connection path holds the changed key mid-burst.
+                if i == 200 {
+                    store.lock().await.hold_presented_key(HOST, PORT, &presented);
+                    return;
+                }
+                let _ = replace_confirmed(&store, HOST, PORT, &fingerprint, |_| async move {
+                    asked.fetch_add(1, Ordering::SeqCst);
+                    Err("Host key changed: cancelled".to_string())
+                })
+                .await;
+            });
+        }
+        while burst.join_next().await.is_some() {}
+
+        let kh = store.lock().await;
+        assert!(
+            kh.check_mismatch(HOST, PORT, &presented).is_err(),
+            "the presented key was pinned by a burst that confirmed nothing \
+             ({} confirmations shown)",
+            asked.load(Ordering::SeqCst)
+        );
+        assert!(
+            kh.check_mismatch(HOST, PORT, &pinned).is_ok(),
+            "the original pin was replaced"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pty_dimension_tests {
+    use super::pty_dimension;
+
+    #[test]
+    fn accepts_ordinary_terminal_geometry() {
+        assert_eq!(pty_dimension("cols", 120).unwrap(), 120);
+        assert_eq!(pty_dimension("rows", 1).unwrap(), 1);
+        assert_eq!(pty_dimension("cols", 10_000).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn rejects_values_a_u16_cast_would_wrap() {
+        for value in [65_536_u32, 65_537, 131_072, u32::MAX] {
+            let error = pty_dimension("cols", value).unwrap_err();
+            assert!(error.contains("out of range"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_zero_and_oversized_dimensions() {
+        assert!(pty_dimension("rows", 0).is_err());
+        assert!(pty_dimension("rows", 10_001).is_err());
+    }
+
+    // `create_local_terminal` defaults a missing dimension to 80x24 and then
+    // runs the supplied one through the same helper, so the geometry a PTY is
+    // opened with is bounded the same way a later resize is. Before this the
+    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    #[test]
+    fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
+        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
+        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(
+                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
+                "creation accepted {value}"
+            );
+        }
+    }
+
+    // `session_resize` widens the checked value back to the `u32` russh puts on
+    // the wire, so the SSH path can only ever emit a geometry this helper
+    // accepted. Nothing else bounds it: russh forwards the number unchanged.
+    #[test]
+    fn checked_dimensions_widen_back_into_the_ssh_range() {
+        for value in [1_u32, 80, 24, 10_000] {
+            let checked: u32 = pty_dimension("cols", value).unwrap().into();
+            assert_eq!(checked, value);
+        }
+        for value in [0_u32, 10_001, 65_536, u32::MAX] {
+            assert!(pty_dimension("cols", value).is_err(), "accepted {value}");
+        }
     }
 }

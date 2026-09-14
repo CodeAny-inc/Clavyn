@@ -19,16 +19,23 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
 argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 base64 = "0.22"
 rand = "0.8"
 async-trait = "0.1"
 russh-sftp = "2.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile = "3"

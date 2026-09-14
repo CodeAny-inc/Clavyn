@@ -1,7 +1,7 @@
 ---
 name: verify-clavyn
 description: Drive, inspect, and verify the Clavyn Tauri app's UI with a composable CLI over CDP/Playwright. Use after any frontend change to confirm behavior, capture evidence, navigate features, and reproduce bugs. Activates on prompts about verifying, testing, or checking Clavyn UI changes, frontend regressions, or Tauri renderer behavior.
-license: Proprietary. LICENSE.txt has complete terms
+license: GPL-3.0-or-later. LICENSE has complete terms
 compatibility: Requires Node.js, npm, and Playwright Chromium. Designed for any Agent Skills-compatible agent (VS Code, Copilot, Claude Code, Codex, Cursor, Gemini CLI, Goose, OpenHands, Devin, etc.).
 metadata:
   author: CodeAny-inc

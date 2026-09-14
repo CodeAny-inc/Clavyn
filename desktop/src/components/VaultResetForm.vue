@@ -23,7 +23,8 @@ defineEmits<{
     <div class="flex items-start gap-2.5 rounded-md border border-destructive/30 bg-destructive/5 p-3">
       <AlertTriangle class="size-4 text-destructive shrink-0 mt-0.5" :stroke-width="1.75" />
       <div class="text-[12px] text-muted-foreground">
-        Resetting the vault <strong class="text-destructive">permanently deletes all stored SSH keys and credentials</strong>.
+        Resetting the vault <strong class="text-destructive">permanently deletes all stored SSH keys and credentials</strong>
+        and closes every open session and terminal.
         This cannot be undone. Enter your master passphrase to confirm.
       </div>
     </div>
