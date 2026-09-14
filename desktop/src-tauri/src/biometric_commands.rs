@@ -229,6 +229,7 @@ pub async fn store_biometric_passphrase(
         let vault = state.vault.lock().await;
         vault
             .verify_passphrase(passphrase.as_str())
+            .await
             .map_err(|error| error.to_string())?;
         vault_binding_id(&vault)?
     };
@@ -355,11 +356,14 @@ mod tests {
         assert_ne!(CredentialState::Missing, CredentialState::Invalidated);
     }
 
-    #[test]
-    fn generation_change_invalidates_enrollment_commit() {
+    #[tokio::test]
+    async fn generation_change_invalidates_enrollment_commit() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-        vault.initialize("passphrase").expect("initialize vault");
+        vault
+            .initialize("passphrase")
+            .await
+            .expect("initialize vault");
         let binding = vault.binding_id().unwrap().to_owned();
         let generation = AuthGeneration::new();
         let expected = generation.current();

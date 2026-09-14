@@ -3,7 +3,7 @@ resolver = "2"
 members = ["core", "desktop/src-tauri"]
 
 [workspace.package]
-version = "0.1.2-alpha.4"
+version = "0.1.2-alpha.5"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/your-org/clavyn"
@@ -11,7 +11,10 @@ authors = ["Clavyn Contributors"]
 
 [workspace.dependencies]
 # Shared core deps
-russh = "0.46"
+# `default-features = false` drops russh's only default feature, `flate2`.
+# Clavyn never negotiates zlib, and without the feature the unbounded
+# decompression growth loop is not compiled in at all.
+russh = { version = "0.46", default-features = false }
 russh-keys = "0.46"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

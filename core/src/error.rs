@@ -23,14 +23,28 @@ pub enum CoreError {
     #[error("[vault-reset-durability] vault was deleted but directory sync failed: {0}")]
     VaultResetDurability(String),
 
-    #[error("host key verification failed for {host}: {reason}")]
-    HostKeyMismatch { host: String, reason: String },
+    /// The server presented a key that differs from the pinned one. Both
+    /// fingerprints travel with the error so the user can compare them before
+    /// deciding whether the change is a rotation or an interception.
+    #[error("host key for {host} changed: pinned {pinned}, presented {presented}")]
+    HostKeyMismatch {
+        host: String,
+        pinned: String,
+        presented: String,
+    },
 
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
     #[error("{path} is corrupt and was not loaded: {reason}")]
     CorruptState { path: String, reason: String },
+
+    /// The in-memory state serializes to a document this same version cannot
+    /// parse back. Writing it would leave a file that fails the fail-closed
+    /// load on the next start, so the write is refused and the previous file
+    /// stays intact.
+    #[error("{path} was not written: the serialized state cannot be loaded again ({reason})")]
+    UnwritableState { path: String, reason: String },
 
     #[error("invalid input: {0}")]
     InvalidInput(String),

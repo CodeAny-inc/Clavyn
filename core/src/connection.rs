@@ -6,11 +6,48 @@ use crate::{CoreError, Result};
 use russh::client::{self, Config, Handle};
 use russh::keys::key;
 use russh_keys::decode_secret_key;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::sync::Mutex;
 
+/// Upper bound on opening the transport and on completing authentication.
+/// A peer that accepts the TCP connection and then stops responding otherwise
+/// leaves both futures pending forever.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Client defaults shared by every session.
+///
+/// russh's own defaults leave `keepalive_interval` and `inactivity_timeout`
+/// unset, so a peer that disappears without closing the connection — a dropped
+/// VPN, a suspended laptop — is never detected and the session hangs instead of
+/// reporting a close. With an interval set, russh gives up after
+/// `keepalive_max` (3) unanswered probes, so a dead peer surfaces in about two
+/// minutes. The inactivity bound is only a backstop: any byte from the server,
+/// including its reply to a keepalive, restarts that timer, so an idle but live
+/// terminal is never torn down under a user who stepped away.
+fn client_config() -> Arc<Config> {
+    static CONFIG: OnceLock<Arc<Config>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut config = Config::default();
+            config.keepalive_interval = Some(Duration::from_secs(30));
+            config.inactivity_timeout = Some(Duration::from_secs(3600));
+            Arc::new(config)
+        })
+        .clone()
+}
+
+fn timed_out(stage: &str, addr: &str) -> CoreError {
+    CoreError::Ssh(format!(
+        "{stage} {addr}: timed out after {}s",
+        CONNECT_TIMEOUT.as_secs()
+    ))
+}
+
 /// Handler that verifies the server key against the known_hosts store (TOFU).
-/// On first sight: record + accept. On match: accept. On mismatch: reject.
+/// On first sight: record + accept. On match: accept. On mismatch: reject with
+/// `CoreError::HostKeyMismatch`, which russh propagates out of `connect` as the
+/// handler's own error type instead of the generic "unknown key" failure.
 pub struct SshHandler {
     host: String,
     port: u16,
@@ -26,15 +63,39 @@ impl client::Handler for SshHandler {
         server_public_key: &key::PublicKey,
     ) -> std::result::Result<bool, Self::Error> {
         let mut kh = self.known_hosts.lock().await;
-        let trusted = kh.verify(&self.host, self.port, server_public_key)?;
-        if !trusted {
+        if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, server_public_key) {
+            // Hold the key so the user can accept this exact one after comparing
+            // fingerprints; unpinning the host would trust whatever answers next.
+            kh.hold_presented_key(&self.host, self.port, server_public_key);
             tracing::warn!(
                 "host key mismatch for {}:{} — rejecting",
                 self.host,
                 self.port
             );
+            return Err(mismatch);
         }
-        Ok(trusted)
+        kh.verify(&self.host, self.port, server_public_key)
+    }
+}
+
+/// Extra context for a key-exchange failure, which russh surfaces as the bare
+/// string "No common algorithm" with no hint at which algorithm list failed.
+///
+/// Clavyn builds russh without its `flate2` feature, so the client offers only
+/// `none` for compression. RFC 4253 section 6.2 makes `none` REQUIRED of every
+/// implementation, so a server that will not accept it is non-conforming — say
+/// so, otherwise the failure reads as a Clavyn bug.
+fn negotiation_hint(err: &CoreError) -> &'static str {
+    match err {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Compression,
+            ..
+        }) => {
+            " (compression: this server refuses the `none` compression that RFC 4253 \
+             section 6.2 requires every SSH implementation to support, and Clavyn offers \
+             nothing else)"
+        }
+        _ => "",
     }
 }
 
@@ -75,7 +136,6 @@ pub async fn connect(
         ));
     }
 
-    let config = Arc::new(Config::default());
     let handler = SshHandler {
         host: host.hostname.clone(),
         port: host.port,
@@ -83,39 +143,65 @@ pub async fn connect(
     };
 
     let addr = format!("{}:{}", host.hostname, host.port);
-    let mut session = client::connect(config, &addr, handler)
-        .await
-        .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
+    // A changed host key keeps its own error variant: wrapping it in a generic
+    // connect failure would hide the two fingerprints that make the change
+    // legible.
+    let mut session = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        client::connect(client_config(), &addr, handler),
+    )
+    .await
+    .map_err(|_| timed_out("connect", &addr))?
+    .map_err(|e| match e {
+        CoreError::HostKeyMismatch { .. } => e,
+        other => CoreError::Ssh(format!(
+            "connect {addr}: {other}{}",
+            negotiation_hint(&other)
+        )),
+    })?;
 
-    let auth_ok = match auth {
-        AuthMethod::Agent => unreachable!("agent auth is rejected before network connection"),
-        AuthMethod::Password { .. } => {
-            let pw = password.ok_or_else(|| {
-                CoreError::InvalidInput("password required but not provided".into())
-            })?;
-            session.authenticate_password(username, pw).await
-        }
-        AuthMethod::PublicKey => {
-            let key_id = key_id.ok_or_else(|| {
-                CoreError::InvalidInput("publickey auth but no key_id set".into())
-            })?;
-            let passphrase = passphrase.ok_or_else(|| {
-                CoreError::InvalidInput("vault passphrase required for key auth".into())
-            })?;
-            let vault = vault.ok_or_else(|| {
-                CoreError::InvalidInput("vault required for key auth".into())
-            })?;
-            let private_pem = vault.get_key(passphrase, &key_id.to_string())?;
-            let pem_str = String::from_utf8(private_pem)
-                .map_err(|e| CoreError::Key(format!("utf8: {e}")))?;
-            let pair = decode_secret_key(&pem_str, None)
-                .map_err(|e| CoreError::Key(format!("decode: {e}")))?;
-            session
-                .authenticate_publickey(username, Arc::new(pair))
-                .await
-        }
-    }
-    .map_err(|e| CoreError::Ssh(format!("auth: {e}")))?;
+    // Authentication is bounded separately, and the two bounds cover disjoint
+    // stages. `client::connect` does not return until russh has read the
+    // server's banner and the key exchange has completed, so a peer that
+    // answers the TCP handshake and then goes silent trips the connect timeout
+    // above and never reaches this point. What is left for this bound is a
+    // server that finishes the key exchange and then stalls while answering an
+    // authentication request. Neither timeout subsumes the other.
+    let auth_ok = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let outcome = match auth {
+            AuthMethod::Agent => {
+                unreachable!("agent auth is rejected before network connection")
+            }
+            AuthMethod::Password { .. } => {
+                let pw = password.ok_or_else(|| {
+                    CoreError::InvalidInput("password required but not provided".into())
+                })?;
+                session.authenticate_password(username, pw).await
+            }
+            AuthMethod::PublicKey => {
+                let key_id = key_id.ok_or_else(|| {
+                    CoreError::InvalidInput("publickey auth but no key_id set".into())
+                })?;
+                let passphrase = passphrase.ok_or_else(|| {
+                    CoreError::InvalidInput("vault passphrase required for key auth".into())
+                })?;
+                let vault = vault.ok_or_else(|| {
+                    CoreError::InvalidInput("vault required for key auth".into())
+                })?;
+                let private_pem = vault.get_key(passphrase, &key_id.to_string()).await?;
+                let pem_str = String::from_utf8(private_pem)
+                    .map_err(|e| CoreError::Key(format!("utf8: {e}")))?;
+                let pair = decode_secret_key(&pem_str, None)
+                    .map_err(|e| CoreError::Key(format!("decode: {e}")))?;
+                session
+                    .authenticate_publickey(username, Arc::new(pair))
+                    .await
+            }
+        };
+        outcome.map_err(|e| CoreError::Ssh(format!("auth: {e}")))
+    })
+    .await
+    .map_err(|_| timed_out("auth", &addr))??;
 
     if !auth_ok {
         return Err(CoreError::Ssh("authentication rejected by server".into()));
@@ -170,5 +256,27 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("SSH agent authentication is not supported yet"));
+    }
+
+    fn no_common_algo(kind: russh::AlgorithmKind) -> CoreError {
+        CoreError::SshProtocol(russh::Error::NoCommonAlgo {
+            kind,
+            ours: vec!["none".into()],
+            theirs: vec!["zlib".into()],
+        })
+    }
+
+    #[test]
+    fn compression_mismatch_is_explained_as_compression() {
+        let hint = negotiation_hint(&no_common_algo(russh::AlgorithmKind::Compression));
+        assert!(hint.contains("compression"));
+        assert!(hint.contains("RFC 4253"));
+    }
+
+    #[test]
+    fn other_algorithm_mismatches_are_left_alone() {
+        let cipher = no_common_algo(russh::AlgorithmKind::Cipher);
+        assert_eq!(negotiation_hint(&cipher), "");
+        assert_eq!(negotiation_hint(&CoreError::Ssh("plain".into())), "");
     }
 }

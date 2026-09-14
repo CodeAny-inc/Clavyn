@@ -1,4 +1,4 @@
-use crate::state::{AppState, AuthGeneration};
+use crate::state::{AppState, VaultSession};
 use clavyn_core::vault::Vault;
 use std::sync::Arc;
 use tauri::State;
@@ -10,20 +10,6 @@ fn ensure_vault_uninitialized(vault: &Vault) -> ApiResult<()> {
         return Err("vault already initialized".into());
     }
     Ok(())
-}
-
-fn commit_initialized_passphrase_if_current(
-    auth_generation: &AuthGeneration,
-    expected_generation: u64,
-    slot: &mut Option<zeroize::Zeroizing<String>>,
-    passphrase: zeroize::Zeroizing<String>,
-) -> bool {
-    if !auth_generation.is_current(expected_generation) {
-        return false;
-    }
-    auth_generation.invalidate();
-    *slot = Some(passphrase);
-    true
 }
 
 /// Marker-aware initialization path. A newly created vault generation gets an
@@ -48,8 +34,11 @@ pub async fn secure_initialize_vault(
     crate::vault_keychain_cleanup::prepare_for_new_vault(&state.app_data_dir).await?;
     crate::biometric::clear_for_vault_initialization().await;
 
-    vault
+    // Initialization derives the master key; keep it for the session it unlocks
+    // instead of paying for a second Argon2 pass on the first vault operation.
+    let key = vault
         .initialize(passphrase.as_str())
+        .await
         .map_err(|error| error.to_string())?;
     let binding_id = vault
         .binding_id()
@@ -77,33 +66,42 @@ pub async fn secure_initialize_vault(
     drop(vault);
     drop(_biometric_mutation);
 
-    let mut pw = state.passphrase.lock().await;
-    let unlocked = commit_initialized_passphrase_if_current(
-        &state.auth_generation,
-        generation,
-        &mut pw,
-        passphrase,
-    );
+    let unlocked = state
+        .vault_session
+        .unlock_new_vault_if_current(
+            &state.auth_generation,
+            generation,
+            VaultSession::new(passphrase, key, binding_id),
+        )
+        .await;
     Ok(unlocked)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::commit_initialized_passphrase_if_current;
-    use crate::state::AuthGeneration;
+    use crate::state::{AuthGeneration, VaultSession, VaultSessionSlot};
 
-    #[test]
-    fn newer_lock_still_prevents_initialization_commit() {
+    #[tokio::test]
+    async fn newer_lock_still_prevents_initialization_commit() {
         let generation = AuthGeneration::new();
         let expected = generation.current();
         generation.invalidate();
-        let mut slot = None;
-        assert!(!commit_initialized_passphrase_if_current(
-            &generation,
-            expected,
-            &mut slot,
-            zeroize::Zeroizing::new("passphrase".to_string()),
-        ));
-        assert!(slot.is_none());
+        let slot = VaultSessionSlot::new();
+
+        assert!(
+            !slot
+                .unlock_new_vault_if_current(
+                    &generation,
+                    expected,
+                    VaultSession::new(
+                        zeroize::Zeroizing::new("passphrase".to_string()),
+                        zeroize::Zeroizing::new([0u8; 32]),
+                        "binding".to_string(),
+                    ),
+                )
+                .await
+        );
+        assert!(!slot.is_unlocked().await);
+        assert!(slot.key_for("binding").await.is_none());
     }
 }
