@@ -221,22 +221,22 @@ fn test_vault_open_empty() {
     assert!(vault.keys_meta().is_empty());
 }
 
-#[test]
-fn test_vault_initialize() {
+#[tokio::test]
+async fn test_vault_initialize() {
     let dir = temp_dir();
     let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
     assert!(!vault.is_initialized());
 
-    vault.initialize("my-passphrase").expect("init vault");
+    vault.initialize("my-passphrase").await.expect("init vault");
     assert!(vault.is_initialized());
     assert!(vault.keys_meta().is_empty());
 }
 
-#[test]
-fn test_vault_add_and_get_key() {
+#[tokio::test]
+async fn test_vault_add_and_get_key() {
     let dir = temp_dir();
     let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-    vault.initialize("passphrase").expect("init vault");
+    let master = vault.initialize("passphrase").await.expect("init vault");
 
     // Generate a key
     let (private_pem, _) = generate_ed25519().expect("generate key");
@@ -247,7 +247,7 @@ fn test_vault_add_and_get_key() {
     meta.label = "Test Key".to_string();
 
     vault
-        .add_key("passphrase", meta, &private_pem)
+        .add_key(&master, meta, &private_pem)
         .expect("add key");
 
     assert_eq!(vault.keys_meta().len(), 1);
@@ -256,59 +256,60 @@ fn test_vault_add_and_get_key() {
     // Retrieve the key
     let retrieved = vault
         .get_key("passphrase", &key_id.to_string())
+        .await
         .expect("get key");
     let retrieved_str = String::from_utf8(retrieved).unwrap();
     assert!(retrieved_str.contains("BEGIN OPENSSH PRIVATE KEY"));
 }
 
-#[test]
-fn test_vault_wrong_passphrase_fails() {
+#[tokio::test]
+async fn test_vault_wrong_passphrase_fails() {
     let dir = temp_dir();
     let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-    vault.initialize("correct-pass").expect("init vault");
+    let master = vault.initialize("correct-pass").await.expect("init vault");
 
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (meta, _) = parse_openssh_private(&private_pem, None).expect("parse key");
     let key_id = meta.id.to_string();
 
     vault
-        .add_key("correct-pass", meta, &private_pem)
+        .add_key(&master, meta, &private_pem)
         .expect("add key");
 
     // Try to get with wrong passphrase
-    let result = vault.get_key("wrong-pass", &key_id);
+    let result = vault.get_key("wrong-pass", &key_id).await;
     assert!(result.is_err());
 }
 
-#[test]
-fn test_vault_remove_key() {
+#[tokio::test]
+async fn test_vault_remove_key() {
     let dir = temp_dir();
     let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-    vault.initialize("pass").expect("init vault");
+    let master = vault.initialize("pass").await.expect("init vault");
 
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (meta, _) = parse_openssh_private(&private_pem, None).expect("parse key");
     let key_id = meta.id.to_string();
 
-    vault.add_key("pass", meta, &private_pem).expect("add key");
+    vault.add_key(&master, meta, &private_pem).expect("add key");
     assert_eq!(vault.keys_meta().len(), 1);
 
-    vault.remove_key("pass", &key_id).expect("remove key");
+    vault.remove_key(&master, &key_id).expect("remove key");
     assert!(vault.keys_meta().is_empty());
 
     // Key should no longer be retrievable
-    let result = vault.get_key("pass", &key_id);
+    let result = vault.get_key("pass", &key_id).await;
     assert!(result.is_err());
 }
 
-#[test]
-fn test_vault_persistence() {
+#[tokio::test]
+async fn test_vault_persistence() {
     let dir = temp_dir();
     let path = dir.path().join("vault.json");
 
     // Initialize and add a key
     let mut vault = Vault::open(path.clone()).expect("open vault");
-    vault.initialize("passphrase").expect("init vault");
+    let master = vault.initialize("passphrase").await.expect("init vault");
 
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (meta, _) = parse_openssh_private(&private_pem, None).expect("parse key");
@@ -317,7 +318,7 @@ fn test_vault_persistence() {
     meta.label = "Persisted Key".to_string();
 
     vault
-        .add_key("passphrase", meta, &private_pem)
+        .add_key(&master, meta, &private_pem)
         .expect("add key");
 
     // Reload from disk
@@ -329,6 +330,7 @@ fn test_vault_persistence() {
     // Key should be retrievable
     let retrieved = reloaded
         .get_key("passphrase", &key_id.to_string())
+        .await
         .expect("get key");
     assert!(String::from_utf8(retrieved).unwrap().contains("OPENSSH PRIVATE KEY"));
 }
