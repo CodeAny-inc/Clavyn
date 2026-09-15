@@ -9,6 +9,13 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # typescript 7.x is the Go-native compiler line and ships no JS API
+      # (lib/tsc), which vue-tsc requires. Major bumps need a manual check
+      # against the vue-tsc/Volar support matrix; minor and patch still flow.
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
     groups:
       desktop-minor-and-patch:
         update-types:
