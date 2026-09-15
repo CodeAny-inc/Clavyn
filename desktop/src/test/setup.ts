@@ -24,6 +24,14 @@ if (!globalThis.crypto.randomUUID) {
   });
 }
 
+// --- Mock window.alert/confirm/prompt ---
+// happy-dom does not implement the native dialog functions the Tauri webview
+// provides. Install no-ops so tests can spy on them — vi.spyOn requires the
+// property to already be a function.
+window.alert = () => {};
+window.confirm = () => true;
+window.prompt = () => null;
+
 // --- Mock @tauri-apps/api/core invoke ---
 // All Tauri IPC calls go through `invoke`. We provide a configurable mock
 // so individual tests can override the return value for specific commands.

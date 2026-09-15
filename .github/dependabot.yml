@@ -21,6 +21,16 @@ updates:
         update-types:
           - minor
           - patch
+      # vite, vitest and @vitejs/plugin-vue must move as one unit: vitest
+      # depends on a single vite major and plugin-vue peers one, so bumping
+      # vite alone produces a lockfile `npm ci` rejects with ERESOLVE.
+      vite-toolchain:
+        patterns:
+          - "vite"
+          - "vitest"
+          - "@vitejs/*"
+        update-types:
+          - major
 
   # Browser test harness. Separate lockfile, never covered by the desktop
   # entry above.
