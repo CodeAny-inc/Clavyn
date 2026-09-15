@@ -12,7 +12,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 [dependencies]
 russh = { workspace = true }
 russh-keys = { workspace = true }
-russh-cryptovec = "0.7"
+russh-cryptovec = "0.62"
 ssh-key = "0.6"
 tokio = { workspace = true }
 serde = { workspace = true }
