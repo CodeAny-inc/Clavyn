@@ -84,8 +84,16 @@ export const useVaultStore = defineStore("vault", () => {
 
   async function checkStatus() {
     error.value = null;
-    initialized.value = await api.vaultIsInitialized();
-    unlocked.value = await api.isVaultUnlocked();
+    // Both probes are independent backend reads. Publishing them as one
+    // snapshot also keeps needsSetup/needsUnlock from observing a half-applied
+    // status where `initialized` has moved but `unlocked` still holds the
+    // answer from the previous check.
+    const [vaultInitialized, vaultUnlocked] = await Promise.all([
+      api.vaultIsInitialized(),
+      api.isVaultUnlocked(),
+    ]);
+    initialized.value = vaultInitialized;
+    unlocked.value = vaultUnlocked;
 
     try {
       // The protected Keychain item is the source of truth only for an existing

@@ -75,6 +75,110 @@ describe("hosts store", () => {
       expect(store.groups).toHaveLength(1);
       expect(store.groups[0].name).toBe("Production");
     });
+
+    it("does not let an in-flight read overwrite a change that finished first", async () => {
+      // The snapshot this load returns was taken before the host below was
+      // added, so writing it back would make the new row appear and then vanish.
+      let releaseHosts: (hosts: Host[]) => void = () => {};
+      vi.mocked(api.listHosts).mockReturnValueOnce(
+        new Promise<Host[]>((resolve) => {
+          releaseHosts = resolve;
+        }),
+      );
+
+      const store = useHostsStore();
+      const inFlight = store.load();
+
+      await store.addHost({ ...mockHost, id: "host-3", label: "Added" });
+      expect(store.hosts.map((h) => h.label)).toContain("Added");
+
+      releaseHosts([{ ...mockHost }, { ...mockHost2 }]);
+      await inFlight;
+
+      expect(store.hosts.map((h) => h.label)).toContain("Added");
+    });
+
+    it("keeps the list a concurrent change did not touch", async () => {
+      // The two reads are independent, so a host being added says nothing
+      // about the group snapshot that came back with it. Discarding both would
+      // leave groups empty until something else called load() again.
+      let releaseHosts: (hosts: Host[]) => void = () => {};
+      vi.mocked(api.listHosts).mockReturnValueOnce(
+        new Promise<Host[]>((resolve) => {
+          releaseHosts = resolve;
+        }),
+      );
+
+      const store = useHostsStore();
+      const inFlight = store.load();
+
+      await store.addHost({ ...mockHost, id: "host-3", label: "Added" });
+
+      releaseHosts([{ ...mockHost }, { ...mockHost2 }]);
+      await inFlight;
+
+      expect(store.hosts.map((h) => h.label)).toContain("Added");
+      expect(store.groups).toHaveLength(1);
+    });
+
+    it("discards a group snapshot that a group change has overtaken", async () => {
+      let releaseGroups: (groups: HostGroup[]) => void = () => {};
+      vi.mocked(api.listGroups).mockReturnValueOnce(
+        new Promise<HostGroup[]>((resolve) => {
+          releaseGroups = resolve;
+        }),
+      );
+
+      const store = useHostsStore();
+      const inFlight = store.load();
+
+      await store.addGroup("Staging");
+      expect(store.groups.map((g) => g.name)).toContain("Staging");
+
+      releaseGroups([{ ...mockGroup }]);
+      await inFlight;
+
+      expect(store.groups.map((g) => g.name)).toContain("Staging");
+      expect(store.hosts).toHaveLength(2);
+    });
+
+    it("reads hosts and groups in one round-trip", async () => {
+      const store = useHostsStore();
+      const order: string[] = [];
+      vi.mocked(api.listHosts).mockImplementationOnce(() => {
+        order.push("hosts");
+        return Promise.resolve([]);
+      });
+      vi.mocked(api.listGroups).mockImplementationOnce(() => {
+        order.push("groups");
+        return Promise.resolve([]);
+      });
+
+      const load = store.load();
+      // Both reads are dispatched before either resolves.
+      expect(order).toEqual(["hosts", "groups"]);
+      await load;
+    });
+
+    it("shares one in-flight load between concurrent callers", async () => {
+      const store = useHostsStore();
+
+      await Promise.all([store.load(), store.load(), store.load()]);
+
+      expect(api.listHosts).toHaveBeenCalledTimes(1);
+      expect(api.listGroups).toHaveBeenCalledTimes(1);
+      expect(store.hosts).toHaveLength(2);
+      expect(store.groups).toHaveLength(1);
+    });
+
+    it("starts a fresh read once the previous one has settled", async () => {
+      const store = useHostsStore();
+
+      await store.load();
+      await store.load();
+
+      expect(api.listHosts).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("addHost", () => {

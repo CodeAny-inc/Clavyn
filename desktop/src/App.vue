@@ -62,14 +62,22 @@ function handleKeydown(e: KeyboardEvent) {
 }
 onMounted(async () => {
   window.addEventListener("keydown", handleKeydown);
-  await vault.checkStatus();
-  await hosts.load();
-  await keys.load();
-  await identities.load();
-  await workspaces.load();
-  await update.registerListeners();
-  await update.check();
-  if (update.shouldNotify) update.showModal = true;
+  // None of these boot loads reads another's result: the vault probe only
+  // publishes lock and biometric state, and each store owns a disjoint slice of
+  // backend state. Dispatching them together costs one IPC round-trip for the
+  // whole set instead of one per store.
+  await Promise.all([
+    vault.checkStatus(),
+    hosts.load(),
+    keys.load(),
+    identities.load(),
+    workspaces.load(),
+    update.registerListeners(),
+  ]);
+  // The update check is an HTTP request to the GitHub API, so it must not gate
+  // the first interactive frame. The shouldNotify watcher opens the modal when
+  // the result lands.
+  void update.check();
 });
 onUnmounted(() => {
   window.removeEventListener("keydown", handleKeydown);

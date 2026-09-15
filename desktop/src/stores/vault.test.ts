@@ -60,6 +60,36 @@ describe("vault store", () => {
       expect(store.needsUnlock).toBe(true);
     });
 
+    it("reads both status probes together and publishes them as one snapshot", async () => {
+      const store = useVaultStore();
+      const order: string[] = [];
+      let releaseInitialized!: (value: boolean) => void;
+      vi.mocked(api.vaultIsInitialized).mockImplementationOnce(() => {
+        order.push("initialized");
+        return new Promise<boolean>(resolve => {
+          releaseInitialized = resolve;
+        });
+      });
+      vi.mocked(api.isVaultUnlocked).mockImplementationOnce(() => {
+        order.push("unlocked");
+        return Promise.resolve(true);
+      });
+
+      const status = store.checkStatus();
+      expect(order).toEqual(["initialized", "unlocked"]);
+      // Neither ref moves until both probes have answered.
+      expect(store.initialized).toBe(false);
+      expect(store.unlocked).toBe(false);
+      expect(api.biometricAvailable).not.toHaveBeenCalled();
+
+      releaseInitialized(true);
+      await status;
+
+      expect(store.initialized).toBe(true);
+      expect(store.unlocked).toBe(true);
+      expect(api.biometricAvailable).toHaveBeenCalledTimes(1);
+    });
+
     it("does not attach a stale biometric credential to an uninitialized vault", async () => {
       const store = useVaultStore();
       vi.mocked(api.biometricAvailable).mockResolvedValue(true);
