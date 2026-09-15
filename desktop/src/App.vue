@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, toRef, onMounted, onUnmounted, watch } from "vue";
+import { ref, toRef, onMounted, onUnmounted, watch, defineAsyncComponent } from "vue";
 import { useVaultStore } from "./stores/vault";
 import { useHostsStore } from "./stores/hosts";
 import { useKeysStore } from "./stores/keys";
@@ -9,20 +9,27 @@ import { useTabsStore } from "./stores/tabs";
 import { useUiStore } from "./stores/ui";
 import { useUpdateStore } from "./stores/update";
 import { useAutoLock } from "./composables/useAutoLock";
+import { Menu } from "lucide-vue-next";
+
+// Shell, landing view and unlock prompt stay in the entry chunk: the shell and
+// HostList are on screen at first paint, and VaultUnlockModal must be mounted
+// before the vault can ask for a passphrase.
 import AppSidebar from "./components/AppSidebar.vue";
 import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
-import IdentityManager from "./components/IdentityManager.vue";
-import KeyManager from "./components/KeyManager.vue";
-import VaultView from "./components/VaultView.vue";
-import KnownHostsView from "./components/KnownHostsView.vue";
-import WorkspaceView from "./components/WorkspaceView.vue";
-import SftpBrowser from "./components/SftpBrowser.vue";
-import SettingsView from "./components/SettingsView.vue";
-import CommandPalette from "./components/CommandPalette.vue";
-import UpdateModal from "./components/UpdateModal.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
-import { Menu } from "lucide-vue-next";
+
+// Everything else is reachable only through navigation or a shortcut, so it is
+// split out of the entry chunk and fetched when first rendered.
+const IdentityManager = defineAsyncComponent(() => import("./components/IdentityManager.vue"));
+const KeyManager = defineAsyncComponent(() => import("./components/KeyManager.vue"));
+const VaultView = defineAsyncComponent(() => import("./components/VaultView.vue"));
+const KnownHostsView = defineAsyncComponent(() => import("./components/KnownHostsView.vue"));
+const WorkspaceView = defineAsyncComponent(() => import("./components/WorkspaceView.vue"));
+const SftpBrowser = defineAsyncComponent(() => import("./components/SftpBrowser.vue"));
+const SettingsView = defineAsyncComponent(() => import("./components/SettingsView.vue"));
+const CommandPalette = defineAsyncComponent(() => import("./components/CommandPalette.vue"));
+const UpdateModal = defineAsyncComponent(() => import("./components/UpdateModal.vue"));
 
 const vault = useVaultStore();
 const hosts = useHostsStore();

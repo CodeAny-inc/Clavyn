@@ -4,6 +4,9 @@ export default {
   content: [
     "./index.html",
     "./src/**/*.{vue,js,ts,jsx,tsx}",
+    // Test files never ship, and a class name mentioned in an assertion would
+    // otherwise pin that utility into the production stylesheet.
+    "!./src/**/*.{test,spec}.{js,ts}",
   ],
   screens: {
     xs: "400px",
