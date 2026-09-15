@@ -1,12 +1,15 @@
 use crate::host_key_prompt;
-use crate::state::{AppState, LocalTerminal, LocalTerminals};
+use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
 use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
+use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
 use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
+use std::time::Instant;
+use tauri::ipc::InvokeResponseBody;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -490,6 +493,7 @@ pub async fn connect_ssh(
     cols: Option<u32>,
     rows: Option<u32>,
     expected_username: Option<String>,
+    on_output: OutputSink,
 ) -> ApiResult<SshConnectionInfo> {
     // The owned input is transient and wiped on every exit; never persist or log it.
     let password = password.map(zeroize::Zeroizing::new);
@@ -528,10 +532,13 @@ pub async fn connect_ssh(
     let cols = cols.unwrap_or(80);
     let rows = rows.unwrap_or(24);
 
-    state
+    // Register the sink before the session can produce output, so the first
+    // bytes of the shell banner are never dropped.
+    state.register_output(session_id.clone(), on_output);
+    let started = state
         .sessions
         .create_ssh_session(
-            session_id,
+            session_id.clone(),
             &host,
             identity.as_ref(),
             known_hosts,
@@ -541,8 +548,11 @@ pub async fn connect_ssh(
             cols,
             rows,
         )
-        .await
-        .map_err(err)?;
+        .await;
+    if started.is_err() {
+        state.release_output(&session_id);
+    }
+    started.map_err(err)?;
     Ok(info)
 }
 
@@ -601,6 +611,7 @@ pub async fn create_local_terminal(
     session_id: String,
     cols: Option<u32>,
     rows: Option<u32>,
+    on_output: OutputSink,
 ) -> ApiResult<()> {
     use portable_pty::*;
 
@@ -729,10 +740,14 @@ pub async fn create_local_terminal(
         return Err(error);
     }
 
-    // Started after the insert: a terminal refused above must not emit
-    // `session-closed` for an id that belongs to another session.
+    // The PTY read is blocking, so coalescing happens on a second thread that
+    // can wait on a deadline as well as on the next chunk.
+    let (chunks, incoming) = std::sync::mpsc::channel::<Vec<u8>>();
+
     let app_handle = app.clone();
     let sid = session_id;
+    let owns = owns_session_id.clone();
+
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = [0u8; 8192];
@@ -740,19 +755,9 @@ pub async fn create_local_terminal(
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    // The shell can outlive its map entry, and the id it used is
-                    // reusable, so output that arrives after the entry is gone
-                    // would be rendered in whatever holds that id now.
-                    if !owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
-                        return;
+                    if chunks.send(buf[..n].to_vec()).is_err() {
+                        break;
                     }
-                    let _ = app_handle.emit(
-                        "session-data",
-                        crate::state::SessionDataEvent {
-                            session_id: sid.clone(),
-                            data: buf[..n].to_vec(),
-                        },
-                    );
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -761,9 +766,42 @@ pub async fn create_local_terminal(
                 Err(_) => break,
             }
         }
-        // Likewise for the closing notice: announcing this shell's exit on an
-        // id that now belongs to a replacement would disconnect the replacement.
-        if owns_session_id.load(std::sync::atomic::Ordering::Acquire) {
+    });
+
+    std::thread::spawn(move || {
+        use std::sync::mpsc::RecvTimeoutError;
+        let mut batcher = OutputBatcher::new(Instant::now());
+        let deliver = |batcher: &mut OutputBatcher| {
+            if !batcher.is_empty() {
+                let _ = on_output.send(InvokeResponseBody::Raw(batcher.batch().to_vec()));
+                batcher.mark_flushed(Instant::now());
+            }
+        };
+        loop {
+            let received = match batcher.deadline() {
+                Some(at) => incoming.recv_timeout(at.saturating_duration_since(Instant::now())),
+                None => incoming.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match received {
+                Ok(chunk) => {
+                    if batcher.push(&chunk, Instant::now()) {
+                        deliver(&mut batcher);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => deliver(&mut batcher),
+                Err(RecvTimeoutError::Disconnected) => {
+                    // Trailing output belongs to this session: hand it over,
+                    // then end the stream on the same sink so the frontend
+                    // learns that nothing follows it.
+                    deliver(&mut batcher);
+                    let _ = on_output.send(end_of_output());
+                    break;
+                }
+            }
+        }
+        // Announcing this shell's exit on an id that now belongs to a
+        // replacement would disconnect the replacement.
+        if owns.load(std::sync::atomic::Ordering::Acquire) {
             let _ = app_handle.emit(
                 "session-closed",
                 crate::state::SessionClosedEvent {
@@ -860,6 +898,10 @@ pub async fn session_resize(
 
 #[tauri::command]
 pub async fn close_session(state: State<'_, Arc<AppState>>, session_id: String) -> ApiResult<()> {
+    // The sink stays registered: tearing the session down makes its task reach
+    // EOF, and that path is what delivers the trailing output and ends the
+    // stream. Releasing it here would drop the sink first and discard the tail,
+    // which also happens on the reconnect path.
     // Try SSH session
     if state.sessions.list().await.contains(&session_id) {
         return state.sessions.close(&session_id).await.map_err(err);
@@ -1586,6 +1628,7 @@ mod connect_lock_tests {
             None,
             None,
             None,
+            tauri::ipc::Channel::new(|_| Ok(())),
         );
 
         let vault_stays_available = async {

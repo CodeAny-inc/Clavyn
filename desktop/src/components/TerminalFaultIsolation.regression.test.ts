@@ -9,7 +9,7 @@ import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { AuthMethod, Host, Identity } from "../types";
 
 const terminals = vi.hoisted(() => ({ items: [] as Array<{
@@ -53,7 +53,7 @@ function begin(saved: Host | null = host()) {
   return pane;
 }
 function closeEvent(sessionId: string | null) {
-  emitTauriEvent("session-closed", { session_id: sessionId, reason: "fixture EOF" });
+  emitSessionClosed(sessionId);
 }
 async function submitPassword(value = "fixture-only password") {
   await vi.waitFor(() => expect(view!.find('input[aria-label="SSH password"]').exists()).toBe(true));

@@ -8,7 +8,7 @@ import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
 import { useVaultStore } from "../stores/vault";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
@@ -89,7 +89,7 @@ describe("terminal focus ownership", () => {
     if (mode === "reconnect SSH") {
       render();
       await vi.waitFor(() => expect(pane.connected).toBe(true));
-      emitTauriEvent("session-closed", { session_id: pane.sessionId, reason: "fixture EOF" });
+      emitSessionClosed(pane.sessionId);
       release = delay();
       await nextTick();
       await view!.get('[role="alert"] button').trigger("click");

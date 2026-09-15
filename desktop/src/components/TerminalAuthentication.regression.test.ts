@@ -7,7 +7,7 @@ import SessionPicker from "./SessionPicker.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity } from "../types";
 
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
@@ -187,7 +187,7 @@ describe("ephemeral per-pane SSH passwords", () => {
     expect((await passwordInput()).element.value).toBe("");
     await submit("fixture-second");
     await vi.waitFor(() => expect(pane.connected).toBe(true));
-    emitTauriEvent("session-closed", { session_id: pane.sessionId, reason: "fixture disconnect" });
+    emitSessionClosed(pane.sessionId, "fixture disconnect");
     await nextTick();
     await view!.get('[role="alert"] button').trigger("click");
     expect((await passwordInput()).element.value).toBe("");

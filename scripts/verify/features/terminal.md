@@ -2,8 +2,9 @@
 
 Tabbed, split-able terminal panes. Each pane is an xterm.js instance backed by
 a Tauri session (SSH via `connect_ssh` or a local shell via
-`create_local_terminal`). Session data streams over Tauri events
-(`session-data`, `session-closed`).
+`create_local_terminal`). Session data streams over the per-session output
+channel passed as `onOutput`; session end is announced by the `session-closed`
+event.
 
 ## Sub-features
 

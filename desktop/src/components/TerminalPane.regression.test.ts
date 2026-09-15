@@ -7,7 +7,7 @@ import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
-import { emitTauriEvent, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
 const terminalMock = vi.hoisted(() => ({
@@ -135,7 +135,7 @@ describe("TerminalPane session identity", () => {
     expect(view.get('[data-testid="pane-header"]').text()).toContain("deploy@atlas.example.test:22");
     expect(view.get('[data-testid="pane-header"]').text()).not.toContain("ops@new.example.test:2200");
 
-    emitTauriEvent("session-closed", { session_id: firstSession, reason: "test disconnect" });
+    emitSessionClosed(firstSession, "test disconnect");
     await vi.waitFor(() => expect(pane.connected).toBe(false));
     const reconnect = view.findAll("button").find(button => button.text() === "Reconnect");
     expect(reconnect).toBeDefined();
@@ -262,7 +262,7 @@ describe("TerminalPane input ownership", () => {
     });
     const connect = vi.fn(() => { expect(terminalMock.reset).toHaveBeenCalledTimes(1); });
     setInvokeHandler("connect_ssh", connect);
-    emitTauriEvent("session-closed", { session_id: old, reason: "test disconnect" });
+    emitSessionClosed(old, "test disconnect");
     await nextTick();
     const reconnect = view.get('[data-host-id="atlas"]').findAll("button").find(button => button.text() === "Reconnect")!;
     await reconnect.trigger("click");
@@ -286,7 +286,7 @@ describe("TerminalPane input ownership", () => {
     });
     const connect = vi.fn();
     setInvokeHandler("connect_ssh", connect);
-    emitTauriEvent("session-closed", { session_id: first.sessionId, reason: "test disconnect" });
+    emitSessionClosed(first.sessionId, "test disconnect");
     await nextTick();
     await view.get('[data-host-id="atlas"]').findAll("button").find(button => button.text() === "Reconnect")!.trigger("click");
     await vi.waitFor(() => expect(drained).toBeDefined());

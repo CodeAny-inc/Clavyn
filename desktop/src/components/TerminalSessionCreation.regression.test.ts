@@ -7,7 +7,7 @@ import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useUiStore } from "../stores/ui";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity } from "../types";
 
 vi.mock("@xterm/xterm", () => ({
@@ -163,7 +163,7 @@ describe("effective SSH identity snapshots", () => {
     identities.identities = [identity("ops")];
     await nextTick();
     expect(endpoint(view)).toContain("root@atlas.example.test:22");
-    emitTauriEvent("session-closed", { session_id: original, reason: "test disconnect" });
+    emitSessionClosed(original, "test disconnect");
     await nextTick();
     setInvokeHandler("connect_ssh", () => { throw new Error("connection refused"); });
     await reconnect(view);

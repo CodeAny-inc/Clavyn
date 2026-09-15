@@ -8,7 +8,7 @@ import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useSftpStore } from "../stores/sftp";
 import { useVaultStore } from "../stores/vault";
-import { emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { emitSessionOutput, emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
@@ -115,33 +115,28 @@ describe("persistent-view credential lifetime", () => {
 });
 
 describe("terminal listener recovery", () => {
-  it("retries partial listener initialization and connects without duplicate data callbacks", async () => {
+  it("retries failed listener initialization and connects without duplicate data callbacks", async () => {
     useHostsStore().hosts = [agentHost];
     const tab = useTabsStore().newTab(agentHost);
     const pane = collectPanes(tab.tree)[0];
 
     const listenMock = vi.mocked(listen);
-    const normalListen = listenMock.getMockImplementation();
-    expect(normalListen).toBeDefined();
-    listenMock.mockImplementationOnce(normalListen!);
+    expect(listenMock.getMockImplementation()).toBeDefined();
     listenMock.mockRejectedValueOnce(new Error("fixture close-listener outage"));
 
     view = mount(TerminalWorkspace, { props: { visible: true }, attachTo: document.body });
     await vi.waitFor(() => expect(view!.get('[role="alert"]').text()).toContain("Could not initialize terminal"));
     expect(pane.connected).toBe(false);
     expect(calls("connect_ssh")).toHaveLength(0);
-    expect(listenMock).toHaveBeenCalledTimes(2);
+    expect(listenMock).toHaveBeenCalledTimes(1);
 
     await view.get('[role="alert"] button').trigger("click");
     await vi.waitFor(() => expect(pane.connected).toBe(true));
     expect(calls("connect_ssh")).toHaveLength(1);
-    expect(listenMock).toHaveBeenCalledTimes(4);
+    expect(listenMock).toHaveBeenCalledTimes(2);
     expect(view.find('[role="alert"]').exists()).toBe(false);
 
-    emitTauriEvent("session-data", {
-      session_id: pane.sessionId,
-      data: Array.from(new TextEncoder().encode("ONLY_ONCE")),
-    });
+    emitSessionOutput(pane.sessionId!, "ONLY_ONCE");
     await flushPromises();
     const rendered = terminals.items[0].output.join("");
     expect(rendered.match(/ONLY_ONCE/g)).toHaveLength(1);

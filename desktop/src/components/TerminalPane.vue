@@ -52,8 +52,27 @@ let listenerSetup: Promise<boolean> | null = null;
 let currentSessionId: string | null = null;
 let disposed = false;
 let sessionEnded = false;
+// The close notification and the session's output travel on different
+// transports, so "the session ended" and "its output has all arrived" are two
+// facts and the second can land last. Writes stop on the first; the transcript
+// is only finished by the second.
+let streamEnded = false;
+let closeReason: string | null = null;
+// A frame of 1024 bytes or more is fetched rather than evaluated inline, and a
+// fetch that rejects is dropped. Ordering parks every later frame behind the
+// dropped one, so the zero-length frame that ends the stream can be lost with
+// it, and a pane that waited only for that frame would stop with no reason
+// written to it. A close not followed by the end of the stream within this
+// grace period finishes the transcript anyway. The window is far longer than a
+// healthy fetch, so only a dropped frame reaches it.
+const STREAM_END_GRACE_MS = 5000;
+let streamEndTimer: ReturnType<typeof setTimeout> | null = null;
+let outputTruncated = false;
 // Buffer remote output, never user input, until this attempt can answer queries.
 let pendingOutput: Uint8Array[] | null = null;
+// Output still arriving after the close notification, held so the trailing
+// bytes are written before the closed banner rather than after it.
+let tailOutput: Uint8Array[] | null = null;
 const listenersReady = ref(false);
 const listenerSetupPending = ref(false);
 const isActive = computed(() => props.visible && tabs.activeTabId === props.tabId && tabs.activePaneId === props.pane.id);
@@ -139,6 +158,47 @@ function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
 }
+// Closes out the transcript once both halves of the ending are known: why the
+// session ended, and that its output has stopped arriving. Whichever lands
+// second does the writing, so the trailing bytes are never dropped and never
+// appear after the banner.
+function finishClose() {
+  if (closeReason === null) return;
+  if (!streamEnded) {
+    armStreamEndFallback();
+    return;
+  }
+  clearStreamEndFallback();
+  const output = tailOutput;
+  tailOutput = null;
+  for (const chunk of output ?? []) term?.write(chunk);
+  const reason = closeReason;
+  closeReason = null;
+  const truncated = outputTruncated;
+  outputTruncated = false;
+  writeError(
+    truncated
+      ? `Session closed: ${reason} (some output was lost in transit)`
+      : `Session closed: ${reason}`,
+  );
+}
+function armStreamEndFallback() {
+  if (streamEndTimer !== null) return;
+  streamEndTimer = setTimeout(() => {
+    streamEndTimer = null;
+    if (disposed || streamEnded || closeReason === null) return;
+    // Treat the stream as over so nothing the channel may still deliver can
+    // land after the banner, and say the transcript is short.
+    streamEnded = true;
+    outputTruncated = true;
+    finishClose();
+  }, STREAM_END_GRACE_MS);
+}
+function clearStreamEndFallback() {
+  if (streamEndTimer === null) return;
+  clearTimeout(streamEndTimer);
+  streamEndTimer = null;
+}
 async function ensureListeners(): Promise<boolean> {
   if (disposed) return false;
   if (listenersReady.value) return true;
@@ -147,25 +207,18 @@ async function ensureListeners(): Promise<boolean> {
   listenerSetup = (async () => {
     const staged: UnlistenFn[] = [];
     try {
-      const dataListener = await api.onSessionData(event => {
-        if (disposed || props.pane.closing || sessionEnded || event.session_id !== currentSessionId) return;
-        const data = new Uint8Array(event.data);
-        if (pendingOutput) pendingOutput.push(data);
-        else if (props.pane.connected) term?.write(data);
-      });
-      staged.push(dataListener);
-      if (disposed) { staged.forEach(unlisten => unlisten()); return false; }
       const closeListener = await api.onSessionClosed(event => {
         if (!disposed && !props.pane.closing && !sessionEnded && event.session_id === currentSessionId) {
           sessionEnded = true;
           tabs.setPaneDisconnected(props.pane.id);
           // EOF does not invalidate diagnostics already received from this owner.
           // Disable writes before parsing them: queries must not reply to a dead
-          // session. Reconnect still drains this queue before resetting xterm.
-          const output = pendingOutput;
+          // session. Take ownership of anything this attempt has buffered so a
+          // connection still settling cannot discard it.
+          tailOutput = [...(pendingOutput ?? [])];
           pendingOutput = null;
-          for (const chunk of output ?? []) term?.write(chunk);
-          writeError(`Session closed: ${event.reason}`);
+          closeReason = event.reason;
+          finishClose();
         }
       });
       staged.push(closeListener);
@@ -198,7 +251,26 @@ async function connectSession() {
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
   sessionEnded = false;
+  streamEnded = false;
+  closeReason = null;
+  tailOutput = null;
+  outputTruncated = false;
+  clearStreamEndFallback();
   pendingOutput = [];
+  // The sink belongs to this attempt, so a superseded attempt's output can
+  // never reach the emulator even before its session is torn down. Bytes keep
+  // being accepted until the sink itself reports the end of the stream: the
+  // close notification does not travel with them and can arrive first.
+  const outputSink = api.sessionOutput(data => {
+    if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
+    if (sessionEnded) tailOutput?.push(data);
+    else if (pendingOutput) pendingOutput.push(data);
+    else if (props.pane.connected) term?.write(data);
+  }, () => {
+    if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
+    streamEnded = true;
+    finishClose();
+  });
   let endpointForAttempt = "Local shell";
   try {
     if (previous) await api.closeSession(previous).catch(() => {});
@@ -214,7 +286,7 @@ async function connectSession() {
     }
     fit();
     if (props.pane.terminalType === "local") {
-      await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows);
+      await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows, outputSink);
     } else {
       // Direct hosts do not depend on the identity list. Linked hosts still fail
       // closed, and every async boundary re-reads configuration before dispatch.
@@ -258,7 +330,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
-          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, effective.username);
+          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
           const connected = await request;
@@ -359,6 +431,8 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true;
   pendingOutput = null;
+  tailOutput = null;
+  clearStreamEndFallback();
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();
