@@ -10,12 +10,24 @@ export interface AppSettings {
   lockOnSleep: boolean;
   /** Obfuscate host addresses in the UI so the full address is never shown. */
   maskAddresses: boolean;
+  /**
+   * Expose terminal output to assistive technology.
+   *
+   * A terminal draws its rows for the eye: xterm marks the DOM renderer's rows
+   * `aria-hidden`, and the GPU renderer draws to a canvas, so neither is
+   * readable by a screen reader. What is readable is xterm's accessibility
+   * layer, which builds its own row elements and a live region from the buffer
+   * and is independent of whichever renderer is drawing. It costs a DOM tree
+   * per terminal, so it defaults to off.
+   */
+  screenReaderMode: boolean;
 }
 
 const DEFAULTS: AppSettings = {
   autoLockMinutes: 15,
   lockOnSleep: true,
   maskAddresses: true,
+  screenReaderMode: false,
 };
 
 function loadSettings(): AppSettings {
@@ -43,14 +55,16 @@ export const useSettingsStore = defineStore("settings", () => {
   const autoLockMinutes = ref(loadSettings().autoLockMinutes);
   const lockOnSleep = ref(loadSettings().lockOnSleep);
   const maskAddresses = ref(loadSettings().maskAddresses);
+  const screenReaderMode = ref(loadSettings().screenReaderMode);
 
   watch(
-    [autoLockMinutes, lockOnSleep, maskAddresses],
+    [autoLockMinutes, lockOnSleep, maskAddresses, screenReaderMode],
     () => {
       saveSettings({
         autoLockMinutes: autoLockMinutes.value,
         lockOnSleep: lockOnSleep.value,
         maskAddresses: maskAddresses.value,
+        screenReaderMode: screenReaderMode.value,
       });
     },
   );
@@ -67,12 +81,18 @@ export const useSettingsStore = defineStore("settings", () => {
     maskAddresses.value = enabled;
   }
 
+  function setScreenReaderMode(enabled: boolean) {
+    screenReaderMode.value = enabled;
+  }
+
   return {
     autoLockMinutes,
     lockOnSleep,
     maskAddresses,
+    screenReaderMode,
     setAutoLockMinutes,
     setLockOnSleep,
     setMaskAddresses,
+    setScreenReaderMode,
   };
 });

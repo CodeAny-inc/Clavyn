@@ -2,6 +2,6 @@
   "name": "clavyn-browser-regressions",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node terminal-workspace.mjs && node terminal-input-routing.mjs && node terminal-session-creation.mjs && node terminal-authentication.mjs && node terminal-output-drag.mjs && node terminal-tab-drag.mjs && node terminal-focus-vault.mjs && node terminal-keyboard-close.mjs && node terminal-fault-isolation.mjs" },
+  "scripts": { "test": "node terminal-workspace.mjs && node terminal-input-routing.mjs && node terminal-session-creation.mjs && node terminal-authentication.mjs && node terminal-output-drag.mjs && node terminal-tab-drag.mjs && node terminal-focus-vault.mjs && node terminal-keyboard-close.mjs && node terminal-fault-isolation.mjs && node terminal-gpu-renderer.mjs" },
   "dependencies": { "playwright": "1.56.1" }
 }
