@@ -16,6 +16,15 @@ updates:
       - dependency-name: "typescript"
         update-types:
           - "version-update:semver-major"
+      # @xterm/addon-webgl must stay on the line built against the pinned
+      # @xterm/xterm: its renderer teardown reaches into private core
+      # internals (terminal._core._store, _renderService, _createRenderer)
+      # that exist only in the matching xterm line. Since 0.19.0 the package
+      # declares no peerDependency on @xterm/xterm at all, so the constraint
+      # is invisible to npm and to Dependabot — bumping it under any update
+      # type can produce a runtime-only break. Move it manually together
+      # with @xterm/xterm (see src/lib/terminalRenderer.ts for the details).
+      - dependency-name: "@xterm/addon-webgl"
     groups:
       desktop-minor-and-patch:
         update-types:
