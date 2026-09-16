@@ -1660,7 +1660,7 @@ mod connect_lock_tests {
 mod known_host_confirmation_tests {
     use super::{forget_confirmed, replace_confirmed};
     use clavyn_core::known_hosts::KnownHosts;
-    use russh_keys::key::{KeyPair, PublicKey};
+    use russh::keys::key::{KeyPair, PublicKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;

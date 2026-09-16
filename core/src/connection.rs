@@ -5,7 +5,7 @@ use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::{self, Config, Handle};
 use russh::keys::key;
-use russh_keys::decode_secret_key;
+use russh::keys::decode_secret_key;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;

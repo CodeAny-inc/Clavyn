@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
-use russh_keys::key;
-use russh_keys::{decode_secret_key, PublicKeyBase64};
+use russh::keys::key;
+use russh::keys::{decode_secret_key, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use ssh_key::PrivateKey;
 use uuid::Uuid;
@@ -90,7 +90,7 @@ pub fn public_identity(openssh: &str) -> Result<(KeyType, String, String)> {
                 .split_whitespace()
                 .nth(1)
                 .ok_or_else(|| CoreError::Key("public key has no body".to_string()))?;
-            russh_keys::parse_public_key_base64(body)
+            russh::keys::parse_public_key_base64(body)
                 .map_err(|e| CoreError::Key(format!("public parse: {e}")))?
         }
         // Not an OpenSSH-format key: a PEM one can still be read, but only
