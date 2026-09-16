@@ -652,7 +652,6 @@ dependencies = [
  "base64 0.23.1",
  "rand 0.8.8",
  "russh",
- "russh-cryptovec",
  "russh-keys",
  "russh-sftp 3.0.0",
  "serde",
