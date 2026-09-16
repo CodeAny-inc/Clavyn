@@ -26,12 +26,13 @@ get_version() {
 
 set_version() {
   local new="$1"
+  # -i.bak is the in-place form both GNU and BSD sed accept
   # Cargo.toml (workspace.package)
-  sed -i '' "s/^version = \".*\"/version = \"$new\"/" "$CARGO_TOML"
+  sed -i.bak "s/^version = \".*\"/version = \"$new\"/" "$CARGO_TOML" && rm -f "$CARGO_TOML.bak"
   # desktop/package.json
-  sed -i '' "s/\"version\": \".*\"/\"version\": \"$new\"/" "$PACKAGE_JSON"
+  sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$PACKAGE_JSON" && rm -f "$PACKAGE_JSON.bak"
   # tauri.conf.json
-  sed -i '' "s/\"version\": \".*\"/\"version\": \"$new\"/" "$TAURI_CONF"
+  sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
   echo "Bumped version to $new"
 }
 
