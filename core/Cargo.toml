@@ -23,7 +23,6 @@ argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 uuid = { workspace = true }
 base64 = "0.23"
-rand = "0.10"
 async-trait = "0.1"
 russh-sftp = "3.0"
 

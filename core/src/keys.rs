@@ -110,7 +110,7 @@ pub fn public_identity(openssh: &str) -> Result<(KeyType, String, String)> {
 
 /// Generate a new Ed25519 keypair. Returns (private OpenSSH PEM, public base64).
 pub fn generate_ed25519() -> Result<(String, String)> {
-    let private = PrivateKey::random(&mut rand::rngs::OsRng, ssh_key::Algorithm::Ed25519)
+    let private = PrivateKey::random(&mut ssh_key::rand_core::OsRng, ssh_key::Algorithm::Ed25519)
         .map_err(|e| CoreError::Key(format!("generate: {e}")))?;
     let pem = private
         .to_openssh(ssh_key::LineEnding::LF)
@@ -157,7 +157,7 @@ mod tests {
         let (meta, _) = parse_openssh_private(&plain, None).expect("parse");
         let encrypted = PrivateKey::from_openssh(&plain)
             .expect("read")
-            .encrypt(&mut rand::rngs::OsRng, "key passphrase")
+            .encrypt(&mut ssh_key::rand_core::OsRng, "key passphrase")
             .expect("encrypt")
             .to_openssh(ssh_key::LineEnding::LF)
             .expect("serialize")
