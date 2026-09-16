@@ -1,7 +1,7 @@
 {
   "name": "clavyn-desktop",
   "private": true,
-  "version": "0.1.2-alpha.5",
+  "version": "0.1.2-alpha.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
