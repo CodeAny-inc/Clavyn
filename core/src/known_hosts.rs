@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
-use russh_keys::key::PublicKey;
-use russh_keys::PublicKeyBase64;
+use russh::keys::key::PublicKey;
+use russh::keys::PublicKeyBase64;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -327,8 +327,8 @@ fn key_path(host: &str, port: u16) -> String {
 mod tests {
     use super::KnownHosts;
     use crate::CoreError;
-    use russh_keys::key::{KeyPair, PublicKey};
-    use russh_keys::PublicKeyBase64;
+    use russh::keys::key::{KeyPair, PublicKey};
+    use russh::keys::PublicKeyBase64;
 
     const HOST: &str = "prod.example.com";
     const PORT: u16 = 22;

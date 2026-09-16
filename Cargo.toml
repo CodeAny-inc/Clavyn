@@ -15,7 +15,6 @@ authors = ["Clavyn Contributors"]
 # Clavyn never negotiates zlib, and without the feature the unbounded
 # decompression growth loop is not compiled in at all.
 russh = { version = "0.46", default-features = false }
-russh-keys = "0.49"
 # Enumerate the runtime pieces Clavyn and its dependencies actually use. `full`
 # additionally compiles the process, signal and io-std drivers, none of which
 # any crate in this workspace requires. `net` would be switched on regardless by
