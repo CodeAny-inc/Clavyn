@@ -16,6 +16,14 @@ updates:
       - dependency-name: "typescript"
         update-types:
           - "version-update:semver-major"
+      # tailwindcss 4.x is a re-integration, not a bump: the PostCSS plugin
+      # moved to @tailwindcss/postcss, the `@tailwind` directives are gone,
+      # and the JS config is no longer auto-loaded. A version-only bump
+      # breaks every job that runs PostCSS (vitest, vite build, tauri
+      # build), so the major upgrade lands as a manual migration instead.
+      - dependency-name: "tailwindcss"
+        update-types:
+          - "version-update:semver-major"
     groups:
       desktop-minor-and-patch:
         update-types:
