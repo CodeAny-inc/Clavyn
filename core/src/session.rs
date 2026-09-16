@@ -6,7 +6,7 @@ use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
 use russh::ChannelMsg;
-use russh_cryptovec::CryptoVec;
+use russh::CryptoVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
