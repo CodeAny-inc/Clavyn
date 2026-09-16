@@ -650,7 +650,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "base64 0.23.1",
- "rand 0.8.8",
+ "rand 0.10.2",
  "russh",
  "russh-keys",
  "russh-sftp 3.0.0",
