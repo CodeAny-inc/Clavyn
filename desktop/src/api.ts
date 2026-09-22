@@ -165,3 +165,10 @@ export function onUpdateProgress(cb: (e: UpdateProgress) => void): Promise<Unlis
 export function onUpdateExtracting(cb: () => void): Promise<UnlistenFn> {
   return listen("update-extracting", () => cb());
 }
+
+/** What stopped the app state from loading at startup, if anything did. */
+export interface StartupFailure { file: string | null; file_name: string | null; reason: string }
+export const getStartupFailure = () => invoke<StartupFailure | null>("startup_failure");
+/** Renames the unreadable file aside and returns its new path. */
+export const setAsideUnreadableFile = () => invoke<string>("set_aside_unreadable_file");
+export const restartApp = () => invoke<void>("restart_app");
