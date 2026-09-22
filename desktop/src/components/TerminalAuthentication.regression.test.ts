@@ -80,9 +80,8 @@ describe("SSH identity load and dispatch boundaries", () => {
     await vi.waitFor(() => expect(pane.connected).toBe(true));
     const args = calls()[0][1];
     expect(args.expectedUsername).toBe("root");
-    expect(args.host.identity_id).toBeNull();
-    expect(args.host.username).toBe("root");
-    expect(args.host.auth).toBe("agent");
+    expect(args.hostId).toBe(pane.hostId);
+    expect(args).not.toHaveProperty("host");
     expect(view!.text()).toContain("root@atlas.example.test:22");
   });
   it("blocks a failed identity load and retries it on reconnect", async () => {
@@ -182,7 +181,7 @@ describe("ephemeral per-pane SSH passwords", () => {
     const originalTerminal = view!.get(".xterm").element;
     await submit("fixture-first");
     await vi.waitFor(() => expect(view!.text()).toContain("authentication rejected"));
-    setInvokeHandler("connect_ssh", args => ({ username: args.expectedUsername, hostname: args.host.hostname, port: args.host.port }));
+    setInvokeHandler("connect_ssh", args => ({ username: args.expectedUsername, hostname: "atlas.example.test", port: 22 }));
     await view!.get('[role="alert"] button').trigger("click");
     expect((await passwordInput()).element.value).toBe("");
     await submit("fixture-second");

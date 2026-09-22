@@ -12,7 +12,6 @@ import { useUiStore } from "../stores/ui";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity } from "../types";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24;
   textarea = document.createElement("textarea");

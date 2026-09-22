@@ -181,12 +181,15 @@ impl SftpManager {
             .map_err(|e| CoreError::Ssh(format!("write file: {e}")))
     }
 
-    /// Stream a remote file directly to a local path.
+    /// Stream a remote file directly to a local path. An existing local file is
+    /// refused unless the caller explicitly opts in to overwrite, mirroring
+    /// `upload_from_local`.
     pub async fn download_to_local(
         &self,
         session_id: &str,
         remote_path: &str,
         local_path: &Path,
+        overwrite: bool,
     ) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         let conn = sessions
@@ -198,7 +201,7 @@ impl SftpManager {
             .open(remote_path)
             .await
             .map_err(|e| CoreError::Ssh(format!("open remote file: {e}")))?;
-        let mut local = tokio::fs::File::create(local_path).await?;
+        let mut local = open_download_target(local_path, overwrite).await?;
 
         tokio::io::copy(&mut remote, &mut local).await?;
         local.flush().await?;
@@ -367,5 +370,53 @@ impl SftpManager {
 impl Default for SftpManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Open the local file a download writes into. Without `overwrite` an existing
+/// file is refused; `create_new` checks and creates in one step, so a file that
+/// appears between a check and the open is refused too.
+async fn open_download_target(path: &Path, overwrite: bool) -> Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true);
+    if overwrite {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    options.open(path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::AlreadyExists {
+            CoreError::InvalidInput(format!("local file already exists: {}", path.display()))
+        } else {
+            e.into()
+        }
+    })
+}
+
+#[cfg(test)]
+mod download_target_tests {
+    use super::open_download_target;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn an_existing_file_is_kept_unless_overwrite_is_chosen() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+
+        assert!(open_download_target(&path, false).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+
+        let mut file = open_download_target(&path, true).await.expect("overwrite");
+        file.write_all(b"new").await.expect("write");
+        file.flush().await.expect("flush");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "new");
+    }
+
+    #[tokio::test]
+    async fn a_new_file_is_created_either_way() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert!(open_download_target(&dir.path().join("a"), false).await.is_ok());
+        assert!(open_download_target(&dir.path().join("b"), true).await.is_ok());
     }
 }

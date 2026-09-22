@@ -15,7 +15,7 @@ import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 import { acquireWebglRenderer, releaseWebglRenderer } from "../lib/terminalRenderer";
-import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, resolvedSshHost, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
@@ -321,7 +321,6 @@ async function connectSession() {
         if (!host || disposed || props.pane.closing) return;
         const effective = effectiveSshIdentity(host, identities.identities);
         const key = sshConfigurationKey(host, identities.identities);
-        const transportHost = resolvedSshHost(host, identities.identities);
         endpointForAttempt = configuredSshEndpoint(host, identities.identities);
         let password: string | null = null;
         try {
@@ -334,7 +333,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
-          const request = api.connectSsh(sessionId, transportHost, password, terminal.cols, terminal.rows, outputSink, effective.username);
+          const request = api.connectSsh(sessionId, host.id, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
           const connected = await request;
