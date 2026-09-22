@@ -82,11 +82,33 @@ fn test_parse_generated_key() {
     assert!(!meta.public_key_base64.is_empty());
 }
 
+fn passphrase_protected_ed25519(passphrase: &str) -> (String, String) {
+    use russh::keys::ssh_key::{LineEnding, PrivateKey};
+    let (plain, _) = generate_ed25519().expect("generate key");
+    let (meta, _) = parse_openssh_private(&plain, None).expect("parse key");
+    let encrypted = PrivateKey::from_openssh(&plain)
+        .expect("read key")
+        .encrypt(&mut getrandom::SysRng, passphrase)
+        .expect("encrypt key")
+        .to_openssh(LineEnding::LF)
+        .expect("serialize key")
+        .to_string();
+    (encrypted, meta.fingerprint)
+}
+
 #[test]
 fn test_parse_with_wrong_passphrase_fails() {
-    let (private_pem, _) = generate_ed25519().expect("generate key");
-    let result = parse_openssh_private(&private_pem, Some("wrong-passphrase"));
-    assert!(result.is_err());
+    let (encrypted, _) = passphrase_protected_ed25519("right-passphrase");
+    assert!(parse_openssh_private(&encrypted, Some("wrong-passphrase")).is_err());
+    assert!(parse_openssh_private(&encrypted, None).is_err());
+}
+
+#[test]
+fn test_parse_with_right_passphrase_yields_the_same_key() {
+    let (encrypted, fingerprint) = passphrase_protected_ed25519("right-passphrase");
+    let (meta, _) =
+        parse_openssh_private(&encrypted, Some("right-passphrase")).expect("parse key");
+    assert_eq!(meta.fingerprint, fingerprint);
 }
 
 #[test]

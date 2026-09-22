@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
-use russh::keys::key::PublicKey;
-use russh::keys::PublicKeyBase64;
+use crate::keys::fingerprint;
+use russh::keys::{PublicKey, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -119,9 +119,9 @@ impl KnownHosts {
             return Ok(true);
         }
         let entry = KnownHostEntry {
-            key_type: key.name().to_string(),
+            key_type: key.algorithm().as_str().to_string(),
             key_base64: key.public_key_base64(),
-            fingerprint: key.fingerprint(),
+            fingerprint: fingerprint(key),
             removed: false,
         };
         self.commit(|known_hosts| {
@@ -134,9 +134,9 @@ impl KnownHosts {
     pub fn replace(&mut self, host: &str, port: u16, key: &PublicKey) -> Result<()> {
         let k = key_path(host, port);
         let entry = KnownHostEntry {
-            key_type: key.name().to_string(),
+            key_type: key.algorithm().as_str().to_string(),
             key_base64: key.public_key_base64(),
-            fingerprint: key.fingerprint(),
+            fingerprint: fingerprint(key),
             removed: false,
         };
         self.commit(|known_hosts| {
@@ -236,7 +236,7 @@ impl KnownHosts {
             Some(existing) => Err(CoreError::HostKeyMismatch {
                 host: k,
                 pinned: existing.fingerprint.clone(),
-                presented: key.fingerprint(),
+                presented: fingerprint(key),
             }),
         }
     }
@@ -264,9 +264,9 @@ impl KnownHosts {
         let entry = self.entries.get(k)?;
         Some(HostKeyChange {
             host: k.to_string(),
-            key_type: key.name().to_string(),
+            key_type: key.algorithm().as_str().to_string(),
             pinned_fingerprint: entry.fingerprint.clone(),
-            presented_fingerprint: key.fingerprint(),
+            presented_fingerprint: fingerprint(key),
         })
     }
 
@@ -326,17 +326,19 @@ fn key_path(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::KnownHosts;
+    use crate::keys::fingerprint;
     use crate::CoreError;
-    use russh::keys::key::{KeyPair, PublicKey};
-    use russh::keys::PublicKeyBase64;
+    use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
 
     const HOST: &str = "prod.example.com";
     const PORT: u16 = 22;
 
     fn server_key() -> PublicKey {
-        KeyPair::generate_ed25519()
-            .clone_public_key()
-            .expect("public key")
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
+        PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .expect("generate")
+            .public_key()
+            .clone()
     }
 
     fn empty_store(dir: &std::path::Path) -> KnownHosts {
@@ -373,14 +375,14 @@ mod tests {
                 presented: offered,
             } => {
                 assert_eq!(host, "prod.example.com:22");
-                assert_eq!(recorded, &pinned.fingerprint());
-                assert_eq!(offered, &presented.fingerprint());
+                assert_eq!(recorded, &fingerprint(&pinned));
+                assert_eq!(offered, &fingerprint(&presented));
             }
             other => panic!("unexpected error: {other}"),
         }
         let message = error.to_string();
-        assert!(message.contains(&pinned.fingerprint()), "{message}");
-        assert!(message.contains(&presented.fingerprint()), "{message}");
+        assert!(message.contains(&fingerprint(&pinned)), "{message}");
+        assert!(message.contains(&fingerprint(&presented)), "{message}");
     }
 
     #[test]
@@ -419,9 +421,9 @@ mod tests {
             &path,
             format!(
                 r#"{{"prod.example.com:22":{{"key_type":"{}","key_base64":"{}","fingerprint":"{}"}}}}"#,
-                pinned.name(),
+                pinned.algorithm().as_str(),
                 pinned.public_key_base64(),
-                pinned.fingerprint()
+                fingerprint(&pinned)
             ),
         )
         .expect("write known hosts");
@@ -443,16 +445,16 @@ mod tests {
 
         let changes = hosts.pending_changes();
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].pinned_fingerprint, pinned.fingerprint());
-        assert_eq!(changes[0].presented_fingerprint, presented.fingerprint());
+        assert_eq!(changes[0].pinned_fingerprint, fingerprint(&pinned));
+        assert_eq!(changes[0].presented_fingerprint, fingerprint(&presented));
 
         let error = hosts
-            .trust_presented_key(HOST, PORT, &pinned.fingerprint())
+            .trust_presented_key(HOST, PORT, &fingerprint(&pinned))
             .expect_err("a fingerprint the user never reviewed was accepted");
         assert!(error.to_string().contains("not the one that was reviewed"));
 
         hosts
-            .trust_presented_key(HOST, PORT, &presented.fingerprint())
+            .trust_presented_key(HOST, PORT, &fingerprint(&presented))
             .expect("trust reviewed key");
         assert!(hosts.verify(HOST, PORT, &presented).expect("verify"));
         assert!(hosts.pending_changes().is_empty());
@@ -482,7 +484,7 @@ mod tests {
         let removed = hosts.removed();
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].0, "prod.example.com:22");
-        assert_eq!(removed[0].2, key.fingerprint());
+        assert_eq!(removed[0].2, fingerprint(&key));
         assert!(hosts.list().is_empty());
     }
 
@@ -533,7 +535,7 @@ mod tests {
         let presented = server_key();
         hosts.verify(HOST, PORT, &pinned).expect("first use");
         hosts.hold_presented_key(HOST, PORT, &presented);
-        let shown = presented.fingerprint();
+        let shown = fingerprint(&presented);
 
         block_writes(&path);
         hosts

@@ -191,8 +191,7 @@ impl Vault {
     pub async fn initialize(&mut self, passphrase: &str) -> Result<VaultKey> {
         self.ensure_writable()?;
         let mut salt = [0u8; 16];
-        use ssh_key::rand_core::RngCore;
-        ssh_key::rand_core::OsRng.fill_bytes(&mut salt);
+        random_bytes(&mut salt)?;
         let key = derive_key_off_thread(passphrase, salt.to_vec()).await?;
         let payload = VaultPayload { keys: Vec::new() };
         self.seal_and_persist(&key, base64(salt), 1, Vec::new(), &payload)?;
@@ -482,12 +481,16 @@ fn push_length_prefixed(out: &mut Vec<u8>, field: &[u8]) {
     out.extend_from_slice(field);
 }
 
+/// Fills `buf` from the operating system's random source.
+fn random_bytes(buf: &mut [u8]) -> Result<()> {
+    getrandom::fill(buf).map_err(|e| CoreError::Vault(format!("random: {e}")))
+}
+
 fn seal(key: &VaultKey, aad: &[u8], plaintext: &[u8]) -> Result<([u8; NONCE_LEN], Vec<u8>)> {
     let cipher = Aes256Gcm::new_from_slice(&key[..])
         .map_err(|e| CoreError::Vault(format!("aes init: {e}")))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    use ssh_key::rand_core::RngCore;
-    ssh_key::rand_core::OsRng.fill_bytes(&mut nonce_bytes);
+    random_bytes(&mut nonce_bytes)?;
     let ciphertext = cipher
         .encrypt(
             &Nonce::from(nonce_bytes),
@@ -591,7 +594,7 @@ fn migrated_keys_meta(legacy: &[KeyMeta], payload: &VaultPayload) -> Result<Vec<
 #[cfg(test)]
 mod tests {
     use super::{
-        base64, derive_key, open_unbound, seal, unbase64, SecretText, Vault, VaultKey,
+        base64, derive_key, open_unbound, random_bytes, seal, unbase64, SecretText, Vault, VaultKey,
         VaultPayload, NONCE_LEN, VAULT_FORMAT_VERSION,
     };
     use crate::keys::KeyMeta;
@@ -637,8 +640,7 @@ mod tests {
         keys_meta: Vec<KeyMeta>,
     ) -> VaultKey {
         let mut salt = [0u8; 16];
-        use ssh_key::rand_core::RngCore;
-        ssh_key::rand_core::OsRng.fill_bytes(&mut salt);
+        random_bytes(&mut salt).expect("random salt");
         let key = derive_key(passphrase, &salt).expect("derive");
         let keys = keys.into_iter().map(|(id, k)| (id, SecretText(k))).collect();
         let plaintext = serde_json::to_vec(&VaultPayload { keys }).expect("serialize payload");

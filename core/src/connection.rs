@@ -4,8 +4,7 @@ use crate::known_hosts::KnownHosts;
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::{self, Config, Handle};
-use russh::keys::key;
-use russh::keys::decode_secret_key;
+use russh::keys::{decode_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -54,14 +53,28 @@ pub struct SshHandler {
     known_hosts: Arc<Mutex<KnownHosts>>,
 }
 
-#[async_trait::async_trait]
 impl client::Handler for SshHandler {
     type Error = CoreError;
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &key::PublicKey,
+        server_key: &PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
+        // The client does not advertise certificate host-key algorithms, so a
+        // conforming server only ever presents a plain key. A certificate would
+        // need a trusted authority to check it against, and there is none, so
+        // it is refused rather than pinned as if it were a bare key.
+        let server_public_key = match server_key {
+            PublicKeyOrCertificate::PublicKey { key, .. } => key,
+            PublicKeyOrCertificate::Certificate(_) => {
+                tracing::warn!(
+                    "{}:{} presented a host certificate; rejecting",
+                    self.host,
+                    self.port
+                );
+                return Ok(false);
+            }
+        };
         let mut kh = self.known_hosts.lock().await;
         if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, server_public_key) {
             // Hold the key so the user can accept this exact one after comparing
@@ -193,8 +206,23 @@ pub async fn connect(
                     .map_err(|e| CoreError::Key(format!("utf8: {e}")))?;
                 let pair = decode_secret_key(&pem_str, None)
                     .map_err(|e| CoreError::Key(format!("decode: {e}")))?;
+                // RSA signs with whichever SHA-2 hash the server lists in
+                // `server-sig-algs`. A server that sends no extension info gets
+                // rsa-sha2-512; the hash is ignored for every other key type.
+                let hash_alg = if pair.algorithm().is_rsa() {
+                    session
+                        .best_supported_rsa_hash()
+                        .await
+                        .map_err(|e| CoreError::Ssh(format!("auth: {e}")))?
+                        .unwrap_or(Some(HashAlg::Sha512))
+                } else {
+                    None
+                };
                 session
-                    .authenticate_publickey(username, Arc::new(pair))
+                    .authenticate_publickey(
+                        username,
+                        PrivateKeyWithHashAlg::new(Arc::new(pair), hash_alg),
+                    )
                     .await
             }
         };
@@ -203,7 +231,7 @@ pub async fn connect(
     .await
     .map_err(|_| timed_out("auth", &addr))??;
 
-    if !auth_ok {
+    if !auth_ok.success() {
         return Err(CoreError::Ssh("authentication rejected by server".into()));
     }
     Ok(session)

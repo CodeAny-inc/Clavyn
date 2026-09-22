@@ -1660,7 +1660,8 @@ mod connect_lock_tests {
 mod known_host_confirmation_tests {
     use super::{forget_confirmed, replace_confirmed};
     use clavyn_core::known_hosts::KnownHosts;
-    use russh::keys::key::{KeyPair, PublicKey};
+    use clavyn_core::keys::{fingerprint, generate_ed25519};
+    use russh::keys::{parse_public_key_base64, PublicKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -1671,9 +1672,8 @@ mod known_host_confirmation_tests {
     const DECLINED: &str = "Forget host key: cancelled";
 
     fn server_key() -> PublicKey {
-        KeyPair::generate_ed25519()
-            .clone_public_key()
-            .expect("public key")
+        let (_, public_base64) = generate_ed25519().expect("generate");
+        parse_public_key_base64(&public_base64).expect("public key")
     }
 
     fn store(dir: &std::path::Path) -> Mutex<KnownHosts> {
@@ -1701,7 +1701,7 @@ mod known_host_confirmation_tests {
         let kh = store.lock().await;
         assert_eq!(
             kh.retained_fingerprint(HOST, PORT),
-            Some(pinned.fingerprint()),
+            Some(fingerprint(&pinned)),
             "the retained key did not survive the refusal"
         );
         // Still remembered, so a different key is reported as a change rather
@@ -1724,7 +1724,7 @@ mod known_host_confirmation_tests {
         .await
         .expect("forget");
 
-        assert_eq!(shown.into_inner(), pinned.fingerprint());
+        assert_eq!(shown.into_inner(), fingerprint(&pinned));
         assert_eq!(store.lock().await.retained_fingerprint(HOST, PORT), None);
     }
 
@@ -1749,7 +1749,7 @@ mod known_host_confirmation_tests {
         assert!(error.contains("changed while the confirmation was open"));
         assert_eq!(
             store.lock().await.retained_fingerprint(HOST, PORT),
-            Some(replacement.fingerprint())
+            Some(fingerprint(&replacement))
         );
     }
 
@@ -1784,7 +1784,7 @@ mod known_host_confirmation_tests {
             kh.hold_presented_key(HOST, PORT, &presented);
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             Err("Host key changed: cancelled".to_string())
         })
         .await
@@ -1812,7 +1812,7 @@ mod known_host_confirmation_tests {
         }
 
         let shown = std::cell::RefCell::new(None);
-        replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |change| {
+        replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |change| {
             *shown.borrow_mut() = Some(change);
             async { Ok(()) }
         })
@@ -1821,8 +1821,8 @@ mod known_host_confirmation_tests {
 
         let change = shown.into_inner().expect("nothing was confirmed");
         assert_eq!(change.host, "prod.example.com:22");
-        assert_eq!(change.pinned_fingerprint, pinned.fingerprint());
-        assert_eq!(change.presented_fingerprint, presented.fingerprint());
+        assert_eq!(change.pinned_fingerprint, fingerprint(&pinned));
+        assert_eq!(change.presented_fingerprint, fingerprint(&presented));
         assert!(store
             .lock()
             .await
@@ -1841,7 +1841,7 @@ mod known_host_confirmation_tests {
             kh.hold_presented_key(HOST, PORT, &server_key());
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &server_key().fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&server_key()), |_| async {
             panic!("a key that is not going to be pinned should never be asked about");
         })
         .await
@@ -1862,7 +1862,7 @@ mod known_host_confirmation_tests {
         }
         let repinned = server_key();
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             // The host is pinned to a third key while the user is still
             // comparing the two the dialog printed.
             store
@@ -1897,7 +1897,7 @@ mod known_host_confirmation_tests {
             kh.hold_presented_key(HOST, PORT, &presented);
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             store.lock().await.remove(HOST, PORT).expect("remove");
             Ok(())
         })
@@ -1985,7 +1985,7 @@ mod known_host_confirmation_tests {
             .verify(HOST, PORT, &pinned)
             .expect("first use");
 
-        let fingerprint = presented.fingerprint();
+        let fingerprint = fingerprint(&presented);
         let asked = Arc::new(AtomicUsize::new(0));
         let mut burst = JoinSet::new();
         for i in 0..400 {
