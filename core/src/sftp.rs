@@ -85,8 +85,19 @@ impl SftpManager {
         let handle = Arc::new(Mutex::new(handle));
 
         let conn = SftpConnection { handle, sftp };
-        self.sessions.lock().await.insert(session_id, conn);
-        Ok(())
+        // The check at the top ran before a connect that takes seconds, so a
+        // second connect on the same id may have finished in the meantime. The
+        // session already published keeps the id; this one is dropped rather
+        // than silently replacing it.
+        match self.sessions.lock().await.entry(session_id) {
+            std::collections::hash_map::Entry::Occupied(_) => Err(CoreError::InvalidInput(
+                "session id is already in use by an SFTP session".into(),
+            )),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(conn);
+                Ok(())
+            }
+        }
     }
 
     /// List directory entries at the given path.
