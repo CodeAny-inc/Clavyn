@@ -554,13 +554,27 @@ pub async fn connect_ssh(
     };
     let known_hosts = state.known_hosts.clone();
 
+    // Claim the id before the output sink is registered: registering on an id
+    // another session holds would hand that session's output to this caller.
+    // The local map is checked and the SSH id claimed under the local-terminal
+    // lock, the lock `create_local_terminal` holds for its own check, so the
+    // two cannot both take one id. The claim is released on every failure
+    // below by being dropped.
+    let claim = {
+        let locals = state.local_terminals.lock().await;
+        if locals.contains(&session_id) {
+            return Err("session id is already in use by a local terminal".into());
+        }
+        state.sessions.claim(&session_id).map_err(err)?
+    };
+
     // Register the sink before the session can produce output, so the first
     // bytes of the shell banner are never dropped.
     state.register_output(session_id.clone(), on_output);
     let started = state
         .sessions
         .create_ssh_session(
-            session_id.clone(),
+            claim,
             &host,
             identity.as_ref(),
             known_hosts,
@@ -592,20 +606,20 @@ const MAX_LOCAL_TERMINALS: usize = 16;
 /// keep going to SSH while the new PTY's output is rendered in the SSH pane.
 /// Refuse the collision here instead of resolving it arbitrarily.
 ///
-/// This guards local-terminal creation only. `connect_ssh` performs no such
-/// check and `SessionManager::create_ssh_session` inserts unconditionally, so
-/// an SSH session can still be opened on an id a local terminal already holds,
-/// or on top of another SSH session. Uniqueness is therefore a property of this
-/// entry point, not an invariant of session ids in general.
+/// `ssh_claimed` is whether an SSH session holds the id, connected or still
+/// connecting. The caller reads it while holding the local-terminal lock, the
+/// same lock `connect_ssh` holds while it checks the local map and claims an
+/// SSH id, so the two kinds of session cannot claim one id between each
+/// other's check and claim.
 fn admit_local_terminal(
     session_id: &str,
     locals: &LocalTerminals,
-    ssh_session_ids: &[String],
+    ssh_claimed: bool,
 ) -> ApiResult<()> {
     if locals.contains(session_id) {
         return Err("session id is already in use by a local terminal".into());
     }
-    if ssh_session_ids.iter().any(|id| id == session_id) {
+    if ssh_claimed {
         return Err("session id is already in use by an SSH session".into());
     }
     if locals.len() >= MAX_LOCAL_TERMINALS {
@@ -640,13 +654,6 @@ pub async fn create_local_terminal(
     let rows = pty_dimension("rows", rows.unwrap_or(24))?;
     let cols = pty_dimension("cols", cols.unwrap_or(80))?;
 
-    // `SessionManager::list` takes and releases its own lock and returns a copy,
-    // so this snapshot is stale by the time the local map is locked: the guard
-    // below covers the local map and the cap, not the SSH half of the check.
-    // Taking it first is deliberate — every site that touches both maps drops
-    // the `sessions` guard before taking `local_terminals`, and nesting them
-    // here would be the only place with the opposite order.
-    let ssh_session_ids = state.sessions.list().await;
     let (dead, admission) = {
         let mut locals = state.local_terminals.lock().await;
         // An entry outlives its shell: nothing removes it before `close_session`
@@ -661,7 +668,8 @@ pub async fn create_local_terminal(
         // processes already existed. The reservation carries a token so a close
         // that drops it — and a re-open that claims the id again — cannot be
         // answered by this request's later `fulfil` or `release`.
-        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids)
+        let ssh_claimed = state.sessions.is_claimed(&session_id);
+        let admission = admit_local_terminal(&session_id, &locals, ssh_claimed)
             .map(|()| locals.reserve(session_id.clone()));
         (dead, admission)
     };
@@ -724,10 +732,8 @@ pub async fn create_local_terminal(
     // A close in the meantime drops this request's reservation — possibly for
     // a newer open on the same id — and `fulfil` matches the token, not the id
     // alone, so a superseded request can neither install its terminal nor free
-    // the newer request's slot. Only the SSH half of the check needs
-    // re-checking, because `connect_ssh` never consults the local map and so
-    // cannot be held off by a reservation.
-    let ssh_session_ids = state.sessions.list().await;
+    // the newer request's slot. SSH cannot have taken the id meanwhile:
+    // `connect_ssh` refuses any id the local map holds, reservations included.
     let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let terminal = LocalTerminal {
         writer,
@@ -737,23 +743,14 @@ pub async fn create_local_terminal(
     };
     let refused = {
         let mut locals = state.local_terminals.lock().await;
-        if ssh_session_ids.iter().any(|id| id == &session_id) {
-            locals.release(&session_id, reservation);
-            Some((
-                "session id is already in use by an SSH session".to_string(),
-                terminal,
-            ))
-        } else {
-            // A reservation that is no longer this request's means the session
-            // was closed while its shell was starting, so this terminal is not
-            // wanted.
-            match locals.fulfil(&session_id, reservation, terminal) {
-                Ok(()) => None,
-                Err(unwanted) => Some((
-                    "session was closed while the terminal was starting".to_string(),
-                    unwanted,
-                )),
-            }
+        // A reservation that is no longer this request's means the session was
+        // closed while its shell was starting, so this terminal is not wanted.
+        match locals.fulfil(&session_id, reservation, terminal) {
+            Ok(()) => None,
+            Err(unwanted) => Some((
+                "session was closed while the terminal was starting".to_string(),
+                unwanted,
+            )),
         }
     };
     if let Some((error, _refused)) = refused {
@@ -1324,34 +1321,32 @@ mod admit_local_terminal_tests {
 
     #[test]
     fn accepts_a_fresh_id_while_slots_remain() {
-        assert!(admit_local_terminal("fresh", &opening(1), &["ssh-a".to_string()]).is_ok());
+        assert!(admit_local_terminal("fresh", &opening(1), false).is_ok());
     }
 
     #[test]
     fn rejects_an_id_already_held_by_a_local_terminal() {
-        let error = admit_local_terminal("local-0", &opening(2), &[]).unwrap_err();
+        let error = admit_local_terminal("local-0", &opening(2), false).unwrap_err();
         assert!(error.contains("local terminal"), "{error}");
     }
 
     #[test]
     fn rejects_an_id_already_held_by_an_ssh_session() {
-        let error =
-            admit_local_terminal("ssh-a", &LocalTerminals::default(), &["ssh-a".to_string()])
-                .unwrap_err();
+        let error = admit_local_terminal("ssh-a", &LocalTerminals::default(), true).unwrap_err();
         assert!(error.contains("SSH session"), "{error}");
     }
 
     #[test]
     fn rejects_a_fresh_id_once_the_concurrent_limit_is_reached() {
-        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), &[]).is_ok());
-        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), false).is_ok());
+        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), false).unwrap_err();
         assert!(error.contains("too many local terminals"), "{error}");
     }
 
     #[test]
     fn reports_the_collision_rather_than_the_limit_when_both_apply() {
         let error =
-            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), false).unwrap_err();
         assert!(error.contains("local terminal"), "{error}");
     }
 
@@ -1366,7 +1361,7 @@ mod admit_local_terminal_tests {
         let mut admitted = 0;
         for i in 0..MAX_LOCAL_TERMINALS * 2 {
             let id = format!("burst-{i}");
-            if admit_local_terminal(&id, &locals, &[]).is_ok() {
+            if admit_local_terminal(&id, &locals, false).is_ok() {
                 locals.reserve(id);
                 admitted += 1;
             }
@@ -1381,10 +1376,10 @@ mod admit_local_terminal_tests {
     fn releasing_a_reservation_returns_its_slot() {
         let mut locals = opening(MAX_LOCAL_TERMINALS - 1);
         let reservation = locals.reserve("release-me".to_string());
-        assert!(admit_local_terminal("fresh", &locals, &[]).is_err());
+        assert!(admit_local_terminal("fresh", &locals, false).is_err());
         locals.release("release-me", reservation);
-        assert!(admit_local_terminal("fresh", &locals, &[]).is_ok());
-        assert!(admit_local_terminal("release-me", &locals, &[]).is_ok());
+        assert!(admit_local_terminal("fresh", &locals, false).is_ok());
+        assert!(admit_local_terminal("release-me", &locals, false).is_ok());
     }
 
     /// A superseded request must not free the slot a newer request claimed for
@@ -1748,6 +1743,43 @@ mod connect_lock_tests {
         let (host, resolved) = saved_host(&state, direct.id).await.expect("direct host");
         assert_eq!(host.hostname, "direct.example.test");
         assert!(resolved.is_none());
+    }
+
+    /// An SSH connect on an id a local terminal or another SSH session holds is
+    /// refused before it can register an output sink on that id, and the
+    /// refusal leaves the other session's claim in place.
+    #[tokio::test]
+    async fn a_connect_on_a_held_id_is_refused() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        state.local_terminals.lock().await.reserve("local".to_string());
+        let held = state.sessions.claim("ssh").expect("claim");
+        let host = Host::new("fixture", "must-not-connect.example.test", 22, "deploy");
+        let host_id = host.id;
+        state.store.lock().await.add_host(host).expect("save host");
+        app.manage(state);
+
+        for id in ["local", "ssh"] {
+            let error = connect_ssh(
+                app.state(),
+                id.to_string(),
+                host_id,
+                None,
+                None,
+                None,
+                None,
+                tauri::ipc::Channel::new(|_| Ok(())),
+            )
+            .await
+            .expect_err("a held id must be refused");
+            assert!(error.contains("already in use"), "{id}: {error}");
+        }
+
+        let state = app.state::<Arc<AppState>>();
+        assert!(state.sessions.is_claimed("ssh"));
+        drop(held);
+        assert!(!state.sessions.is_claimed("ssh"));
     }
 }
 
