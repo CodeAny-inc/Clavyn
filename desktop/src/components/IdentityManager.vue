@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from "vue";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
+import { useVaultStore } from "../stores/vault";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
 import Input from "./ui/Input.vue";
@@ -31,6 +32,7 @@ import type { Identity, AuthMethod } from "../types";
 const identities = useIdentitiesStore();
 const hosts = useHostsStore();
 const keys = useKeysStore();
+const vault = useVaultStore();
 
 const showForm = ref(false);
 const editing = ref<Identity | null>(null);
@@ -57,7 +59,6 @@ const form = ref({
 
 onMounted(() => {
   identities.load();
-  keys.load();
   hosts.load();
 });
 
@@ -465,7 +466,10 @@ function hostsUsingIdentity(identityId: string): number {
                 {{ key.label }} ({{ key.key_type }})
               </option>
             </Select>
-            <p v-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
+            <p v-if="!vault.unlocked" class="text-[11px] text-muted-foreground mt-1">
+              Unlock the vault to choose a key.
+            </p>
+            <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
               No keys available. Use Generate or Import to create one.
             </p>
           </FormGroup>

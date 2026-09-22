@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, onUnmounted, watch } from "vue";
 import { useKeysStore } from "../stores/keys";
 import { useVaultStore } from "../stores/vault";
+import { useUiStore } from "../stores/ui";
 import Button from "./ui/Button.vue";
 import Dialog from "./ui/Dialog.vue";
 import Input from "./ui/Input.vue";
@@ -19,12 +20,14 @@ import {
   EyeOff,
   FolderOpen,
   Loader2,
+  Lock,
 } from "lucide-vue-next";
 import * as api from "../api";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
 const vault = useVaultStore();
+const ui = useUiStore();
 
 const showAdd = ref(false);
 const showPublic = ref<string | null>(null);
@@ -36,10 +39,6 @@ const addForm = ref({
   import: false,
   privateKey: "",
   passphrase: "",
-});
-
-onMounted(() => {
-  keys.load();
 });
 
 // The dialog's contents are destroyed by `v-if`, but `addForm` is not: a
@@ -135,6 +134,9 @@ async function deleteKey(key: KeyMeta) {
 }
 
 async function copyPublicKey(key: KeyMeta) {
+  // A public key is copied to be pasted into a server's authorized_keys, so it
+  // must be one the vault has authenticated, which needs it unlocked.
+  if (!vault.unlocked) return;
   try {
     await navigator.clipboard.writeText(key.public_key_base64);
     copiedId.value = key.id;
@@ -175,7 +177,21 @@ async function browseForKeyFile() {
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
-      <div v-if="keys.keys.length" class="flex flex-col gap-1.5">
+      <!-- Key metadata is only authenticated by decrypting the vault, so it is
+           not shown until the vault is unlocked. An empty list here would read
+           as lost keys next to the reset button. -->
+      <div v-if="!vault.unlocked" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-locked">
+        <Lock class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">Vault locked</p>
+          <p class="text-[12px] text-muted-foreground mt-1">Unlock the vault to view and copy your keys</p>
+        </div>
+        <Button size="sm" @click="ui.requestVaultUnlock()">
+          <Lock class="size-3.5" :stroke-width="1.75" />
+          Unlock
+        </Button>
+      </div>
+      <div v-else-if="keys.keys.length" class="flex flex-col gap-1.5">
         <div
           v-for="key in keys.keys"
           :key="key.id"

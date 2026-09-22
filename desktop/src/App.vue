@@ -2,7 +2,6 @@
 import { ref, toRef, onMounted, onUnmounted, watch, defineAsyncComponent } from "vue";
 import { useVaultStore } from "./stores/vault";
 import { useHostsStore } from "./stores/hosts";
-import { useKeysStore } from "./stores/keys";
 import { useIdentitiesStore } from "./stores/identities";
 import { useWorkspacesStore } from "./stores/workspaces";
 import { useTabsStore } from "./stores/tabs";
@@ -33,7 +32,6 @@ const UpdateModal = defineAsyncComponent(() => import("./components/UpdateModal.
 
 const vault = useVaultStore();
 const hosts = useHostsStore();
-const keys = useKeysStore();
 const identities = useIdentitiesStore();
 const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
@@ -76,7 +74,6 @@ onMounted(async () => {
   await Promise.all([
     vault.checkStatus(),
     hosts.load(),
-    keys.load(),
     identities.load(),
     workspaces.load(),
     update.registerListeners(),
