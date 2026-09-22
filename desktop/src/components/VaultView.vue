@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
-import { useVaultStore } from "../stores/vault";
+import { useVaultStore, vaultRollbackMessage } from "../stores/vault";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
 import VaultResetForm from "./VaultResetForm.vue";
+import VaultRollbackNotice from "./VaultRollbackNotice.vue";
 import {
   Vault as VaultIcon,
   Lock,
@@ -33,6 +34,7 @@ const resetLoading = ref(false);
 const resetError = ref("");
 
 const displayRuntimeError = computed(() => error.value || vault.error || "");
+const rollbackMessage = computed(() => vaultRollbackMessage(displayRuntimeError.value));
 
 function clearSensitiveFormState() {
   passphrase.value = "";
@@ -86,12 +88,12 @@ async function setup() {
   }
 }
 
-async function unlock() {
+async function unlock(acceptOlder = false) {
   if (!passphrase.value || unlockLoading.value !== null) return;
   error.value = "";
   unlockLoading.value = "password";
   try {
-    await vault.unlock(passphrase.value);
+    await vault.unlock(passphrase.value, acceptOlder);
     passphrase.value = "";
   } catch (e: any) {
     error.value = String(e);
@@ -289,11 +291,13 @@ const showBiometricButton = computed(
                 type="password"
                 placeholder="Enter master passphrase"
                 :disabled="unlockLoading !== null"
-                @keydown.enter="unlock"
+                @keydown.enter="unlock()"
               />
             </FormGroup>
-            <p v-if="displayRuntimeError" class="text-[12px] text-destructive">{{ displayRuntimeError }}</p>
-            <Button :disabled="unlockLoading !== null || !passphrase" @click="unlock">
+            <VaultRollbackNotice v-if="rollbackMessage" :message="rollbackMessage"
+              :disabled="unlockLoading !== null || !passphrase" @open="unlock(true)" />
+            <p v-else-if="displayRuntimeError" class="text-[12px] text-destructive">{{ displayRuntimeError }}</p>
+            <Button :disabled="unlockLoading !== null || !passphrase" @click="unlock()">
               <Loader2
                 v-if="unlockLoading === 'password'"
                 class="size-3.5 mr-1 animate-spin"

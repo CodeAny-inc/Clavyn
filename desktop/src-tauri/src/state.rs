@@ -212,6 +212,8 @@ pub struct AppState {
     pub output_sinks: OutputSinks,
     pub local_terminals: Mutex<LocalTerminals>,
     pub app_data_dir: PathBuf,
+    /// Highest vault epoch seen per vault generation; see `vault_epoch`.
+    pub epoch_store: Arc<dyn crate::vault_epoch::EpochStore>,
 }
 
 /// Live local terminals and the ids currently being opened.
@@ -426,7 +428,15 @@ impl AppState {
             output_sinks,
             local_terminals: Mutex::new(LocalTerminals::default()),
             app_data_dir: app_data,
+            epoch_store: crate::vault_epoch::default_store(),
         }))
+    }
+
+    /// Record the epoch `vault` is now at, after it was saved or opened.
+    pub fn record_vault_epoch(&self, vault: &Vault) {
+        if let Some(binding_id) = vault.binding_id() {
+            crate::vault_epoch::record(&*self.epoch_store, binding_id, vault.epoch());
+        }
     }
 
     /// A held guard on the vault together with the master key for its current

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, onUnmounted } from "vue";
-import { useVaultStore } from "../stores/vault";
+import { computed, ref, watch, nextTick, onUnmounted } from "vue";
+import { useVaultStore, vaultRollbackMessage } from "../stores/vault";
+import VaultRollbackNotice from "./VaultRollbackNotice.vue";
 import { useUiStore } from "../stores/ui";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -14,6 +15,7 @@ const ui = useUiStore();
 const passphrase = ref("");
 const error = ref("");
 const loading = ref<"password" | "biometric" | null>(null);
+const rollback = computed(() => vaultRollbackMessage(error.value));
 
 function clearPassphrase() {
   passphrase.value = "";
@@ -56,12 +58,12 @@ watch(
   },
 );
 
-async function submit() {
+async function submit(acceptOlder = false) {
   if (!passphrase.value || loading.value !== null) return;
   error.value = "";
   loading.value = "password";
   try {
-    await vault.unlock(passphrase.value);
+    await vault.unlock(passphrase.value, acceptOlder);
     clearPassphrase();
     ui.resolveVaultUnlock(true);
   } catch (e) {
@@ -148,12 +150,14 @@ function cancel() {
             type="password"
             placeholder="Enter master passphrase"
             :disabled="loading !== null"
-            @keydown.enter="submit"
+            @keydown.enter="submit()"
             @keydown.escape="cancel"
           />
         </FormGroup>
 
-        <p v-if="error" class="text-[12px] text-destructive flex items-center gap-1.5 mt-2">
+        <VaultRollbackNotice v-if="rollback" class="mt-2" :message="rollback"
+          :disabled="loading !== null || !passphrase" @open="submit(true)" />
+        <p v-else-if="error" class="text-[12px] text-destructive flex items-center gap-1.5 mt-2">
           <AlertCircle class="size-3.5" :stroke-width="1.75" />
           {{ error }}
         </p>
@@ -162,7 +166,7 @@ function cancel() {
           <Button variant="ghost" size="sm" :disabled="loading !== null" @click="cancel">
             Cancel
           </Button>
-          <Button size="sm" :disabled="loading !== null || !passphrase" @click="submit">
+          <Button size="sm" :disabled="loading !== null || !passphrase" @click="submit()">
             <Loader2
               v-if="loading === 'password'"
               class="size-3.5 mr-1 animate-spin"
