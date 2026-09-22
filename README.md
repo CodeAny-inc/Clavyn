@@ -85,6 +85,27 @@ This is temporary. Proper code signing and notarization are planned for a
 future release, after which these warnings will disappear. No worries — for
 now just tell your OS it's fine to open Clavyn. :)
 
+## Verifying a download
+
+Every release publishes a `SHA256SUMS` file listing the SHA-256 checksum of
+each asset. Download it next to the installer and check:
+
+```sh
+# Linux
+sha256sum -c --ignore-missing SHA256SUMS
+# macOS
+shasum -a 256 -c --ignore-missing SHA256SUMS
+```
+
+```powershell
+# Windows: compare the output with the line for this file in SHA256SUMS
+Get-FileHash .\Clavyn_<version>_x64-setup.exe -Algorithm SHA256
+```
+
+A match shows the file is the one the release published, unmodified in
+transit or by a mirror. It does not show who published the release; that is
+what OS code signing adds.
+
 ## Security model (summary)
 
 | Asset                | At rest                         | In memory                |
