@@ -44,8 +44,8 @@ async fn existing_vault_unlocks_and_its_keys_still_match_their_metadata() {
         let stored = vault
             .get_key_with(&key, &meta.id.to_string())
             .expect("read stored key");
-        let openssh = String::from_utf8(stored).expect("stored key is text");
-        let (parsed, _) = parse_openssh_private(&openssh, None)
+        let openssh = std::str::from_utf8(&stored).expect("stored key is text");
+        let (parsed, _) = parse_openssh_private(openssh, None)
             .unwrap_or_else(|e| panic!("{} no longer parses: {e}", meta.label));
         // Fingerprints and public keys stored by earlier builds are what users
         // compare against servers, so they must come out byte-identical.

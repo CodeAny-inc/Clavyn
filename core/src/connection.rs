@@ -202,7 +202,9 @@ pub async fn connect(
                     CoreError::InvalidInput("vault required for key auth".into())
                 })?;
                 let private_pem = vault.get_key(passphrase, &key_id.to_string()).await?;
-                let pem_str = String::from_utf8(private_pem)
+                // Borrowed from the wiped buffer rather than copied into a
+                // `String` nothing would wipe.
+                let pem_str = std::str::from_utf8(&private_pem)
                     .map_err(|e| CoreError::Key(format!("utf8: {e}")))?;
                 let pair = decode_secret_key(&pem_str, None)
                     .map_err(|e| CoreError::Key(format!("decode: {e}")))?;

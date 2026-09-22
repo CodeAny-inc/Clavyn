@@ -280,7 +280,7 @@ async fn test_vault_add_and_get_key() {
         .get_key("passphrase", &key_id.to_string())
         .await
         .expect("get key");
-    let retrieved_str = String::from_utf8(retrieved).unwrap();
+    let retrieved_str = String::from_utf8(retrieved.to_vec()).unwrap();
     assert!(retrieved_str.contains("BEGIN OPENSSH PRIVATE KEY"));
 }
 
@@ -354,7 +354,7 @@ async fn test_vault_persistence() {
         .get_key("passphrase", &key_id.to_string())
         .await
         .expect("get key");
-    assert!(String::from_utf8(retrieved).unwrap().contains("OPENSSH PRIVATE KEY"));
+    assert!(String::from_utf8(retrieved.to_vec()).unwrap().contains("OPENSSH PRIVATE KEY"));
 }
 
 // ============================================================

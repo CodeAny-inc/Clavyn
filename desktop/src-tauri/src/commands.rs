@@ -2,7 +2,7 @@ use crate::host_key_prompt;
 use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
-use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
+use clavyn_core::keys::{generate_ed25519, parse_openssh_private, unprotected_private_key, KeyMeta};
 use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
 use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
@@ -152,13 +152,18 @@ pub async fn import_key(
     openssh_private: String,
     key_passphrase: Option<String>,
 ) -> ApiResult<KeyMeta> {
-    let (mut meta, _pair) =
-        parse_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
+    // Both arrive as plain strings from IPC; wrapping them here wipes them on
+    // every exit from this command.
+    let openssh_private = zeroize::Zeroizing::new(openssh_private);
+    let key_passphrase = key_passphrase.map(zeroize::Zeroizing::new);
+    let key_passphrase = key_passphrase.as_ref().map(|p| p.as_str());
+    let (mut meta, _pair) = parse_openssh_private(&openssh_private, key_passphrase).map_err(err)?;
     meta.label = label;
+    // The vault is what protects stored keys, and connecting reads a stored key
+    // without a passphrase, so a key's own passphrase is removed before storing.
+    let stored = unprotected_private_key(&openssh_private, key_passphrase).map_err(err)?;
     let (key, mut vault) = state.unlocked_vault().await?;
-    vault
-        .add_key(&key, meta.clone(), &openssh_private)
-        .map_err(err)?;
+    vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
     Ok(meta)
 }
 
@@ -1648,6 +1653,50 @@ mod connect_lock_tests {
                 panic!("the silent peer unexpectedly finished a connection: {connected:?}");
             }
         }
+    }
+
+    /// A key imported with its own passphrase can be used afterwards: the
+    /// connect path reads stored keys without a passphrase.
+    #[tokio::test]
+    async fn a_passphrase_protected_key_imports_in_a_usable_form() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master.clone(),
+                    binding_id,
+                ),
+            )
+            .await;
+        app.manage(state);
+
+        let (plain, _) = generate_ed25519().expect("generate");
+        let (_, pair) = parse_openssh_private(&plain, None).expect("parse");
+        let mut protected = Vec::new();
+        russh::keys::encode_pkcs8_pem_encrypted(&pair, b"key passphrase", 16, &mut protected)
+            .expect("encrypt");
+        let protected = String::from_utf8(protected).expect("utf8");
+        let meta = import_key(app.state(), "protected".into(), protected, Some("key passphrase".into()))
+            .await
+            .expect("import");
+
+        let state = app.state::<Arc<AppState>>();
+        let vault = state.vault.lock().await;
+        let stored = vault.get_key_with(&master, &meta.id.to_string()).expect("stored key");
+        let stored = std::str::from_utf8(&stored).expect("utf8");
+        let (stored_meta, _) = parse_openssh_private(stored, None).expect("usable without passphrase");
+        assert_eq!(stored_meta.fingerprint, meta.fingerprint);
     }
 }
 
