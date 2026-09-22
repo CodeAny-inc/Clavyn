@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_data_migration;
 mod biometric;
 mod biometric_commands;
 mod commands;
@@ -104,10 +105,12 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .expect("no app data dir");
+            // State lives in the non-roaming directory, so a roaming profile
+            // never copies the vault to a file server; files an earlier build
+            // left in the roaming one are moved across first.
+            let roaming = app.path().app_data_dir().expect("no app data dir");
+            let local = app.path().app_local_data_dir().expect("no local app data dir");
+            let app_data = app_data_migration::settle_state_dir(&roaming, &local);
             // A state file that cannot be loaded still gets a window: the
             // frontend asks `startup_failure` first and shows what failed
             // instead of the app. Returning the error here would end the process
