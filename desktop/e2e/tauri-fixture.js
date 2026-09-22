@@ -75,6 +75,7 @@
         const id = ++sequence; listeners.set(id, args); return id;
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
+      if (command === "startup_failure") return null;
       // Keep the exact objects served, including any edits a scenario makes to
       // them, so connects can resolve a host by id the way the backend does.
       if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
