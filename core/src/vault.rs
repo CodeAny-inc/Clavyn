@@ -33,9 +33,12 @@ const AAD_DOMAIN: &[u8] = b"clavyn.vault.header";
 ///   { "version": 1, "salt": "<b64>", "nonce": "<b64>", "epoch": <n>,
 ///     "keys_meta": [...], "ciphertext": "<b64>" }
 ///
-/// The master key is derived from a user passphrase via Argon2id. The OS
-/// keychain stores the passphrase (set by the UI layer), never the derived key.
-/// Plaintext private keys only ever exist in memory and are zeroized on drop.
+/// The master key is derived from a user passphrase via Argon2id. The
+/// passphrase is not stored by default: it is typed at each unlock and held in
+/// memory only while the vault is unlocked. A macOS build with Touch ID unlock
+/// keeps it in the Data Protection Keychain; nothing ever stores the derived
+/// key. Plaintext private keys only ever exist in memory and are zeroized on
+/// drop.
 ///
 /// `keys_meta` sits in the header rather than inside the ciphertext because the
 /// key list is rendered while the vault is locked, where no master key exists to
@@ -274,14 +277,13 @@ impl Vault {
     }
 
     /// Decrypt and return a single key's private material as raw OpenSSH PEM
-    /// bytes. The returned `Vec<u8>` does not wipe itself on drop: the caller
-    /// owns zeroizing it, and anything it is copied into, once the key material
-    /// is no longer needed.
+    /// bytes, wiped when dropped. Anything the caller copies it into is the
+    /// caller's to wipe.
     ///
     /// A snapshot taken from an unlocked vault already carries the master key
     /// and answers from a single AES-GCM decrypt; otherwise the key is derived
     /// from `passphrase`, which costs a full Argon2id pass.
-    pub async fn get_key(&self, passphrase: &str, key_id: &str) -> Result<Vec<u8>> {
+    pub async fn get_key(&self, passphrase: &str, key_id: &str) -> Result<Zeroizing<Vec<u8>>> {
         let key = match &self.session_key {
             Some(key) => key.clone(),
             None => self.derive_key(passphrase).await?,
@@ -289,9 +291,9 @@ impl Vault {
         self.get_key_with(&key, key_id)
     }
 
-    /// Decrypt a single key's private material with an already-derived key.
-    /// The returned bytes carry the same caller obligation as [`Vault::get_key`].
-    pub fn get_key_with(&self, key: &VaultKey, key_id: &str) -> Result<Vec<u8>> {
+    /// Decrypt a single key's private material with an already-derived key,
+    /// wiped when dropped like [`Vault::get_key`]'s.
+    pub fn get_key_with(&self, key: &VaultKey, key_id: &str) -> Result<Zeroizing<Vec<u8>>> {
         let plaintext = self.decrypt(key)?;
         let payload: VaultPayload = serde_json::from_slice(&plaintext)?;
         drop(plaintext);
@@ -300,8 +302,9 @@ impl Vault {
             .into_iter()
             .find(|(id, _)| id == key_id)
             // Copied out rather than moved out: `k` stays owned here so it is
-            // wiped when this scope ends. The copy is the caller's to zeroize.
-            .map(|(_, k)| k.0.as_bytes().to_vec())
+            // wiped when this scope ends, and the copy is wiped when the caller
+            // drops it.
+            .map(|(_, k)| Zeroizing::new(k.0.as_bytes().to_vec()))
             .ok_or_else(|| CoreError::Vault(format!("key {key_id} not found")))
     }
 
@@ -619,7 +622,7 @@ mod tests {
     fn a_key() -> (KeyMeta, String) {
         let (private_pem, _) = crate::keys::generate_ed25519().expect("generate");
         let (meta, _) = crate::keys::parse_openssh_private(&private_pem, None).expect("parse");
-        (meta, private_pem)
+        (meta, private_pem.to_string())
     }
 
     fn read_json(path: &Path) -> serde_json::Value {
@@ -749,13 +752,13 @@ mod tests {
             .await
             .expect("unlock");
         assert_eq!(
-            reopened.get_key_with(&reopened_key, &first_id).expect("first"),
+            reopened.get_key_with(&reopened_key, &first_id).expect("first").as_slice(),
             first_private.as_bytes()
         );
         assert_eq!(
             reopened
                 .get_key_with(&reopened_key, &second_id)
-                .expect("second"),
+                .expect("second").as_slice(),
             second_private.as_bytes()
         );
         let meta = reopened.keys_meta();
@@ -955,7 +958,7 @@ mod tests {
             .await
             .expect("migrated vault unlocks with the same passphrase");
         assert_eq!(
-            reopened.get_key_with(&reopened_key, &key_id).expect("key"),
+            reopened.get_key_with(&reopened_key, &key_id).expect("key").as_slice(),
             private.as_bytes()
         );
     }
@@ -1044,7 +1047,7 @@ mod tests {
             .await
             .expect("the repaired vault still unlocks");
         assert_eq!(
-            reopened.get_key_with(&reopened_key, &key_id).expect("key"),
+            reopened.get_key_with(&reopened_key, &key_id).expect("key").as_slice(),
             private.as_bytes()
         );
     }
@@ -1158,7 +1161,7 @@ mod tests {
         assert_eq!(std::fs::read(&path).expect("read"), before);
         assert_eq!(vault.format_version(), 0);
         assert_eq!(
-            vault.get_key_with(&key, &key_id).expect("key still readable"),
+            vault.get_key_with(&key, &key_id).expect("key still readable").as_slice(),
             private.as_bytes()
         );
 
@@ -1171,7 +1174,7 @@ mod tests {
                 .verify_passphrase("correct horse battery staple")
                 .await
                 .and_then(|k| reopened.get_key_with(&k, &key_id))
-                .expect("key survives the retry"),
+                .expect("key survives the retry").as_slice(),
             private.as_bytes()
         );
     }
@@ -1298,13 +1301,13 @@ mod tests {
             .get_key("this passphrase is never used", &key_id)
             .await
             .expect("snapshot reads the key without deriving");
-        assert_eq!(cached, private_pem.as_bytes());
+        assert_eq!(cached.as_slice(), private_pem.as_bytes());
 
         let cold = vault
             .get_key("correct horse battery staple", &key_id)
             .await
             .expect("passphrase still works without a cached key");
-        assert_eq!(cold, private_pem.as_bytes());
+        assert_eq!(cold.as_slice(), private_pem.as_bytes());
     }
 
     #[tokio::test]

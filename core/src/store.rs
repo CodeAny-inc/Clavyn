@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Persistent store for non-secret data: hosts, host groups, identities, workspaces.
-/// Secrets (private keys) live in the vault; passwords live in the OS keychain.
+/// Private keys live in the vault; passwords are never stored.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StoreData {
     #[serde(default)]
