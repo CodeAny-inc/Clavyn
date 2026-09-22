@@ -5,9 +5,14 @@ import type { KeyMeta } from "../types";
 
 export const useKeysStore = defineStore("keys", () => {
   const keys = ref<KeyMeta[]>([]);
+  // Bumped by `clear`, so a load that was in flight when the vault locked
+  // cannot put the keys back afterwards.
+  let generation = 0;
 
   async function load() {
-    keys.value = await api.listKeys();
+    const started = generation;
+    const loaded = await api.listKeys();
+    if (started === generation) keys.value = loaded;
   }
 
   async function generateKey(label: string) {
@@ -32,6 +37,7 @@ export const useKeysStore = defineStore("keys", () => {
   }
 
   function clear() {
+    generation += 1;
     keys.value = [];
   }
 

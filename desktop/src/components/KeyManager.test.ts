@@ -130,3 +130,70 @@ describe("KeyManager add-key dialog", () => {
     expect(addForm.passphrase).toBe("");
   });
 });
+
+describe("KeyManager while the vault is locked", () => {
+  const KEY = {
+    id: "key-1",
+    label: "laptop",
+    key_type: "ed25519",
+    fingerprint: "fingerprint",
+    public_key_base64: "AAAAC3NzaC1lZDI1NTE5AAAAIpublic",
+  };
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    setInvokeHandler("list_keys", () => [KEY]);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("shows a locked state with an unlock action instead of an empty list", async () => {
+    const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
+    expect(wrapper.find('[data-testid="keys-locked"]').exists()).toBe(true);
+    expect(wrapper.text()).not.toContain("No SSH keys yet");
+
+    const { useUiStore } = await import("../stores/ui");
+    const ui = useUiStore();
+    const request = vi.spyOn(ui, "requestVaultUnlock").mockResolvedValue(false);
+    await wrapper.get('[data-testid="keys-locked"] button').trigger("click");
+    expect(request).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("lists and copies keys once unlocked, and stops copying at the lock", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    const vault = useVaultStore();
+    const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
+
+    vault.unlocked = true;
+    await flushPromises();
+    expect(wrapper.text()).toContain("laptop");
+    await wrapper.get('[aria-label="Copy public key"]').trigger("click");
+    expect(writeText).toHaveBeenCalledWith(KEY.public_key_base64);
+
+    vault.unlocked = false;
+    await flushPromises();
+    expect(useKeysStore().keys).toHaveLength(0);
+    expect(wrapper.find('[data-testid="keys-locked"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("does not put keys back when a load finishes after the lock", async () => {
+    let finish!: (keys: unknown[]) => void;
+    setInvokeHandler("list_keys", () => new Promise(resolve => { finish = resolve; }));
+    const vault = useVaultStore();
+    const keys = useKeysStore();
+
+    vault.unlocked = true;
+    await flushPromises();
+    vault.unlocked = false;
+    await flushPromises();
+    finish([KEY]);
+    await flushPromises();
+
+    expect(keys.keys).toHaveLength(0);
+  });
+});

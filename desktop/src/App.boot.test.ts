@@ -15,7 +15,6 @@ const BOOT_READS: Record<string, unknown> = {
   is_vault_unlocked: true,
   list_hosts: [],
   list_groups: [],
-  list_keys: [],
   list_identities: [],
   list_workspaces: [],
 };
@@ -97,9 +96,10 @@ describe("App boot", () => {
     for (const command of Object.keys(BOOT_READS)) {
       expect(dispatched, `${command} was not dispatched in the first round-trip`).toContain(command);
     }
-    // The biometric probe reads the vault status that is still in flight, so it
-    // must not have started yet.
+    // The biometric probe and the key list both depend on the vault status that
+    // is still in flight, so neither may have started yet.
     expect(dispatched).not.toContain("biometric_available");
+    expect(dispatched).not.toContain("list_keys");
 
     releases.forEach(release => release());
     await flushPromises();
@@ -118,6 +118,26 @@ describe("App boot", () => {
     expect(useIdentitiesStore().identities).toHaveLength(1);
     expect(useIdentitiesStore().loaded).toBe(true);
     expect(useWorkspacesStore().workspaces).toHaveLength(1);
+  });
+
+  it("lists keys only once the vault reports itself unlocked", async () => {
+    setInvokeHandler("is_vault_unlocked", () => false);
+    mountApp();
+    await flushPromises();
+
+    expect(commandsInvoked()).not.toContain("list_keys");
+    expect(useKeysStore().keys).toHaveLength(0);
+
+    // Unlocking loads them; locking again drops them.
+    const vault = useVaultStore();
+    vault.unlocked = true;
+    await flushPromises();
+    expect(commandsInvoked()).toContain("list_keys");
+    expect(useKeysStore().keys).toHaveLength(1);
+
+    vault.unlocked = false;
+    await flushPromises();
+    expect(useKeysStore().keys).toHaveLength(0);
   });
 
   it("probes biometric enrollment only after the vault status snapshot lands", async () => {
