@@ -490,7 +490,7 @@ fn seal(key: &VaultKey, aad: &[u8], plaintext: &[u8]) -> Result<([u8; NONCE_LEN]
     ssh_key::rand_core::OsRng.fill_bytes(&mut nonce_bytes);
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce_bytes),
+            &Nonce::from(nonce_bytes),
             Payload {
                 msg: plaintext,
                 aad,
@@ -506,18 +506,15 @@ fn open_sealed(
     aad: &[u8],
     ciphertext: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
-    // `Nonce::from_slice` panics on a wrong length, and the nonce comes straight
-    // from the file, so check it here rather than trusting the input.
-    if nonce.len() != NONCE_LEN {
-        return Err(CoreError::Vault(format!(
-            "vault nonce must be {NONCE_LEN} bytes"
-        )));
-    }
+    // The nonce comes straight from the file, so its length is checked here
+    // rather than trusted.
+    let nonce = Nonce::try_from(nonce)
+        .map_err(|_| CoreError::Vault(format!("vault nonce must be {NONCE_LEN} bytes")))?;
     let cipher = Aes256Gcm::new_from_slice(&key[..])
         .map_err(|e| CoreError::Vault(format!("aes init: {e}")))?;
     cipher
         .decrypt(
-            Nonce::from_slice(nonce),
+            &nonce,
             Payload {
                 msg: ciphertext,
                 aad,
