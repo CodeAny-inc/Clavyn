@@ -14,7 +14,6 @@ use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::sync::Mutex;
-use zeroize::Zeroizing;
 
 /// Upper bound on opening the transport and on completing authentication.
 /// A peer that accepts the TCP connection and then stops responding otherwise
@@ -344,12 +343,12 @@ pub async fn connect(
                 let vault = vault.ok_or_else(|| {
                     CoreError::InvalidInput("vault required for key auth".into())
                 })?;
-                // `get_key` leaves wiping the decrypted key to the caller, and
-                // it is read in place so no second copy is made.
-                let private = Zeroizing::new(vault.get_key(passphrase, &key_id.to_string()).await?);
-                let openssh = std::str::from_utf8(&private)
+                let private_pem = vault.get_key(passphrase, &key_id.to_string()).await?;
+                // Borrowed from the wiped buffer rather than copied into a
+                // `String` nothing would wipe.
+                let pem_str = std::str::from_utf8(&private_pem)
                     .map_err(|e| CoreError::Key(format!("utf8: {e}")))?;
-                let pair = decode_secret_key(openssh, None).map_err(|e| match e {
+                let pair = decode_secret_key(pem_str, None).map_err(|e| match e {
                     // Import stores a key decrypted, so only a key filed with
                     // its own passphrase still in place lands here.
                     russh::keys::Error::KeyIsEncrypted => CoreError::Key(
