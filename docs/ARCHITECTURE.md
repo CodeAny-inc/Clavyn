@@ -19,7 +19,7 @@
 The core never depends on a UI toolkit, a filesystem layout owned by a
 specific shell, or a process-spawning capability (so it works inside the
 iOS sandbox). All platform-specific concerns (where the vault file lives,
-how the passphrase is retrieved from the OS keychain) are injected by the
+whether the passphrase can be retrieved through biometrics) are injected by the
 shell.
 
 ## Layers
@@ -70,7 +70,7 @@ shell.
 | Threat                         | Mitigation                                        |
 |--------------------------------|---------------------------------------------------|
 | Stolen laptop / disk read      | Vault is AES-256-GCM; KDF is Argon2id (64MiB)     |
-| Passphrase leak                | Stored in OS keychain, never in core config       |
+| Passphrase leak                | Never stored by default; Keychain only for macOS Touch ID unlock |
 | MITM host key swap             | TOFU + hard fail on mismatch, explicit replace    |
 | Memory scrape after lock       | `Zeroize` on drop for keys & passphrase           |
 | Supply-chain (deps)            | Pinned versions, minimal surface, audit russh     |
