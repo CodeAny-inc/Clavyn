@@ -10,6 +10,7 @@ mod sftp_transfer;
 mod startup_recovery;
 mod state;
 mod vault_commands;
+mod vault_epoch;
 mod vault_initialize;
 mod vault_keychain_cleanup;
 

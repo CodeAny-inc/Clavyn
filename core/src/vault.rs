@@ -56,7 +56,8 @@ const AAD_DOMAIN: &[u8] = b"clavyn.vault.header";
 ///
 /// `epoch` advances on every save and is authenticated, so it cannot be forged.
 /// Recognizing a whole-file rollback additionally needs a high-water mark held
-/// outside this file; nothing compares the epoch yet.
+/// outside this file; the desktop app keeps one in the OS credential store and
+/// compares it on unlock.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct VaultFile {
     #[serde(default)]

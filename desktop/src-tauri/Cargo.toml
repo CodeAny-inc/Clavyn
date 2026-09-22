@@ -29,6 +29,9 @@ uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 semver = "1"
 url = "2"
+# The highest vault epoch this device has seen is kept in the OS credential
+# store, out of reach of anything that can rewrite the app data directory.
+keyring = "=4.2.0"
 
 [dev-dependencies]
 tempfile = "3"
