@@ -19,7 +19,7 @@
 
 pub mod connection;
 pub mod error;
-mod fs_util;
+pub mod fs_util;
 pub mod host;
 pub mod identity;
 pub mod keys;
