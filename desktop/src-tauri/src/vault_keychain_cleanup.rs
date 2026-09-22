@@ -1,4 +1,4 @@
-use std::io::Write;
+use clavyn_core::fs_util::{remove_private, write_private};
 use std::path::{Path, PathBuf};
 
 type ApiResult<T> = std::result::Result<T, String>;
@@ -34,51 +34,16 @@ fn marker_path(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join(ENROLLMENT_MARKER)
 }
 
-fn marker_temp_path(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join(format!("{ENROLLMENT_MARKER}.tmp"))
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> std::io::Result<()> {
-    std::fs::File::open(path)?.sync_all()
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
+/// Written through the same helper as the vault it sits beside, so it gets the
+/// same guarantees: atomic replacement, and a file restricted to the account
+/// running the app (mode 0600 on Unix, an owner-only DACL and owner on
+/// Windows), staged through a file this process created.
 fn write_marker(app_data_dir: &Path, marker: &EnrollmentMarker) -> ApiResult<()> {
-    std::fs::create_dir_all(app_data_dir)
-        .map_err(|error| format!("failed to create biometric marker directory: {error}"))?;
-
-    let serialized = serde_json::to_vec_pretty(marker)
+    let mut serialized = serde_json::to_string_pretty(marker)
         .map_err(|error| format!("failed to serialize biometric marker: {error}"))?;
-    let path = marker_path(app_data_dir);
-    let tmp = marker_temp_path(app_data_dir);
-    let result = (|| -> std::io::Result<()> {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-
-        let mut file = options.open(&tmp)?;
-        file.write_all(&serialized)?;
-        file.write_all(b"\n")?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
-        sync_directory(app_data_dir)?;
-        Ok(())
-    })();
-
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("failed to persist biometric enrollment marker: {error}"));
-    }
-    Ok(())
+    serialized.push('\n');
+    write_private(&marker_path(app_data_dir), &serialized)
+        .map_err(|error| format!("failed to persist biometric enrollment marker: {error}"))
 }
 
 fn read_marker(app_data_dir: &Path) -> ApiResult<Option<EnrollmentMarker>> {
@@ -129,14 +94,12 @@ fn marker_for_binding(app_data_dir: &Path, binding_id: &str) -> ApiResult<Option
 }
 
 fn remove_marker_file(app_data_dir: &Path) -> ApiResult<()> {
-    let path = marker_path(app_data_dir);
-    match std::fs::remove_file(&path) {
-        Ok(()) => sync_directory(app_data_dir)
-            .map_err(|error| format!("failed to sync biometric marker deletion: {error}"))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("failed to remove biometric enrollment marker: {error}")),
+    let removal = remove_private(&marker_path(app_data_dir))
+        .map_err(|error| format!("failed to remove biometric enrollment marker: {error}"))?;
+    match removal.durability_error {
+        Some(error) => Err(format!("failed to sync biometric marker deletion: {error}")),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn write_state(
@@ -579,8 +542,40 @@ pub(crate) fn initialize_tracking_for_new_vault(
 mod marker_tests {
     use super::{
         begin_enrollment, clear_bound_credential, clear_for_reset, initialize_tracking_for_new_vault,
-        read_marker, reconcile_credential_observation, CredentialObservation, TrackingState,
+        marker_path, read_marker, reconcile_credential_observation, remove_marker_file,
+        write_marker, CredentialObservation, EnrollmentMarker, TrackingState, MARKER_VERSION,
     };
+
+    /// The marker goes through the core's private writer: a file planted at
+    /// the staging path is not written through, the result is owner-only, and
+    /// removal clears it.
+    #[test]
+    fn the_marker_is_written_and_removed_like_the_other_state_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let planted = dir.path().join("vault-biometric-binding.tmp");
+        std::fs::write(&planted, "planted").expect("plant");
+
+        let marker = EnrollmentMarker {
+            version: MARKER_VERSION,
+            binding_id: "generation-a".into(),
+            state: TrackingState::Enrolled,
+            scope_token: Some("scope".into()),
+        };
+        write_marker(dir.path(), &marker).expect("write marker");
+
+        assert_eq!(read_marker(dir.path()).expect("read"), Some(marker));
+        assert!(!planted.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(marker_path(dir.path())).expect("metadata").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        remove_marker_file(dir.path()).expect("remove marker");
+        assert_eq!(read_marker(dir.path()).expect("read"), None);
+        remove_marker_file(dir.path()).expect("removing again is a no-op");
+    }
 
     #[test]
     fn new_vault_starts_in_explicit_clear_state() {
