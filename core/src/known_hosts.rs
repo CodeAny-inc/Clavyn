@@ -68,6 +68,14 @@ impl KnownHosts {
 
     pub fn save(&self) -> Result<()> {
         let data = serde_json::to_string_pretty(&self.entries)?;
+        // Never write pins this same build could not load again: `load` fails
+        // closed, so an unreadable file would stop the app from starting.
+        serde_json::from_str::<HashMap<String, KnownHostEntry>>(&data).map_err(|e| {
+            CoreError::UnwritableState {
+                path: self.path.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         crate::fs_util::write_private(&self.path, &data)
     }
 
