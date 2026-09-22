@@ -16,12 +16,19 @@ use std::path::{Path, PathBuf};
 ///   left behind with looser permissions by an earlier version is replaced by a
 ///   restricted one on the next save. `rename` carries the temporary file's
 ///   permissions over to the target on both platforms.
-/// * The temporary file is always a new one. Any leftover from an interrupted
-///   save is unlinked, and the open then refuses a file it did not create, so
-///   the object that gets renamed over the target is never one another process
-///   planted at the temporary path for this one to write through. That matters
-///   beyond the contents: a file object carries its ownership across a rename,
-///   and on Windows an owner outranks the DACL.
+/// * The temporary file is always a new one, under a name unique to this
+///   write, and the open refuses a file it did not create. So two writers never
+///   share a staging file — one of them unlinking or overwriting the other's
+///   half-written bytes and renaming them into place — and the object renamed
+///   over the target is never one another process planted for this one to
+///   write through. That matters beyond the contents: a file object carries its
+///   ownership across a rename, and on Windows an owner outranks the DACL.
+///   Leftovers from interrupted saves are removed once a save succeeds.
+/// * On Unix the directory is synced after the rename, so the new name is on
+///   disk and not only the new bytes. A failed sync is logged rather than
+///   returned: the rename has already published the file, and callers roll
+///   their in-memory state back on an error, which would leave memory older
+///   than the file.
 ///
 /// The mechanism differs per platform because the permission models do:
 ///
@@ -43,13 +50,17 @@ pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
     }
 
     let tmp = temp_path(path);
-    match write_temp(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(save_failed(path, e))
-        }
+    if let Err(e) = write_temp(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(save_failed(path, e));
     }
+    for leftover in leftover_temp_files(path) {
+        let _ = std::fs::remove_file(leftover);
+    }
+    if let Err(e) = sync_parent_directory(path) {
+        tracing::warn!("saved {} but could not sync its directory: {e}", path.display());
+    }
+    Ok(())
 }
 
 /// Name the file a failed save was targeting. Every caller of `write_private`
@@ -86,7 +97,10 @@ fn remove_private_with_sync<F>(path: &Path, sync_parent: F) -> Result<RemovePriv
 where
     F: FnOnce(&Path) -> std::io::Result<()>,
 {
-    let removed_tmp = remove_if_present(&temp_path(path))?;
+    let mut removed_tmp = false;
+    for leftover in leftover_temp_files(path) {
+        removed_tmp |= remove_if_present(&leftover)?;
+    }
     let removed_target = remove_if_present(path)?;
     let durability_error = if removed_tmp || removed_target {
         sync_parent(path).err()
@@ -122,22 +136,61 @@ fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_WRITES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make every `write_private` on the calling thread fail before anything is
+/// renamed over its target, until switched off again. Lets tests exercise a
+/// failed save without depending on how the staging file is named.
+#[cfg(test)]
+pub(crate) fn fail_writes_on_this_thread(fail: bool) {
+    FAIL_WRITES.with(|flag| flag.set(fail));
+}
+
+/// A staging name for one write: `<name>.<unique>.tmp`, beside the target.
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     path.with_file_name(name)
 }
 
-fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
-    // An interrupted save can leave a temporary file behind, and anyone who can
-    // add a file to the directory can put one there deliberately. Either way it
-    // is unlinked rather than written through, so the crash leftover never
-    // blocks a save and the planted one never becomes the target: `create_new`
-    // below opens nothing that already exists, which makes this process the
-    // creator — and therefore the owner — of the file it is about to rename
-    // into place.
-    remove_if_present(tmp)?;
+/// Staging files for `path` left behind by saves that did not finish,
+/// including the fixed `<name>.tmp` name earlier builds used.
+fn leftover_temp_files(path: &Path) -> Vec<PathBuf> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{name}.");
+    let dir = match path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".tmp"))
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
 
+fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_WRITES.with(|flag| flag.get()) {
+        return Err(std::io::Error::other("write failure injected by a test"));
+    }
+    // `create_new` opens nothing that already exists, which makes this process
+    // the creator — and therefore the owner — of the file it is about to rename
+    // into place. The name is unique to this write, so nothing legitimate is
+    // ever there first.
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -169,9 +222,9 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 /// Say what a refused create means. `create_new` reports `AlreadyExists` —
-/// `ERROR_FILE_EXISTS` on Windows, `EEXIST` on Unix — only for a file that
-/// appeared at the temporary path after `write_temp`'s unlink cleared it, so
-/// it is one this process did not create. Refusing it is the point: a file
+/// `ERROR_FILE_EXISTS` on Windows, `EEXIST` on Unix — only for a file at a
+/// temporary path unique to this write, so it is one this process did not
+/// create. Refusing it is the point: a file
 /// object carries its permissions and its owner across a rename, so writing
 /// through a planted file and renaming it over the target would hand the state
 /// file an owner and an access decision chosen by whoever planted it. The save
@@ -384,7 +437,39 @@ mod owner_only {
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_private, remove_private_with_sync, write_private};
+    use super::{remove_private, remove_private_with_sync, temp_path, write_private};
+
+    /// Two writers of one file must not stage through one temporary file, or
+    /// one can unlink or overwrite the other's half-written bytes and rename
+    /// them into place.
+    #[test]
+    fn each_write_stages_through_its_own_temporary_file() {
+        let path = std::path::Path::new("state.json");
+        assert_ne!(temp_path(path), temp_path(path));
+        let name = temp_path(path).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("state.json.") && name.ends_with(".tmp"), "{name}");
+    }
+
+    #[test]
+    fn leftovers_under_either_naming_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let unrelated = dir.path().join("store.json.0123.tmp");
+        for leftover in ["vault.json.tmp", "vault.json.0123abcd.tmp"] {
+            std::fs::write(dir.path().join(leftover), "older ciphertext").expect("seed");
+        }
+        std::fs::write(&unrelated, "another file's leftover").expect("seed");
+
+        write_private(&path, "{}").expect("write");
+        assert!(!dir.path().join("vault.json.tmp").exists());
+        assert!(!dir.path().join("vault.json.0123abcd.tmp").exists());
+        assert!(unrelated.exists(), "a leftover of another file was removed");
+
+        std::fs::write(dir.path().join("vault.json.4567.tmp"), "older").expect("seed");
+        remove_private(&path).expect("remove");
+        assert!(!dir.path().join("vault.json.4567.tmp").exists());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn writes_and_then_replaces_the_target() {

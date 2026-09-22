@@ -137,7 +137,10 @@ impl Vault {
     pub fn open(path: PathBuf) -> Result<Self> {
         let file = if path.exists() {
             let data = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&data)?
+            serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?
         } else {
             VaultFile::uninitialized()
         };
@@ -423,6 +426,12 @@ impl Vault {
 
 fn persist(path: &Path, file: &VaultFile) -> Result<()> {
     let data = serde_json::to_string_pretty(file)?;
+    // Never write a vault this same build could not open again: `open` fails
+    // closed, so an unreadable vault file would stop the app from starting.
+    serde_json::from_str::<VaultFile>(&data).map_err(|e| CoreError::UnwritableState {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
     crate::fs_util::write_private(path, &data)
 }
 
@@ -1144,18 +1153,15 @@ mod tests {
         );
         let before = std::fs::read(&path).expect("read");
 
-        // The atomic write stages through a sibling temporary file. A directory
-        // in its place fails the write reliably, before anything is renamed over
-        // the vault.
-        let staged = dir.path().join("vault.json.tmp");
-        std::fs::create_dir(&staged).expect("block the staged write");
-
         let mut vault = Vault::open(path.clone()).expect("open");
         let key = vault
             .verify_passphrase("correct horse battery staple")
             .await
             .expect("unlock");
-        assert!(vault.migrate_to_current_format(&key).is_err());
+        crate::fs_util::fail_writes_on_this_thread(true);
+        let migrated = vault.migrate_to_current_format(&key);
+        crate::fs_util::fail_writes_on_this_thread(false);
+        assert!(migrated.is_err());
 
         // Both the file and the in-memory vault stay on the format they had.
         assert_eq!(std::fs::read(&path).expect("read"), before);
@@ -1165,7 +1171,6 @@ mod tests {
             private.as_bytes()
         );
 
-        std::fs::remove_dir(&staged).expect("unblock");
         assert!(vault.migrate_to_current_format(&key).expect("retry"));
         assert_eq!(vault.format_version(), VAULT_FORMAT_VERSION);
         let reopened = Vault::open(path).expect("reopen");
@@ -1275,11 +1280,11 @@ mod tests {
         let (mut vault, key) = initialized(path.clone(), "correct horse battery staple").await;
         let before = std::fs::read(&path).expect("read");
 
-        let staged = dir.path().join("vault.json.tmp");
-        std::fs::create_dir(&staged).expect("block the staged write");
-
         let (meta, private) = a_key();
-        assert!(vault.add_key(&key, meta, &private).is_err());
+        crate::fs_util::fail_writes_on_this_thread(true);
+        let added = vault.add_key(&key, meta, &private);
+        crate::fs_util::fail_writes_on_this_thread(false);
+        assert!(added.is_err());
 
         assert_eq!(std::fs::read(&path).expect("read"), before);
         assert_eq!(vault.epoch(), 1);
@@ -1485,5 +1490,19 @@ mod tests {
         let reopened = Vault::open(path).expect("reopen persisted vault");
         assert_eq!(reopened.binding_id(), vault.binding_id());
         assert!(reopened.verify_passphrase("retry passphrase").await.is_ok());
+    }
+
+    #[test]
+    fn an_unreadable_vault_file_is_reported_with_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, "{ not json").expect("seed");
+        match Vault::open(path.clone()) {
+            Err(crate::CoreError::CorruptState { path: reported, .. }) => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            Err(other) => panic!("expected CorruptState, got {other}"),
+            Ok(_) => panic!("an unreadable vault opened"),
+        }
     }
 }
