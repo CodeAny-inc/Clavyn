@@ -153,6 +153,58 @@ jobs:
         shell: bash
         run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/unsigned-updater.json"
 
+      # OS code signing turns on by adding repository secrets and stays off
+      # without them. The bundler treats a variable that is set but empty as
+      # configured, so each one is exported only when its secret has a value.
+      # Code signing happens while bundling, so these credentials, unlike the
+      # updater key, are present in the build step.
+      - name: Use Apple code signing when configured
+        if: startsWith(matrix.platform, 'macos')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No Apple certificate configured; the app stays ad-hoc signed."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!name}"
+            if [ -n "$value" ]; then
+              delimiter="EOF_$(openssl rand -hex 16)"
+              printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "$value" "$delimiter" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: Use Authenticode signing when configured
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "No Authenticode certificate configured; the installer stays unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "authenticode.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config = Join-Path $env:RUNNER_TEMP "authenticode.json"
+          @{ bundle = @{ windows = @{
+              certificateThumbprint = $cert.Thumbprint
+              digestAlgorithm = "sha256"
+              timestampUrl = "http://timestamp.digicert.com"
+          } } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $config
+          "SIGNING_CONFIG_ARGS=--config $config" >> $env:GITHUB_ENV
+
       - name: Build and bundle Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
@@ -165,7 +217,7 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
           includeUpdaterJson: false
-          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json
+          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }}
 
       - name: Pack the macOS updater archive
         # The bundler builds `<app>.app.tar.gz` only alongside a signature, so
@@ -381,3 +433,19 @@ jobs:
           TAG="$RELEASE_TAG"
           gh release upload "$TAG" latest.json --clobber
           echo "Uploaded latest.json to $TAG"
+
+      - name: Publish SHA256SUMS
+        # One checksum line per release asset, in the format `sha256sum -c`
+        # and `shasum -a 256 -c` read, so a download can be checked against
+        # what this release published. It runs last, once every installer,
+        # signature and latest.json is in place.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          rm -rf ./checksummed
+          gh release download "$RELEASE_TAG" --dir ./checksummed --clobber
+          rm -f ./checksummed/SHA256SUMS
+          (cd ./checksummed && sha256sum -- * | sort -k 2) > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$RELEASE_TAG" SHA256SUMS --clobber
