@@ -142,12 +142,21 @@ jobs:
         # dependency and vue-demi's shim already targets Vue 3.
         run: npm ci --ignore-scripts
 
+      # The updater signing key is not available to this job. Everything here
+      # runs third-party code (npm packages, build scripts, tauri-action), so
+      # the bundles are built unsigned and the `sign` job signs them in a job
+      # that runs none of it. With `createUpdaterArtifacts` on and no key the
+      # bundler refuses to build, so it is switched off for this build only;
+      # the updater artifacts are the installers themselves on Windows and
+      # Linux, and the macOS one is packed below.
+      - name: Disable updater signing for this build
+        shell: bash
+        run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/unsigned-updater.json"
+
       - name: Build and bundle Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           tagName: ${{ needs.prepare.outputs.tag }}
@@ -155,98 +164,87 @@ jobs:
           releaseBody: "Clavyn ${{ needs.prepare.outputs.version }} — see assets below."
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
-          args: ${{ matrix.args }}
+          includeUpdaterJson: false
+          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json
 
-      - name: Upload .sig files to release
+      - name: Pack the macOS updater archive
+        # The bundler builds `<app>.app.tar.gz` only alongside a signature, so
+        # it is packed here from the finished bundle in the same shape: a gzip
+        # tar holding the `.app` directory. Named as tauri-action names it.
+        if: startsWith(matrix.platform, 'macos')
         shell: bash
-        working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           RUST_TARGET: ${{ matrix.rust_target }}
         run: |
-          # Fallback: upload any .sig files that tauri-action didn't upload.
-          # With createUpdaterArtifacts: true, tauri-action should handle this,
-          # but we keep this as a safety net.
-          echo "Working directory: $(pwd)"
-          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
-          echo "RUST_TARGET: ${RUST_TARGET}"
+          case "$RUST_TARGET" in
+            aarch64-apple-darwin) ARCH=aarch64 ;;
+            x86_64-apple-darwin) ARCH=x64 ;;
+            *) echo "unexpected macOS target '$RUST_TARGET'" >&2; exit 1 ;;
+          esac
+          BUNDLE_DIR="$GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle/macos"
+          ARCHIVE="$RUNNER_TEMP/Clavyn_${VERSION}_${ARCH}.app.tar.gz"
+          # No AppleDouble `._` entries for extended attributes.
+          COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$ARCHIVE" -C "$BUNDLE_DIR" Clavyn.app
+          gh release upload "$TAG" "$ARCHIVE" --clobber --repo "$GITHUB_REPOSITORY"
 
-          if [ -n "$RUST_TARGET" ]; then
-            TARGET_DIR="$GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle"
-          else
-            TARGET_DIR="$GITHUB_WORKSPACE/target/release/bundle"
+  # ──────────────────────────────────────────────
+  # Sign the updater artifacts
+  # ──────────────────────────────────────────────
+  # The only job that holds the updater signing key, which is the sole root of
+  # trust for every installed client's auto-update. It checks out no code,
+  # installs no npm packages and runs no third-party actions: it installs the
+  # Tauri CLI from crates.io at a pinned version with its own lockfile, downloads
+  # the release assets the updater installs, signs them and uploads the
+  # signatures. It always runs on an ephemeral GitHub-hosted runner, including
+  # when `runner_mode` sends the builds to self-hosted machines.
+  sign:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Install the Tauri signer
+        run: cargo install tauri-cli --version 2.11.4 --locked --root "$RUNNER_TEMP/tauri-cli"
+
+      - name: Download the updater artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir "$RUNNER_TEMP/assets"             --pattern '*.app.tar.gz' --pattern '*.AppImage' --pattern '*.deb'             --pattern '*.rpm' --pattern '*-setup.exe'
+          ls -la "$RUNNER_TEMP/assets"
+
+      - name: Sign
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          shopt -s nullglob
+          files=("$RUNNER_TEMP"/assets/*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "No updater artifacts to sign." >&2
+            exit 1
           fi
-          echo "Expected bundle dir: $TARGET_DIR"
-
-          ALT_DIRS="$GITHUB_WORKSPACE/target/release/bundle $GITHUB_WORKSPACE/desktop/src-tauri/target/release/bundle"
-          if [ -n "$RUST_TARGET" ]; then
-            ALT_DIRS="$ALT_DIRS $GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle $GITHUB_WORKSPACE/desktop/src-tauri/target/$RUST_TARGET/release/bundle"
-          fi
-
-          upload_sig() {
-            local sigfile="$1"
-            local basename
-            basename=$(basename "$sigfile")
-            # macOS .app.tar.gz.sig → rename to include arch
-            if [ "$basename" = "Clavyn.app.tar.gz.sig" ] && [ -n "$RUST_TARGET" ]; then
-              local arch=""
-              if [ "$RUST_TARGET" = "aarch64-apple-darwin" ]; then
-                arch="aarch64"
-              elif [ "$RUST_TARGET" = "x86_64-apple-darwin" ]; then
-                arch="x64"
-              fi
-              if [ -n "$arch" ]; then
-                local newname="Clavyn_${arch}.app.tar.gz.sig"
-                echo "Uploading: $sigfile as $newname"
-                cp "$sigfile" "/tmp/$newname"
-                gh release upload "$TAG" "/tmp/$newname" --clobber
-                return
-              fi
-            fi
-            echo "Uploading: $sigfile"
-            gh release upload "$TAG" "$sigfile" --clobber
-          }
-
-          UPLOADED=0
-          for dir in $ALT_DIRS; do
-            if [ -d "$dir" ]; then
-              echo "Searching in: $dir"
-              find "$dir" -name "*.sig" -type f -exec echo "Found: {}" \; 2>/dev/null || true
-              SIG_LIST=$(find "$dir" -name "*.sig" -type f 2>/dev/null || true)
-              if [ -n "$SIG_LIST" ]; then
-                echo "$SIG_LIST" | while IFS= read -r sigfile; do
-                  upload_sig "$sigfile"
-                done
-                UPLOADED=1
-              fi
-            fi
+          export PATH="$RUNNER_TEMP/tauri-cli/bin:$PATH"
+          for file in "${files[@]}"; do
+            cargo tauri signer sign "$file"
           done
 
-          if [ "$UPLOADED" -eq 0 ]; then
-            echo "No .sig files found in expected dirs. Searching entire target..."
-            SIG_LIST=$(find "$GITHUB_WORKSPACE/target" -name "*.sig" -type f 2>/dev/null || true)
-            if [ -n "$SIG_LIST" ]; then
-              echo "$SIG_LIST" | while IFS= read -r sigfile; do
-                upload_sig "$sigfile"
-              done
-              UPLOADED=1
-            fi
-          fi
-
-          if [ "$UPLOADED" -eq 0 ]; then
-            echo "WARNING: No .sig files were uploaded"
-            echo "Listing $TARGET_DIR:"
-            ls -laR "$TARGET_DIR" 2>/dev/null || echo "Bundle directory not found"
-          fi
-
-          echo "Done uploading .sig files"
+      - name: Upload signatures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/assets/*.sig --clobber --repo "$GITHUB_REPOSITORY"
 
   # ──────────────────────────────────────────────
   # Generate and upload latest.json (update manifest)
   # ──────────────────────────────────────────────
   publish-manifest:
-    needs: [prepare, build]
+    needs: [prepare, sign]
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
     permissions:
       contents: write

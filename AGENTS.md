@@ -241,7 +241,8 @@ and that the sidebar, terminal, and xterm all render.
 - Cross-platform releases via GitHub Actions:
   - Push a tag `v0.1.0` → triggers `.github/workflows/release.yml`
   - Builds on macOS (arm64 + x86_64), Linux, Windows runners
-  - Signs update packages with `TAURI_SIGNING_PRIVATE_KEY` secret
+  - Signs update packages with the `TAURI_SIGNING_PRIVATE_KEY` secret in a
+    separate `sign` job that runs no npm code and no third-party actions
   - Publishes artifacts + `latest.json` to GitHub Releases
   - Automatically detects prereleases (alpha/beta/rc in version)
 
@@ -304,7 +305,15 @@ Updates version in Cargo.toml, package.json, and tauri.conf.json.
 ### GitHub Actions: `.github/workflows/release.yml`
 Triggers on tag push (`v*.*.*`) or manual dispatch.
 - Builds on macOS (arm64 + x86_64), Linux, Windows in parallel
-- Signs all bundles with `TAURI_SIGNING_PRIVATE_KEY` (requires `createUpdaterArtifacts: true` in tauri.conf.json)
+- `build` produces unsigned bundles: it never sees `TAURI_SIGNING_PRIVATE_KEY`,
+  and turns `createUpdaterArtifacts` off for its own build, since the bundler
+  refuses to build updater artifacts without the key. It packs the macOS
+  `.app.tar.gz` itself.
+- `sign` is the only job with the key. It checks out no code, installs no npm
+  packages and uses no third-party actions: it installs the Tauri CLI with
+  `cargo install tauri-cli --locked` at a pinned version, signs the updater
+  artifacts on the release (`.app.tar.gz`, AppImage, deb, rpm, NSIS setup) and
+  uploads the `.sig` files. It always runs on a GitHub-hosted runner.
 - Auto-detects prerelease (alpha/beta/rc in version string)
 - Generates `latest.json` with all platform signatures
 - Uploads everything to the GitHub release
