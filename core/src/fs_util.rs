@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 /// private keys are persisted, so a store that cannot keep it to one account is
 /// a store this refuses to use; the previous file is left intact and the error
 /// reaches the caller, naming the file and the reason it could not be written.
-pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| save_failed(path, e))?;
     }
@@ -79,8 +79,8 @@ fn save_failed(path: &Path, error: std::io::Error) -> crate::CoreError {
 /// Result of unlinking a private file. A directory-sync failure is reported
 /// separately because the irreversible unlink has already happened and callers
 /// must still clear any in-memory state that could authorize the deleted data.
-pub(crate) struct RemovePrivateOutcome {
-    pub(crate) durability_error: Option<std::io::Error>,
+pub struct RemovePrivateOutcome {
+    pub durability_error: Option<std::io::Error>,
 }
 
 /// Remove an atomically-written private file and any crash-leftover sibling
@@ -89,7 +89,7 @@ pub(crate) struct RemovePrivateOutcome {
 /// behind. Once unlinking succeeds, a containing-directory sync failure is
 /// returned in the outcome rather than rewinding the operation: the target is
 /// already gone and higher layers must cross their destructive reset boundary.
-pub(crate) fn remove_private(path: &Path) -> Result<RemovePrivateOutcome> {
+pub fn remove_private(path: &Path) -> Result<RemovePrivateOutcome> {
     remove_private_with_sync(path, sync_parent_directory)
 }
 
