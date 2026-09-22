@@ -51,10 +51,11 @@ impl KnownHosts {
             let data = std::fs::read_to_string(&path)?;
             // Fail closed. Treating an unreadable file as "no known hosts" would
             // silently downgrade every pinned host back to trust-on-first-use.
-            serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
+            let stored = serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
                 path: path.display().to_string(),
                 reason: e.to_string(),
-            })?
+            })?;
+            normalize_entries(stored)
         } else {
             HashMap::new()
         };
@@ -319,8 +320,81 @@ impl KnownHosts {
     }
 }
 
+/// The key a host's pin is stored under.
+///
+/// The host is normalized first, so every spelling of one machine shares one
+/// pin. Without that, `PROD.example.com`, `prod.example.com.` and the several
+/// textual forms of an IPv6 address would each be a separate first contact,
+/// and connecting through a new spelling would pin whatever key answered.
 fn key_path(host: &str, port: u16) -> String {
-    format!("{host}:{port}")
+    format!("{}:{port}", normalize_host(host))
+}
+
+/// Lowercase a host name and strip a trailing root dot, or canonicalize an IP
+/// literal (with or without the brackets an IPv6 literal is written in).
+fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(host);
+    let host = host.trim_end_matches('.');
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.to_string(),
+        Err(_) => host.to_ascii_lowercase(),
+    }
+}
+
+/// `key_type` of an entry built from pins that disagree.
+const CONFLICTING_PINS: &str = "conflicting pins";
+
+/// Re-key a stored file under normalized host names.
+///
+/// A file written before names were normalized can hold one machine under
+/// several spellings. Variants that pin the same key merge into one entry, live
+/// if any of them was. Variants that pin different keys cannot be merged
+/// safely: either could be the one a first-use through the other spelling
+/// wrongly accepted. They become one entry that pins no key at all, so every
+/// key the server presents is reported as a change carrying all the recorded
+/// fingerprints, and the user picks deliberately. Neither variant is dropped
+/// silently and the host never falls back to first use.
+///
+/// Only memory changes here; the file is rewritten by the next save.
+fn normalize_entries(stored: HashMap<String, KnownHostEntry>) -> HashMap<String, KnownHostEntry> {
+    let mut grouped: HashMap<String, Vec<KnownHostEntry>> = HashMap::new();
+    for (stored_key, entry) in stored {
+        let key = stored_key
+            .rsplit_once(':')
+            .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| key_path(host, port)))
+            .unwrap_or(stored_key);
+        grouped.entry(key).or_default().push(entry);
+    }
+    grouped
+        .into_iter()
+        .map(|(key, variants)| (key, merge_variants(variants)))
+        .collect()
+}
+
+fn merge_variants(mut variants: Vec<KnownHostEntry>) -> KnownHostEntry {
+    let removed = variants.iter().all(|v| v.removed);
+    let agree = variants
+        .windows(2)
+        .all(|pair| pair[0].key_base64 == pair[1].key_base64);
+    if agree {
+        let mut entry = variants.swap_remove(0);
+        entry.removed = removed;
+        return entry;
+    }
+    let mut fingerprints: Vec<String> = variants.into_iter().map(|v| v.fingerprint).collect();
+    fingerprints.sort();
+    fingerprints.dedup();
+    KnownHostEntry {
+        key_type: CONFLICTING_PINS.to_string(),
+        // Matches no presented key, so `check_mismatch` refuses every one.
+        key_base64: String::new(),
+        fingerprint: fingerprints.join(" or "),
+        removed,
+    }
 }
 
 #[cfg(test)]
@@ -646,5 +720,130 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let hosts = KnownHosts::load(dir.path().join("absent.json")).expect("load");
         assert!(hosts.list().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod normalization_tests {
+    use super::{normalize_host, KnownHosts, CONFLICTING_PINS};
+    use crate::keys::fingerprint;
+    use crate::CoreError;
+    use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
+
+    fn server_key() -> PublicKey {
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
+        PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .expect("generate")
+            .public_key()
+            .clone()
+    }
+
+    fn pin_json(host_port: &str, key: &PublicKey, removed: bool) -> String {
+        format!(
+            r#""{host_port}":{{"key_type":"ssh-ed25519","key_base64":"{}","fingerprint":"{}","removed":{removed}}}"#,
+            key.public_key_base64(),
+            fingerprint(key)
+        )
+    }
+
+    fn load_file(dir: &std::path::Path, pins: &[String]) -> KnownHosts {
+        let path = dir.join("known_hosts.json");
+        std::fs::write(&path, format!("{{{}}}", pins.join(","))).expect("write pins");
+        KnownHosts::load(path).expect("load")
+    }
+
+    #[test]
+    fn spellings_of_one_host_normalize_to_one_name() {
+        assert_eq!(normalize_host("PROD.Example.COM"), "prod.example.com");
+        assert_eq!(normalize_host("prod.example.com."), "prod.example.com");
+        assert_eq!(normalize_host(" prod.example.com "), "prod.example.com");
+        assert_eq!(normalize_host("2001:DB8:0:0:0:0:0:1"), "2001:db8::1");
+        assert_eq!(normalize_host("[2001:db8::1]"), "2001:db8::1");
+        assert_eq!(normalize_host("192.168.1.10"), "192.168.1.10");
+    }
+
+    #[test]
+    fn a_variant_spelling_is_checked_against_the_existing_pin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = KnownHosts::load(dir.path().join("known_hosts.json")).expect("load");
+        let pinned = server_key();
+        hosts.verify("prod.example.com", 22, &pinned).expect("first use");
+
+        for spelling in ["PROD.example.com", "prod.example.com.", " Prod.Example.Com "] {
+            assert!(hosts.check_mismatch(spelling, 22, &pinned).is_ok(), "{spelling}");
+            assert!(
+                !hosts.verify(spelling, 22, &server_key()).expect("verify"),
+                "{spelling} gave a different key a first use"
+            );
+        }
+        assert_eq!(hosts.list().len(), 1);
+    }
+
+    #[test]
+    fn ipv6_spellings_share_one_pin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = KnownHosts::load(dir.path().join("known_hosts.json")).expect("load");
+        hosts.verify("2001:db8::1", 22, &server_key()).expect("first use");
+
+        assert!(!hosts
+            .verify("[2001:DB8:0:0:0:0:0:1]", 22, &server_key())
+            .expect("verify"));
+    }
+
+    #[test]
+    fn stored_variants_with_one_key_merge_into_a_live_pin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = server_key();
+        let mut hosts = load_file(
+            dir.path(),
+            &[
+                pin_json("PROD.example.com:22", &key, true),
+                pin_json("prod.example.com.:22", &key, false),
+            ],
+        );
+
+        let list = hosts.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "prod.example.com:22");
+        assert!(hosts.verify("prod.example.com", 22, &key).expect("verify"));
+    }
+
+    /// Two spellings pinned to different keys: either could be the wrong one,
+    /// so no key is accepted until the user reviews one, and the host is not
+    /// treated as unknown either.
+    #[test]
+    fn stored_variants_with_different_keys_accept_no_key_until_reviewed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = server_key();
+        let second = server_key();
+        let mut hosts = load_file(
+            dir.path(),
+            &[
+                pin_json("prod.example.com:22", &first, false),
+                pin_json("PROD.example.com:22", &second, false),
+            ],
+        );
+
+        let list = hosts.list();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, CONFLICTING_PINS);
+        for key in [&first, &second, &server_key()] {
+            match hosts.check_mismatch("prod.example.com", 22, key) {
+                Err(CoreError::HostKeyMismatch { pinned, .. }) => {
+                    assert!(pinned.contains(&fingerprint(&first)), "{pinned}");
+                    assert!(pinned.contains(&fingerprint(&second)), "{pinned}");
+                }
+                other => panic!("expected a mismatch, got {other:?}"),
+            }
+            assert!(!hosts.verify("prod.example.com", 22, key).expect("verify"));
+        }
+
+        // The usual review settles it: hold the presented key, confirm it.
+        hosts.hold_presented_key("prod.example.com", 22, &first);
+        hosts
+            .trust_presented_key("prod.example.com", 22, &fingerprint(&first))
+            .expect("trust reviewed key");
+        assert!(hosts.verify("PROD.example.com", 22, &first).expect("verify"));
+        assert!(!hosts.verify("prod.example.com", 22, &second).expect("verify"));
     }
 }

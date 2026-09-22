@@ -502,6 +502,10 @@ pub async fn connect_ssh(
 ) -> ApiResult<SshConnectionInfo> {
     // The owned input is transient and wiped on every exit; never persist or log it.
     let password = password.map(zeroize::Zeroizing::new);
+    // Bounded like `session_resize`, before anything else, so a zero-width or
+    // absurd terminal size is refused rather than requested from the server.
+    let cols = u32::from(pty_dimension("cols", cols.unwrap_or(80))?);
+    let rows = u32::from(pty_dimension("rows", rows.unwrap_or(24))?);
     let passphrase = state.vault_session.passphrase().await;
 
     // Resolve identity if the host references one
@@ -534,8 +538,6 @@ pub async fn connect_ssh(
         None
     };
     let known_hosts = state.known_hosts.clone();
-    let cols = cols.unwrap_or(80);
-    let rows = rows.unwrap_or(24);
 
     // Register the sink before the session can produce output, so the first
     // bytes of the shell banner are never dropped.
