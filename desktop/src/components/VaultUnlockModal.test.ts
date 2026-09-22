@@ -136,4 +136,32 @@ describe("VaultUnlockModal", () => {
     ui.resolveVaultUnlock(false);
     await expect(unlockRequest).resolves.toBe(false);
   });
+
+  it("explains a rolled-back vault and opens the older copy only on request", async () => {
+    const vault = useVaultStore();
+    const ui = useUiStore();
+    vi.spyOn(vault, "refreshBiometricState").mockResolvedValue(undefined);
+    const unlock = vi
+      .spyOn(vault, "unlock")
+      .mockRejectedValueOnce("[vault-rollback] This vault file is older than one this device has already opened.")
+      .mockResolvedValueOnce(undefined);
+
+    const unlockRequest = ui.requestVaultUnlock();
+    await flushPromises();
+    await wrapper.get("#modal-pass").setValue("passphrase");
+    await wrapper.findAll("button").find((b) => b.text() === "Unlock")!.trigger("click");
+    await flushPromises();
+
+    expect(unlock).toHaveBeenLastCalledWith("passphrase", false);
+    const notice = wrapper.get('[data-testid="vault-rollback"]');
+    expect(notice.text()).toContain("older than one this device has already opened");
+    expect(notice.text()).not.toContain("[vault-rollback]");
+    expect(ui.showVaultUnlockModal).toBe(true);
+
+    await notice.get("button").trigger("click");
+    await flushPromises();
+
+    expect(unlock).toHaveBeenLastCalledWith("passphrase", true);
+    await expect(unlockRequest).resolves.toBe(true);
+  });
 });

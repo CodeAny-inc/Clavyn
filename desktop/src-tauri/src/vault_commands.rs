@@ -69,6 +69,7 @@ fn normalize_reset_result(reset_result: clavyn_core::Result<()>, vault: &Vault) 
 pub async fn secure_unlock_vault(
     state: State<'_, Arc<AppState>>,
     passphrase: String,
+    accept_older: Option<bool>,
 ) -> ApiResult<()> {
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
@@ -84,6 +85,15 @@ pub async fn secure_unlock_vault(
         .binding_id()
         .ok_or_else(|| "vault binding is unavailable".to_string())?
         .to_owned();
+    // Compared only now, with the passphrase verified, so the epoch is the
+    // authenticated one. `accept_older` is the user choosing a copy this check
+    // refused, such as a backup they restored.
+    crate::vault_epoch::check_on_unlock(
+        &*state.epoch_store,
+        &binding_id,
+        vault.epoch(),
+        accept_older.unwrap_or(false),
+    )?;
     // A vault stored in an older on-disk format is rewritten in the
     // authenticated one here, the one moment the master key is available. The
     // rewrite is atomic and preserves the salt, so a failure leaves the file and
@@ -91,6 +101,7 @@ pub async fn secure_unlock_vault(
     if let Err(error) = vault.migrate_to_current_format(&key) {
         tracing::warn!("vault format upgrade deferred: {error}");
     }
+    state.record_vault_epoch(&vault);
     drop(vault);
 
     let session = VaultSession::new(passphrase, key, binding_id);
@@ -325,5 +336,70 @@ mod tests {
         assert!(reset_result
             .unwrap_err()
             .contains("[vault-reset-durability]"));
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::secure_unlock_vault;
+    use crate::state::AppState;
+    use crate::vault_epoch::ROLLBACK_MARKER;
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    /// An unlock refuses a vault older than the recorded epoch, leaves it
+    /// locked, and opens it only when the user accepts the older copy.
+    #[tokio::test]
+    async fn an_older_vault_is_refused_until_accepted() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (binding_id, epoch) = {
+            let mut vault = state.vault.lock().await;
+            vault.initialize("passphrase").await.expect("initialize");
+            (vault.binding_id().expect("binding").to_owned(), vault.epoch())
+        };
+        // A newer copy of this vault was opened before; the file is older.
+        state.epoch_store.write(&binding_id, epoch + 5).expect("record");
+        app.manage(state);
+
+        let error = secure_unlock_vault(app.state(), "passphrase".into(), None)
+            .await
+            .expect_err("rolled-back vault");
+        assert!(error.starts_with(ROLLBACK_MARKER), "{error}");
+        let state = app.state::<Arc<AppState>>();
+        assert!(state.vault_session.passphrase().await.is_none(), "unlocked anyway");
+
+        secure_unlock_vault(app.state(), "passphrase".into(), Some(true))
+            .await
+            .expect("accepted older copy");
+        assert!(state.vault_session.passphrase().await.is_some());
+        assert_eq!(state.epoch_store.read(&binding_id).expect("read"), Some(epoch));
+    }
+
+    /// Saves raise the record, so any copy of the vault from before a save
+    /// reads as older than the record from then on.
+    #[tokio::test]
+    async fn each_unlock_and_save_raises_the_record() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let binding_id = {
+            let mut vault = state.vault.lock().await;
+            vault.initialize("passphrase").await.expect("initialize");
+            vault.binding_id().expect("binding").to_owned()
+        };
+        app.manage(state);
+        secure_unlock_vault(app.state(), "passphrase".into(), None)
+            .await
+            .expect("unlock");
+        let state = app.state::<Arc<AppState>>();
+        let before = state.epoch_store.read(&binding_id).expect("read").expect("recorded");
+
+        let (private, _) = clavyn_core::keys::generate_ed25519().expect("generate");
+        crate::commands::import_key(app.state(), "k".into(), private.to_string(), None)
+            .await
+            .expect("import");
+        assert!(state.epoch_store.read(&binding_id).expect("read").expect("recorded") > before);
     }
 }

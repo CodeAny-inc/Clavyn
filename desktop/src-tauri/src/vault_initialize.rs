@@ -63,6 +63,7 @@ pub async fn secure_initialize_vault(
         };
     }
 
+    state.record_vault_epoch(&vault);
     drop(vault);
     drop(_biometric_mutation);
 

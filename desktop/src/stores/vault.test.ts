@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
-import { useVaultStore } from "./vault";
+import { useVaultStore, vaultRollbackMessage } from "./vault";
 
 vi.mock("../api", () => ({
   vaultIsInitialized: vi.fn(() => Promise.resolve(false)),
@@ -229,9 +229,26 @@ describe("vault store", () => {
 
       await store.unlock("correct-passphrase");
 
-      expect(api.unlockVault).toHaveBeenCalledWith("correct-passphrase");
+      expect(api.unlockVault).toHaveBeenCalledWith("correct-passphrase", false);
       expect(store.unlocked).toBe(true);
       expect(store.error).toBeNull();
+    });
+
+    it("opens an older copy of the vault only when asked to", async () => {
+      const store = useVaultStore();
+      store.initialized = true;
+
+      await store.unlock("correct-passphrase", true);
+
+      expect(api.unlockVault).toHaveBeenCalledWith("correct-passphrase", true);
+      expect(store.unlocked).toBe(true);
+    });
+
+    it("recognizes the error for a rolled-back vault", () => {
+      expect(vaultRollbackMessage("[vault-rollback] This vault file is older.")).toBe(
+        "This vault file is older.",
+      );
+      expect(vaultRollbackMessage("decrypt failed: wrong passphrase")).toBeNull();
     });
 
     it("sets error and rethrows on wrong passphrase", async () => {
