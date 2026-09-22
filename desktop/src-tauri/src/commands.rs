@@ -131,7 +131,13 @@ pub async fn is_vault_unlocked(state: State<'_, Arc<AppState>>) -> ApiResult<boo
 
 #[tauri::command]
 pub async fn list_keys(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<KeyMeta>> {
-    let vault = state.vault.lock().await;
+    // Key metadata sits in the vault header, where only a decrypt checks it
+    // against the tag. Read straight off a locked vault it is whatever the file
+    // says, and the public key in it is what a user copies into a server's
+    // authorized_keys. So it is handed out only once the vault opens with the
+    // session key, which fails for a header that was edited.
+    let (key, vault) = state.unlocked_vault().await?;
+    vault.verify_key(&key).map_err(err)?;
     Ok(vault.keys_meta().to_vec())
 }
 
@@ -1780,6 +1786,43 @@ mod connect_lock_tests {
         assert!(state.sessions.is_claimed("ssh"));
         drop(held);
         assert!(!state.sessions.is_claimed("ssh"));
+    }
+
+    /// Key metadata is only handed out once the vault opens with the session
+    /// key; on a locked vault it is unauthenticated header text.
+    #[tokio::test]
+    async fn keys_are_listed_only_while_the_vault_is_unlocked() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let (private, _public) = generate_ed25519().expect("generate");
+        let (meta, _) = parse_openssh_private(&private, None).expect("parse");
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            vault.add_key(&master, meta, &private).expect("add key");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        app.manage(state);
+
+        let error = list_keys(app.state()).await.expect_err("locked vault lists no keys");
+        assert!(error.contains("locked"), "{error}");
+
+        let state = app.state::<Arc<AppState>>();
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+        assert_eq!(list_keys(app.state()).await.expect("unlocked").len(), 1);
     }
 }
 
