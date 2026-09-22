@@ -46,5 +46,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 codegen-units = 1
 lto = true
 opt-level = "s"
+# A panic ends the process rather than unwinding into sessions and locks left
+# in whatever state the panicking task reached. The cost: `Drop` does not run,
+# so zeroizing destructors are skipped on a panic, and a crash dump taken then
+# can hold key material. Unwinding would not close that — a kill, an OOM or an
+# abort from the OS skips `Drop` just the same — so secrets are kept
+# short-lived instead of relying on a destructor running during a crash.
 panic = "abort"
 strip = true
