@@ -10,7 +10,6 @@ import { useHostsStore } from "../stores/hosts";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity, Workspace } from "../types";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@xterm/xterm", () => ({ Terminal: class {
   cols = 80; rows = 24;
   textarea = document.createElement("textarea");
@@ -113,7 +112,7 @@ describe("credential ownership across persistent views", () => {
     await wrapper.get("button:not([disabled])").trigger("click");
     await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
     const args = calls("sftp_connect")[0][1];
-    expect(args.host.id).toBe("gamma");
+    expect(args.hostId).toBe("gamma");
     expect(args.password).toBe("GAMMA_SECRET");
     expect(args.expectedUsername).toBe("deploy");
     expect(JSON.stringify(args)).not.toContain("ALPHA_SECRET");
@@ -160,9 +159,10 @@ describe("linked identity presentation and readiness", () => {
     await linkedConnect!.trigger("click");
     await vi.waitFor(() => expect(calls("sftp_connect")).toHaveLength(1));
     const args = calls("sftp_connect")[0][1];
-    expect(args.host.identity_id).toBeNull();
-    expect(args.host.username).toBe("root");
-    expect(args.host.auth).toEqual(passwordMethod);
+    // The backend resolves the linked identity from the saved host; the page
+    // names the host only by id and states the account it reviewed.
+    expect(args.hostId).toBe(linked.id);
+    expect(args).not.toHaveProperty("host");
     expect(args.password).toBe("ROOT_SECRET");
     expect(args.expectedUsername).toBe("root");
   });

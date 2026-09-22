@@ -54,7 +54,8 @@ export const createWorkspace = (name: string) => invoke<Workspace>("create_works
 export const saveWorkspace = (workspace: Workspace) => invoke<Workspace>("save_workspace", { workspace });
 export const deleteWorkspace = (id: string) => invoke<void>("delete_workspace", { id });
 export const setActiveWorkspace = (id: string) => invoke<void>("set_active_workspace", { id });
-export const readKeyFile = (path: string) => invoke<string>("read_key_file", { path });
+/** Opens the native file dialog and returns the picked key file's text, or null when cancelled. */
+export const pickKeyFile = () => invoke<string | null>("pick_key_file");
 
 /**
  * Sink a session's terminal output arrives on. Bytes travel as a binary IPC
@@ -84,8 +85,8 @@ export function sessionOutput(onData: (bytes: Uint8Array) => void, onEnd: () => 
 }
 
 export interface SshConnectionInfo { username: string; hostname: string; port: number }
-export const connectSsh = (sessionId: string, host: Host, password: string | null, cols: number, rows: number, onOutput: SessionOutput, expectedUsername?: string) =>
-  invoke<SshConnectionInfo>("connect_ssh", { sessionId, host, password, cols, rows, expectedUsername, onOutput });
+export const connectSsh = (sessionId: string, hostId: string, password: string | null, cols: number, rows: number, onOutput: SessionOutput, expectedUsername?: string) =>
+  invoke<SshConnectionInfo>("connect_ssh", { sessionId, hostId, password, cols, rows, expectedUsername, onOutput });
 export const createLocalTerminal = (sessionId: string, cols: number, rows: number, onOutput: SessionOutput) =>
   invoke<void>("create_local_terminal", { sessionId, cols, rows, onOutput });
 export const sessionWrite = (sessionId: string, data: number[]) => invoke<void>("session_write", { sessionId, data });
@@ -108,10 +109,10 @@ export interface SftpEntry {
 
 export const sftpConnect = (
   sessionId: string,
-  host: Host,
+  hostId: string,
   password: string | null,
   expectedUsername?: string,
-) => invoke<void>("sftp_connect", { sessionId, host, password, expectedUsername });
+) => invoke<void>("sftp_connect", { sessionId, hostId, password, expectedUsername });
 export const sftpListDir = (sessionId: string, path: string) =>
   invoke<SftpEntry[]>("sftp_list_dir", { sessionId, path });
 export const sftpCanonicalize = (sessionId: string, path: string) =>
@@ -125,17 +126,18 @@ export const sftpRemoveDir = (sessionId: string, path: string) =>
 export const sftpRename = (sessionId: string, oldPath: string, newPath: string) =>
   invoke<void>("sftp_rename", { sessionId, oldPath, newPath });
 export const sftpClose = (sessionId: string) => invoke<void>("sftp_close", { sessionId });
-export const sftpDownloadToLocal = (
-  sessionId: string,
-  remotePath: string,
-  localPath: string,
-) => invoke<void>("sftp_download_to_local", { sessionId, remotePath, localPath });
+/** Asks where to save in the native dialog, then downloads. False when cancelled. */
+export const sftpDownloadToLocal = (sessionId: string, remotePath: string) =>
+  invoke<boolean>("sftp_download_to_local", { sessionId, remotePath });
+/** A local file picked for upload: an opaque single-use token and its file name. */
+export interface PickedUpload { token: string; name: string }
+export const sftpPickUploadFile = () => invoke<PickedUpload | null>("sftp_pick_upload_file");
 export const sftpUploadFromLocal = (
   sessionId: string,
-  localPath: string,
+  uploadToken: string,
   remotePath: string,
   overwrite: boolean,
-) => invoke<void>("sftp_upload_from_local", { sessionId, localPath, remotePath, overwrite });
+) => invoke<void>("sftp_upload_from_local", { sessionId, uploadToken, remotePath, overwrite });
 
 export interface UpdateInfo {
   available: boolean;

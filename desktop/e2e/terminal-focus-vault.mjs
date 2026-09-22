@@ -108,7 +108,7 @@ function reviewFixture(mode) {
       } }],
     }];
     if (command === "connect_ssh") {
-      state.attempts.push({ id: args.sessionId, host: args.host.id });
+      state.attempts.push({ id: args.sessionId, host: args.hostId });
       if (mode === "vault-fallback" && !state.seen.has(args.sessionId)) {
         state.seen.add(args.sessionId);
         throw new Error("vault required");

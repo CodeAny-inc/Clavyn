@@ -11,7 +11,6 @@ import { useVaultStore } from "../stores/vault";
 import { emitSessionOutput, emitTauriEvent, getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host } from "../types";
 
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 
 const terminals = vi.hoisted(() => ({ items: [] as Array<{
   output: string[];

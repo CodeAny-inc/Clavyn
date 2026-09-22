@@ -10,10 +10,8 @@ const fixture = await readFile(new URL("./tauri-fixture.js", import.meta.url), "
 // Extend IPC only for these identity scenarios. The saved host deliberately keeps
 // its old username. Resolve the linked identity as core/src/connection.rs does.
 //
-// resolvedSshHost() deliberately clears identity_id when freezing the transport
-// host, so the fixture cannot match on args.host.identity_id at connect_ssh
-// time. Instead it tracks linked host IDs (and their original username) from
-// list_hosts and matches connect_ssh by host.id.
+// connect_ssh names the host by id only, so the fixture tracks linked host IDs
+// (and their original username) from list_hosts and matches on that id.
 const identityFixture = `(() => {
   let identity = { id: "fixture-identity", label: "Shared admin", username: "root", auth: "agent", tags: [] };
   const original = window.__TAURI_INTERNALS__.invoke;
@@ -32,10 +30,10 @@ const identityFixture = `(() => {
       identity = structuredClone(args.identity);
       return structuredClone(identity);
     }
-    if (command === "connect_ssh" && linkedHosts.has(args.host?.id)) {
+    if (command === "connect_ssh" && linkedHosts.has(args.hostId)) {
       const username = identity.username;
-      state.effectiveAttempts.push({ id: args.sessionId, username, hostUsername: linkedHosts.get(args.host.id) });
-      return original(command, { ...args, host: { ...args.host, username } });
+      state.effectiveAttempts.push({ id: args.sessionId, username, hostUsername: linkedHosts.get(args.hostId) });
+      return original(command, { ...args, host: { ...state.hostById(args.hostId), username } });
     }
     return original(command, args);
   };

@@ -210,7 +210,7 @@ describe("concurrent vault-dependent panes", () => {
     useUiStore().resolveVaultUnlock(true);
     await vi.waitFor(() => expect(second.connected).toBe(true));
     expect(calls("connect_ssh")).toHaveLength(1);
-    expect(calls("connect_ssh")[0][1].host.id).toBe("orion");
+    expect(calls("connect_ssh")[0][1].hostId).toBe("orion");
   });
 
   it("shares unlock when both backends reject an apparently unlocked vault", async () => {

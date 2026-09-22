@@ -40,13 +40,14 @@ function faultFixture(options) {
       return [structuredClone(identity)];
     }
     if (command === "connect_ssh") {
-      const effective = args.host.identity_id ? identity : args.host;
+      const host = window.__terminalTest.hostById(args.hostId);
+      const effective = host.identity_id ? identity : host;
       if (args.expectedUsername !== effective.username) throw new Error("Fixture expected account mismatch");
       const needsPassword = typeof effective.auth === "object";
       if (needsPassword && args.password !== "fixture-only password") throw new Error("Fixture password mismatch");
       state.attempts.push({ id: args.sessionId, username: effective.username, auth: needsPassword ? "password" : effective.auth });
       await original(command, { ...args, password: args.password === null ? null : "[redacted]" });
-      return { username: effective.username, hostname: args.host.hostname, port: args.host.port };
+      return { username: effective.username, hostname: host.hostname, port: host.port };
     }
     if (command === "session_write" && state.holdWrite) {
       state.holdWrite = false;

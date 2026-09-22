@@ -21,7 +21,6 @@ import {
   Loader2,
 } from "lucide-vue-next";
 import * as api from "../api";
-import { open } from "@tauri-apps/plugin-dialog";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
@@ -148,16 +147,8 @@ async function copyPublicKey(key: KeyMeta) {
 async function browseForKeyFile() {
   importing.value = true;
   try {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        { name: "SSH Private Keys", extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"] },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
-    if (typeof selected === "string" && selected) {
-      const content = await api.readKeyFile(selected);
+    const content = await api.pickKeyFile();
+    if (content !== null) {
       addForm.value.privateKey = content;
     }
   } catch (e) {

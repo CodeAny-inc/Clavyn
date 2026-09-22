@@ -21,25 +21,6 @@ export function effectiveSshIdentity(host: Host, identities: readonly Identity[]
   };
 }
 
-/**
- * Freeze the effective linked-identity configuration into an immutable transport
- * host. Clearing identity_id is intentional only after the linked identity was
- * actually resolved. If the reference is broken, preserve identity_id so the
- * native boundary can reject it instead of silently authenticating stale host
- * fallback credentials.
- */
-export function resolvedSshHost(host: Host, identities: readonly Identity[]): Host {
-  const effective = effectiveSshIdentity(host, identities);
-  if (effective.missing) return { ...host };
-  return {
-    ...host,
-    username: effective.username,
-    auth: effective.auth,
-    key_id: effective.keyId ?? null,
-    identity_id: null,
-  };
-}
-
 export function formatSshEndpoint(endpoint: { username: string; hostname: string; port: number }) {
   const hostname = endpoint.hostname.includes(":") && !endpoint.hostname.startsWith("[")
     ? `[${endpoint.hostname}]` : endpoint.hostname;

@@ -55,11 +55,17 @@ const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
     return mockInvokeHandlers.get(cmd)!(args);
   }
   if (cmd === "list_identities") return [];
-  if (cmd === "connect_ssh") return {
-    username: args.expectedUsername ?? args.host.username,
-    hostname: args.host.hostname,
-    port: args.host.port,
-  };
+  if (cmd === "connect_ssh") {
+    // Like the backend, resolve the host by id from what the app has saved.
+    const { useHostsStore } = await import("../stores/hosts");
+    const host = useHostsStore().hosts.find(h => h.id === args.hostId);
+    if (!host) throw new Error("Host not found. Check the saved host configuration.");
+    return {
+      username: args.expectedUsername ?? host.username,
+      hostname: host.hostname,
+      port: host.port,
+    };
+  }
   return undefined;
 });
 
@@ -118,11 +124,6 @@ vi.mock("@tauri-apps/api/event", () => ({
     const arr = mockListeners.get(event);
     if (arr) arr.forEach((h) => h({ event, payload }));
   }),
-}));
-
-// --- Mock @tauri-apps/plugin-dialog ---
-vi.mock("@tauri-apps/plugin-dialog", () => ({
-  open: vi.fn(),
 }));
 
 // --- Helper to register invoke handlers ---

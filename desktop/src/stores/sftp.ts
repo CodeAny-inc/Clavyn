@@ -56,7 +56,7 @@ export const useSftpStore = defineStore("sftp", () => {
       let connected = false;
 
       try {
-        await api.sftpConnect(id, host, password, expectedUsername);
+        await api.sftpConnect(id, host.id, password, expectedUsername);
         connected = true;
 
         // Disconnect/unmount can invalidate an attempt while native auth is in
@@ -188,13 +188,13 @@ export const useSftpStore = defineStore("sftp", () => {
     await refresh();
   }
 
-  async function downloadFile(entry: SftpEntry, localPath: string) {
+  async function downloadFile(entry: SftpEntry) {
     if (!sessionId.value) throw new Error("Not connected");
     const fullPath = joinPath(currentPath.value, entry.name);
     error.value = null;
     loading.value = true;
     try {
-      await api.sftpDownloadToLocal(sessionId.value, fullPath, localPath);
+      await api.sftpDownloadToLocal(sessionId.value, fullPath);
     } catch (e) {
       error.value = String(e);
       throw e;
@@ -205,7 +205,7 @@ export const useSftpStore = defineStore("sftp", () => {
 
   async function uploadFile(
     name: string,
-    localPath: string,
+    uploadToken: string,
     overwrite = false,
   ) {
     if (!sessionId.value) throw new Error("Not connected");
@@ -215,7 +215,7 @@ export const useSftpStore = defineStore("sftp", () => {
     try {
       await api.sftpUploadFromLocal(
         sessionId.value,
-        localPath,
+        uploadToken,
         fullPath,
         overwrite,
       );
