@@ -45,7 +45,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
@@ -65,15 +65,16 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Build NSIS installer
         working-directory: desktop
-        shell: pwsh
+        shell: bash
         run: |
           # Updater artifacts require release signing secrets, which are intentionally
           # unavailable to fork pull requests. This smoke test only needs to prove
           # that the Windows NSIS installer (including its WebView2 bootstrapper)
           # can be bundled successfully.
-          # PowerShell strips embedded double quotes when passing arguments to
-          # native commands, so the JSON keys must be backslash-escaped to survive.
-          npx tauri build --bundles nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'
+          # bash passes the single-quoted JSON through verbatim. Under PowerShell,
+          # how embedded quotes reach npx depends on which npx shim it resolves
+          # (.cmd or .ps1), so no one escaping works everywhere.
+          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Verify NSIS installer was produced
         shell: pwsh
         run: |

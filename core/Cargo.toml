@@ -11,7 +11,7 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
 russh = { workspace = true }
-ssh-key = "0.6"
+getrandom = { version = "0.4", features = ["sys_rng"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -22,7 +22,6 @@ argon2 = { workspace = true }
 aes-gcm = { workspace = true }
 uuid = { workspace = true }
 base64 = "0.23"
-async-trait = "0.1"
 russh-sftp = "3.0"
 
 [target.'cfg(windows)'.dependencies]

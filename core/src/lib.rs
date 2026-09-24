@@ -4,7 +4,7 @@
 //! frontends via FFI. Contains:
 //! - connection & host models
 //! - SSH transport (russh) + session management
-//! - key parsing / generation (russh-keys)
+//! - key parsing / generation (russh keys / ssh-key)
 //! - encrypted-at-rest vault for private keys
 //! - known_hosts verification (TOFU)
 //! - workspace & layout persistence
