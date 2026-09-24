@@ -1,9 +1,12 @@
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
-use clavyn_core::keys::{generate_ed25519, parse_openssh_private};
+mod common;
+
+use clavyn_core::keys::{generate_ed25519, import_openssh_private, parse_openssh_private};
 use clavyn_core::store::Store;
 use clavyn_core::vault::Vault;
 use clavyn_core::workspace::Workspace;
+use common::passphrase_protected_ed25519;
 use tempfile::TempDir;
 
 fn temp_dir() -> TempDir {
@@ -82,20 +85,6 @@ fn test_parse_generated_key() {
     assert!(!meta.public_key_base64.is_empty());
 }
 
-fn passphrase_protected_ed25519(passphrase: &str) -> (String, String) {
-    use russh::keys::ssh_key::{LineEnding, PrivateKey};
-    let (plain, _) = generate_ed25519().expect("generate key");
-    let (meta, _) = parse_openssh_private(&plain, None).expect("parse key");
-    let encrypted = PrivateKey::from_openssh(&plain)
-        .expect("read key")
-        .encrypt(&mut getrandom::SysRng, passphrase)
-        .expect("encrypt key")
-        .to_openssh(LineEnding::LF)
-        .expect("serialize key")
-        .to_string();
-    (encrypted, meta.fingerprint)
-}
-
 #[test]
 fn test_parse_with_wrong_passphrase_fails() {
     let (encrypted, _) = passphrase_protected_ed25519("right-passphrase");
@@ -109,6 +98,39 @@ fn test_parse_with_right_passphrase_yields_the_same_key() {
     let (meta, _) =
         parse_openssh_private(&encrypted, Some("right-passphrase")).expect("parse key");
     assert_eq!(meta.fingerprint, fingerprint);
+}
+
+/// A passphrase typed for a key that has none is a mistake the user should
+/// hear about, not a protection they can rely on.
+#[test]
+fn test_parse_with_a_passphrase_for_an_unencrypted_key_fails() {
+    let (private_pem, _) = generate_ed25519().expect("generate key");
+    let error = parse_openssh_private(&private_pem, Some("any-passphrase"))
+        .expect_err("a passphrase for an unencrypted key was accepted");
+    assert!(
+        error.to_string().contains("not protected by a passphrase"),
+        "{error}"
+    );
+}
+
+/// Connecting reads a stored key without a passphrase, so a key imported with
+/// its own passphrase is stored decrypted.
+#[test]
+fn test_import_with_passphrase_stores_the_key_decrypted() {
+    let (encrypted, fingerprint) = passphrase_protected_ed25519("right-passphrase");
+    let (meta, stored) =
+        import_openssh_private(&encrypted, Some("right-passphrase")).expect("import key");
+    assert_eq!(meta.fingerprint, fingerprint);
+
+    let (reread, _) = parse_openssh_private(&stored, None).expect("stored key opens");
+    assert_eq!(reread.fingerprint, fingerprint);
+}
+
+#[test]
+fn test_import_without_passphrase_stores_the_key_as_given() {
+    let (private_pem, _) = generate_ed25519().expect("generate key");
+    let (_, stored) = import_openssh_private(&private_pem, None).expect("import key");
+    assert_eq!(stored.as_str(), private_pem);
 }
 
 #[test]

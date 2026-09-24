@@ -4,7 +4,7 @@ use russh::keys::ssh_key::{self, Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::keys::{decode_secret_key, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Metadata about a stored key. The private material itself lives in the
 /// encrypted vault, referenced by `id`.
@@ -62,10 +62,19 @@ fn key_type_of(algorithm: &Algorithm) -> Result<KeyType> {
 
 /// Parse an OpenSSH-formatted private key string, returning metadata + the
 /// private key. Does NOT persist anything.
+///
+/// A passphrase is refused for a key that has none. russh would ignore it, and
+/// the import would then quietly accept a key the user believes is protected by
+/// the passphrase they just typed.
 pub fn parse_openssh_private(
     openssh: &str,
     passphrase: Option<&str>,
 ) -> Result<(KeyMeta, PrivateKey)> {
+    if passphrase.is_some() && decode_secret_key(openssh, None).is_ok() {
+        return Err(CoreError::Key(
+            "parse: this key is not protected by a passphrase; leave the passphrase empty".into(),
+        ));
+    }
     let pair = decode_secret_key(openssh, passphrase)
         .map_err(|e| CoreError::Key(format!("parse: {e}")))?;
     let public = pair.public_key();
@@ -80,6 +89,27 @@ pub fn parse_openssh_private(
         public_key_base64,
     };
     Ok((meta, pair))
+}
+
+/// Parse a private key for storage in the vault, returning its metadata and the
+/// text to store.
+///
+/// The vault is the only encryption a stored key has: connecting reads it back
+/// without a passphrase, and the key's own passphrase is not kept. A key given
+/// with its passphrase is therefore stored in decrypted OpenSSH form; one
+/// without a passphrase is stored exactly as given.
+pub fn import_openssh_private(
+    openssh: &str,
+    passphrase: Option<&str>,
+) -> Result<(KeyMeta, Zeroizing<String>)> {
+    let (meta, private) = parse_openssh_private(openssh, passphrase)?;
+    let stored = match passphrase {
+        None => Zeroizing::new(openssh.to_string()),
+        Some(_) => private
+            .to_openssh(ssh_key::LineEnding::LF)
+            .map_err(|e| CoreError::Key(format!("serialize: {e}")))?,
+    };
+    Ok((meta, stored))
 }
 
 /// The public half of a stored private key, as the key itself defines it:
@@ -97,18 +127,7 @@ pub fn parse_openssh_private(
 /// equivalent.
 pub fn public_identity(openssh: &str) -> Result<(KeyType, String, String)> {
     let public = match PrivateKey::from_openssh(openssh) {
-        Ok(private) => {
-            let line = private
-                .public_key()
-                .to_openssh()
-                .map_err(|e| CoreError::Key(format!("public serialize: {e}")))?;
-            let body = line
-                .split_whitespace()
-                .nth(1)
-                .ok_or_else(|| CoreError::Key("public key has no body".to_string()))?;
-            russh::keys::parse_public_key_base64(body)
-                .map_err(|e| CoreError::Key(format!("public parse: {e}")))?
-        }
+        Ok(private) => private.public_key().clone(),
         // Not an OpenSSH-format key: a PEM one can still be read, but only
         // while it is not itself encrypted.
         Err(_) => decode_secret_key(openssh, None)
@@ -128,17 +147,7 @@ pub fn generate_ed25519() -> Result<(String, String)> {
     let pem = private
         .to_openssh(ssh_key::LineEnding::LF)
         .map_err(|e| CoreError::Key(format!("serialize: {e}")))?;
-    let public_b64 = private
-        .public_key()
-        .to_openssh()
-        .map_err(|e| CoreError::Key(format!("public serialize: {e}")))?;
-    // Extract just the base64 part from "ssh-ed25519 AAAA... comment"
-    let public_b64 = public_b64
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or(&public_b64)
-        .to_string();
-    Ok((pem.to_string(), public_b64))
+    Ok((pem.to_string(), private.public_key().public_key_base64()))
 }
 
 #[cfg(test)]
@@ -161,9 +170,9 @@ mod tests {
         assert_eq!(public_key_base64, meta.public_key_base64);
     }
 
-    /// The vault stores whichever text was imported, and for a key carrying its
-    /// own passphrase that is the encrypted form. Its public half sits outside
-    /// the encrypted section, so it can still be read.
+    /// A vault can hold a key in its passphrase-protected form, so its identity
+    /// has to be readable without the passphrase. The public half sits outside
+    /// the encrypted section, so it is.
     #[test]
     fn a_passphrase_protected_key_still_reports_its_public_identity() {
         let (plain, _) = generate_ed25519().expect("generate");

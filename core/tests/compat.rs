@@ -1,31 +1,14 @@
-//! On-disk compatibility with state files written by earlier builds.
-//!
-//! The files under `tests/fixtures/compat` were produced by a released build
-//! and are never regenerated: they stand in for what existing users already
-//! have on disk. The vault holds three throwaway test keys (Ed25519, RSA and
-//! ECDSA), and the known hosts file pins the public halves of the same keys.
+//! On-disk compatibility with state files written by earlier builds; see
+//! `common` for what the fixtures hold.
+
+mod common;
 
 use clavyn_core::keys::{fingerprint, parse_openssh_private, KeyMeta, KeyType};
 use clavyn_core::known_hosts::KnownHosts;
 use clavyn_core::vault::Vault;
 use clavyn_core::CoreError;
-use russh::keys::parse_public_key_base64;
-use std::path::PathBuf;
-use tempfile::TempDir;
-
-const PASSPHRASE: &str = "compat-fixture-passphrase";
-
-fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/compat")
-}
-
-/// Copies a fixture into a temp dir so no test can rewrite the checked-in file.
-fn copy_fixture(name: &str, as_name: &str) -> (TempDir, PathBuf) {
-    let dir = tempfile::tempdir().expect("create temp dir");
-    let path = dir.path().join(as_name);
-    std::fs::copy(fixture_dir().join(name), &path).expect("copy fixture");
-    (dir, path)
-}
+use common::{copy_fixture, PASSPHRASE};
+use russh::keys::{parse_public_key_base64, HashAlg};
 
 #[tokio::test]
 async fn existing_vault_unlocks_and_its_keys_still_match_their_metadata() {
@@ -95,7 +78,7 @@ fn existing_host_key_pins_still_match_the_same_keys() {
         known_hosts
             .check_mismatch(&host, 22, &key)
             .unwrap_or_else(|e| panic!("{host} no longer matches its pin: {e}"));
-        assert!(known_hosts.verify(&host, 22, &key).expect("verify"), "{host}");
+        assert!(known_hosts.verify(&host, 22, &key, None).expect("verify"), "{host}");
     }
 
     // A matching pin is never rewritten.
@@ -118,4 +101,26 @@ fn existing_host_key_pins_still_reject_a_different_key() {
         }
         other => panic!("expected a host key mismatch, got {other:?}"),
     }
+}
+
+/// A pin recorded now reads exactly like the fixture's pin for the same key,
+/// including the negotiated `rsa-sha2-512` rather than the RSA key's own
+/// `ssh-rsa` type, so old and new entries agree in the known hosts list.
+#[test]
+fn a_new_pin_is_recorded_exactly_like_an_existing_one() {
+    let (_dir, path) = copy_fixture("known_hosts-v1.json", "known_hosts.json");
+    let mut existing = KnownHosts::load(path).expect("load pins").list();
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut fresh = KnownHosts::load(dir.path().join("known_hosts.json")).expect("empty store");
+    for (host, meta) in pinned_keys() {
+        let key = parse_public_key_base64(&meta.public_key_base64).expect("public key");
+        let hash = (meta.key_type == KeyType::Rsa).then_some(HashAlg::Sha512);
+        fresh.verify(&host, 22, &key, hash).expect("pin");
+    }
+    let mut recorded = fresh.list();
+
+    existing.sort();
+    recorded.sort();
+    assert_eq!(recorded, existing);
 }
