@@ -33,8 +33,9 @@ url = "2"
 [dev-dependencies]
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }
-# Host key tests need real server keys to pin, hold and forget. `russh::keys`
-# is the same russh-keys russh itself uses, so fixture types always match.
+# Host key tests need real server keys to pin, hold and forget. They generate
+# them through clavyn_core and parse them into `russh::keys::PublicKey`, the type
+# the known hosts store takes; the workspace pin keeps it the same russh.
 russh = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -6,7 +6,6 @@ use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
 use russh::ChannelMsg;
-use russh::CryptoVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -181,7 +180,7 @@ impl SessionManager {
             .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
         let handle = session.handle.lock().await;
         handle
-            .data(session.channel_id, CryptoVec::from(data.to_vec()))
+            .data(session.channel_id, data.to_vec())
             .await
             .map_err(|_| CoreError::Ssh("write failed".into()))?;
         Ok(())

@@ -1,0 +1,17 @@
+{
+  "host1.example.com:22": {
+    "key_type": "rsa-sha2-512",
+    "key_base64": "AAAAB3NzaC1yc2EAAAADAQABAAABAQCT4HVLl4VLXfEa6ZqJMIdRjxdGCl+X5pylmvqtCCFIyUcP2v3gEXGfdg844iAoRqbVNKEjSrMQaklmuPOPT1k9fdPtZ73Qsmb9GRl27uUqMdMn1f7V12u4ZlDUZ251xVFxDvI1kjEbcgZSQ5d47c2jiMNB1orNsACtZhIzHYrBp+ujdtX22Yan46AZFmEF7VqF9cKo+V+Hn/6gB+TJw6LZNiZ5oDaw1jTYuxRvrO9nukjcsHmRakvwSrCYKSuGkOX7dSIsjO0ip7Yu2djC7WiDzGhlo7OHdXaPoqdLiPJg8o1M9Fmoo6QhUJun8HdIRwhdLLvGA5jsl5L7PsktRMox",
+    "fingerprint": "iYZZ6AKRMeVKJrYvY94ON9HBEjv89AqISxZK/wyAE0M"
+  },
+  "host0.example.com:22": {
+    "key_type": "ssh-ed25519",
+    "key_base64": "AAAAC3NzaC1lZDI1NTE5AAAAIKE+1VcgdMcAkBtJbIvFkrWwRNJevyFEqlOmshwJAk/s",
+    "fingerprint": "QZzwFOKYsWhX9cbG9u0OY96qMHnp2tgpGLhS1SXxBqY"
+  },
+  "host2.example.com:22": {
+    "key_type": "ecdsa-sha2-nistp256",
+    "key_base64": "AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBI6rAeSnh+T6HEh1Y6/5l4ALGeb4ahLHcwwChR+EpugMBslzn9jmehbZLjCgY0uRdeDZJiS5oF4EnqdPBGw0tnQ=",
+    "fingerprint": "fDF5pSUnVfU9zY5FbDSRsCWqtEyXYQVoQipGWa4/VcQ"
+  }
+}

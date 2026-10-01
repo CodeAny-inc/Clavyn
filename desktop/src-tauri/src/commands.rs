@@ -2,7 +2,7 @@ use crate::host_key_prompt;
 use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
-use clavyn_core::keys::{generate_ed25519, parse_openssh_private, KeyMeta};
+use clavyn_core::keys::{generate_ed25519, import_openssh_private, parse_openssh_private, KeyMeta};
 use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
 use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
@@ -152,13 +152,11 @@ pub async fn import_key(
     openssh_private: String,
     key_passphrase: Option<String>,
 ) -> ApiResult<KeyMeta> {
-    let (mut meta, _pair) =
-        parse_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
+    let (mut meta, stored) =
+        import_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
-    vault
-        .add_key(&key, meta.clone(), &openssh_private)
-        .map_err(err)?;
+    vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
     Ok(meta)
 }
 
@@ -1660,7 +1658,8 @@ mod connect_lock_tests {
 mod known_host_confirmation_tests {
     use super::{forget_confirmed, replace_confirmed};
     use clavyn_core::known_hosts::KnownHosts;
-    use russh::keys::key::{KeyPair, PublicKey};
+    use clavyn_core::keys::{fingerprint, generate_ed25519};
+    use russh::keys::{parse_public_key_base64, PublicKey};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -1671,9 +1670,8 @@ mod known_host_confirmation_tests {
     const DECLINED: &str = "Forget host key: cancelled";
 
     fn server_key() -> PublicKey {
-        KeyPair::generate_ed25519()
-            .clone_public_key()
-            .expect("public key")
+        let (_, public_base64) = generate_ed25519().expect("generate");
+        parse_public_key_base64(&public_base64).expect("public key")
     }
 
     fn store(dir: &std::path::Path) -> Mutex<KnownHosts> {
@@ -1682,7 +1680,7 @@ mod known_host_confirmation_tests {
 
     async fn removed_host(store: &Mutex<KnownHosts>, key: &PublicKey) {
         let mut kh = store.lock().await;
-        kh.verify(HOST, PORT, key).expect("first use");
+        kh.verify(HOST, PORT, key, None).expect("first use");
         kh.remove(HOST, PORT).expect("remove");
     }
 
@@ -1701,7 +1699,7 @@ mod known_host_confirmation_tests {
         let kh = store.lock().await;
         assert_eq!(
             kh.retained_fingerprint(HOST, PORT),
-            Some(pinned.fingerprint()),
+            Some(fingerprint(&pinned)),
             "the retained key did not survive the refusal"
         );
         // Still remembered, so a different key is reported as a change rather
@@ -1724,7 +1722,7 @@ mod known_host_confirmation_tests {
         .await
         .expect("forget");
 
-        assert_eq!(shown.into_inner(), pinned.fingerprint());
+        assert_eq!(shown.into_inner(), fingerprint(&pinned));
         assert_eq!(store.lock().await.retained_fingerprint(HOST, PORT), None);
     }
 
@@ -1739,7 +1737,7 @@ mod known_host_confirmation_tests {
             // The host is re-pinned to another key and removed again while the
             // user is still reading the first fingerprint.
             let mut kh = store.lock().await;
-            kh.replace(HOST, PORT, &replacement).expect("replace");
+            kh.replace(HOST, PORT, &replacement, None).expect("replace");
             kh.remove(HOST, PORT).expect("remove");
             Ok(())
         })
@@ -1749,7 +1747,7 @@ mod known_host_confirmation_tests {
         assert!(error.contains("changed while the confirmation was open"));
         assert_eq!(
             store.lock().await.retained_fingerprint(HOST, PORT),
-            Some(replacement.fingerprint())
+            Some(fingerprint(&replacement))
         );
     }
 
@@ -1760,7 +1758,7 @@ mod known_host_confirmation_tests {
         store
             .lock()
             .await
-            .verify(HOST, PORT, &server_key())
+            .verify(HOST, PORT, &server_key(), None)
             .expect("first use");
 
         let error = forget_confirmed(&store, HOST, PORT, |_| async {
@@ -1780,11 +1778,11 @@ mod known_host_confirmation_tests {
         let presented = server_key();
         {
             let mut kh = store.lock().await;
-            kh.verify(HOST, PORT, &pinned).expect("first use");
-            kh.hold_presented_key(HOST, PORT, &presented);
+            kh.verify(HOST, PORT, &pinned, None).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented, None);
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             Err("Host key changed: cancelled".to_string())
         })
         .await
@@ -1807,12 +1805,12 @@ mod known_host_confirmation_tests {
         let presented = server_key();
         {
             let mut kh = store.lock().await;
-            kh.verify(HOST, PORT, &pinned).expect("first use");
-            kh.hold_presented_key(HOST, PORT, &presented);
+            kh.verify(HOST, PORT, &pinned, None).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented, None);
         }
 
         let shown = std::cell::RefCell::new(None);
-        replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |change| {
+        replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |change| {
             *shown.borrow_mut() = Some(change);
             async { Ok(()) }
         })
@@ -1821,8 +1819,8 @@ mod known_host_confirmation_tests {
 
         let change = shown.into_inner().expect("nothing was confirmed");
         assert_eq!(change.host, "prod.example.com:22");
-        assert_eq!(change.pinned_fingerprint, pinned.fingerprint());
-        assert_eq!(change.presented_fingerprint, presented.fingerprint());
+        assert_eq!(change.pinned_fingerprint, fingerprint(&pinned));
+        assert_eq!(change.presented_fingerprint, fingerprint(&presented));
         assert!(store
             .lock()
             .await
@@ -1837,11 +1835,11 @@ mod known_host_confirmation_tests {
         let pinned = server_key();
         {
             let mut kh = store.lock().await;
-            kh.verify(HOST, PORT, &pinned).expect("first use");
-            kh.hold_presented_key(HOST, PORT, &server_key());
+            kh.verify(HOST, PORT, &pinned, None).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &server_key(), None);
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &server_key().fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&server_key()), |_| async {
             panic!("a key that is not going to be pinned should never be asked about");
         })
         .await
@@ -1857,18 +1855,18 @@ mod known_host_confirmation_tests {
         let presented = server_key();
         {
             let mut kh = store.lock().await;
-            kh.verify(HOST, PORT, &server_key()).expect("first use");
-            kh.hold_presented_key(HOST, PORT, &presented);
+            kh.verify(HOST, PORT, &server_key(), None).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented, None);
         }
         let repinned = server_key();
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             // The host is pinned to a third key while the user is still
             // comparing the two the dialog printed.
             store
                 .lock()
                 .await
-                .replace(HOST, PORT, &repinned)
+                .replace(HOST, PORT, &repinned, None)
                 .expect("replace");
             Ok(())
         })
@@ -1893,11 +1891,11 @@ mod known_host_confirmation_tests {
         let presented = server_key();
         {
             let mut kh = store.lock().await;
-            kh.verify(HOST, PORT, &server_key()).expect("first use");
-            kh.hold_presented_key(HOST, PORT, &presented);
+            kh.verify(HOST, PORT, &server_key(), None).expect("first use");
+            kh.hold_presented_key(HOST, PORT, &presented, None);
         }
 
-        let error = replace_confirmed(&store, HOST, PORT, &presented.fingerprint(), |_| async {
+        let error = replace_confirmed(&store, HOST, PORT, &fingerprint(&presented), |_| async {
             store.lock().await.remove(HOST, PORT).expect("remove");
             Ok(())
         })
@@ -1929,7 +1927,7 @@ mod known_host_confirmation_tests {
         store
             .lock()
             .await
-            .verify(HOST, PORT, &server_key())
+            .verify(HOST, PORT, &server_key(), None)
             .expect("first use");
 
         let asked = Arc::new(AtomicUsize::new(0));
@@ -1982,16 +1980,16 @@ mod known_host_confirmation_tests {
         store
             .lock()
             .await
-            .verify(HOST, PORT, &pinned)
+            .verify(HOST, PORT, &pinned, None)
             .expect("first use");
 
-        let fingerprint = presented.fingerprint();
+        let reviewed = fingerprint(&presented);
         let asked = Arc::new(AtomicUsize::new(0));
         let mut burst = JoinSet::new();
         for i in 0..400 {
             let store = Arc::clone(&store);
             let asked = Arc::clone(&asked);
-            let fingerprint = fingerprint.clone();
+            let reviewed = reviewed.clone();
             let presented = presented.clone();
             burst.spawn(async move {
                 // The connection path holds the changed key mid-burst.
@@ -1999,10 +1997,10 @@ mod known_host_confirmation_tests {
                     store
                         .lock()
                         .await
-                        .hold_presented_key(HOST, PORT, &presented);
+                        .hold_presented_key(HOST, PORT, &presented, None);
                     return;
                 }
-                let _ = replace_confirmed(&store, HOST, PORT, &fingerprint, |_| async move {
+                let _ = replace_confirmed(&store, HOST, PORT, &reviewed, |_| async move {
                     asked.fetch_add(1, Ordering::SeqCst);
                     Err("Host key changed: cancelled".to_string())
                 })

@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
-use russh::keys::key::PublicKey;
-use russh::keys::PublicKeyBase64;
+use crate::keys::fingerprint;
+use russh::keys::{Algorithm, HashAlg, PublicKey, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,9 +12,10 @@ pub struct KnownHosts {
     path: PathBuf,
     entries: HashMap<String, KnownHostEntry>,
     /// Server keys that conflict with a pinned entry, held until the user
-    /// reviews them. Never written to disk: a key nobody has trusted must not
-    /// outlive the process that saw it.
-    presented: HashMap<String, PublicKey>,
+    /// reviews them, each with the RSA hash it was presented under. Never
+    /// written to disk: a key nobody has trusted must not outlive the process
+    /// that saw it.
+    presented: HashMap<String, (PublicKey, Option<HashAlg>)>,
 }
 
 /// A server key that differs from the one pinned for its host and is waiting
@@ -104,7 +105,16 @@ impl KnownHosts {
     ///
     /// A tombstoned entry whose key is presented again is restored, so a host
     /// removed by mistake becomes visible in `list` after the next connection.
-    pub fn verify(&mut self, host: &str, port: u16, key: &PublicKey) -> Result<bool> {
+    ///
+    /// `hash` is the RSA hash of the host-key algorithm negotiated for the key;
+    /// see [`host_key_type`].
+    pub fn verify(
+        &mut self,
+        host: &str,
+        port: u16,
+        key: &PublicKey,
+        hash: Option<HashAlg>,
+    ) -> Result<bool> {
         // `check_mismatch` is the only place a presented key is compared with a
         // recorded one, so the two callers cannot drift apart.
         if self.check_mismatch(host, port, key).is_err() {
@@ -119,9 +129,9 @@ impl KnownHosts {
             return Ok(true);
         }
         let entry = KnownHostEntry {
-            key_type: key.name().to_string(),
+            key_type: host_key_type(key, hash),
             key_base64: key.public_key_base64(),
-            fingerprint: key.fingerprint(),
+            fingerprint: fingerprint(key),
             removed: false,
         };
         self.commit(|known_hosts| {
@@ -131,12 +141,18 @@ impl KnownHosts {
     }
 
     /// Explicitly replace a host key after user confirmation of a mismatch.
-    pub fn replace(&mut self, host: &str, port: u16, key: &PublicKey) -> Result<()> {
+    pub fn replace(
+        &mut self,
+        host: &str,
+        port: u16,
+        key: &PublicKey,
+        hash: Option<HashAlg>,
+    ) -> Result<()> {
         let k = key_path(host, port);
         let entry = KnownHostEntry {
-            key_type: key.name().to_string(),
+            key_type: host_key_type(key, hash),
             key_base64: key.public_key_base64(),
-            fingerprint: key.fingerprint(),
+            fingerprint: fingerprint(key),
             removed: false,
         };
         self.commit(|known_hosts| {
@@ -236,7 +252,7 @@ impl KnownHosts {
             Some(existing) => Err(CoreError::HostKeyMismatch {
                 host: k,
                 pinned: existing.fingerprint.clone(),
-                presented: key.fingerprint(),
+                presented: fingerprint(key),
             }),
         }
     }
@@ -244,8 +260,14 @@ impl KnownHosts {
     /// Hold a server key that conflicts with the pinned entry so the user can
     /// compare fingerprints and accept it deliberately, instead of unpinning the
     /// host and trusting whatever key answers the next connection.
-    pub fn hold_presented_key(&mut self, host: &str, port: u16, key: &PublicKey) {
-        self.presented.insert(key_path(host, port), key.clone());
+    pub fn hold_presented_key(
+        &mut self,
+        host: &str,
+        port: u16,
+        key: &PublicKey,
+        hash: Option<HashAlg>,
+    ) {
+        self.presented.insert(key_path(host, port), (key.clone(), hash));
     }
 
     /// Key changes waiting for the user to review them.
@@ -260,13 +282,13 @@ impl KnownHosts {
     /// conflicts with the pin. Reads the fingerprints out of the held key rather
     /// than out of a caller's argument, so what is shown is what arrived.
     fn change_for(&self, k: &str) -> Option<HostKeyChange> {
-        let key = self.presented.get(k)?;
+        let (key, hash) = self.presented.get(k)?;
         let entry = self.entries.get(k)?;
         Some(HostKeyChange {
             host: k.to_string(),
-            key_type: key.name().to_string(),
+            key_type: host_key_type(key, *hash),
             pinned_fingerprint: entry.fingerprint.clone(),
-            presented_fingerprint: key.fingerprint(),
+            presented_fingerprint: fingerprint(key),
         })
     }
 
@@ -280,15 +302,19 @@ impl KnownHosts {
         &self,
         host: &str,
         port: u16,
-        fingerprint: &str,
+        reviewed: &str,
     ) -> Result<HostKeyChange> {
-        self.confirmable(&key_path(host, port), fingerprint)
+        self.confirmable(&key_path(host, port), reviewed)
             .map(|(change, _)| change)
     }
 
     /// The change and the key behind it, so the check and the pin read the same
     /// held key rather than looking it up twice.
-    fn confirmable(&self, k: &str, fingerprint: &str) -> Result<(HostKeyChange, PublicKey)> {
+    fn confirmable(
+        &self,
+        k: &str,
+        reviewed: &str,
+    ) -> Result<(HostKeyChange, (PublicKey, Option<HashAlg>))> {
         let unheld = || {
             CoreError::InvalidInput(format!(
                 "no unreviewed host key for {k}; reconnect to see the key the server presents"
@@ -299,7 +325,7 @@ impl KnownHosts {
         // compare it with there is no pinned fingerprint to put in front of the
         // user, so there is nothing to confirm and nothing to replace either.
         let change = self.change_for(k).ok_or_else(unheld)?;
-        if change.presented_fingerprint != fingerprint {
+        if change.presented_fingerprint != reviewed {
             return Err(CoreError::InvalidInput(format!(
                 "the host key for {k} is not the one that was reviewed; reconnect and compare the fingerprints again"
             )));
@@ -310,10 +336,10 @@ impl KnownHosts {
     /// Pin a held key in place of the recorded one. The caller passes the
     /// fingerprint it showed the user, so a view rendered before another key
     /// arrived cannot trust a key nobody looked at.
-    pub fn trust_presented_key(&mut self, host: &str, port: u16, fingerprint: &str) -> Result<()> {
+    pub fn trust_presented_key(&mut self, host: &str, port: u16, reviewed: &str) -> Result<()> {
         let k = key_path(host, port);
-        let (_, key) = self.confirmable(&k, fingerprint)?;
-        self.replace(host, port, &key)?;
+        let (_, (key, hash)) = self.confirmable(&k, reviewed)?;
+        self.replace(host, port, &key, hash)?;
         self.presented.remove(&k);
         Ok(())
     }
@@ -323,20 +349,35 @@ fn key_path(host: &str, port: u16) -> String {
     format!("{host}:{port}")
 }
 
+/// The host-key algorithm a key was accepted under, as recorded in `key_type`.
+///
+/// An RSA key's own type is always `ssh-rsa`, but the signature algorithm
+/// (`rsa-sha2-512`, `rsa-sha2-256`) is chosen during key exchange and passed in
+/// as `hash`, and that negotiated name is what gets recorded. Other key types
+/// have a single algorithm and ignore `hash`.
+fn host_key_type(key: &PublicKey, hash: Option<HashAlg>) -> String {
+    match key.algorithm() {
+        Algorithm::Rsa { .. } => Algorithm::Rsa { hash }.as_str().to_string(),
+        other => other.as_str().to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::KnownHosts;
+    use crate::keys::fingerprint;
     use crate::CoreError;
-    use russh::keys::key::{KeyPair, PublicKey};
-    use russh::keys::PublicKeyBase64;
+    use russh::keys::{Algorithm, PrivateKey, PublicKey, PublicKeyBase64};
 
     const HOST: &str = "prod.example.com";
     const PORT: u16 = 22;
 
     fn server_key() -> PublicKey {
-        KeyPair::generate_ed25519()
-            .clone_public_key()
-            .expect("public key")
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
+        PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .expect("generate")
+            .public_key()
+            .clone()
     }
 
     fn empty_store(dir: &std::path::Path) -> KnownHosts {
@@ -347,10 +388,10 @@ mod tests {
     fn a_second_key_for_a_pinned_host_is_not_accepted() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
-        assert!(hosts.verify(HOST, PORT, &server_key()).expect("first use"));
+        assert!(hosts.verify(HOST, PORT, &server_key(), None).expect("first use"));
 
         assert!(!hosts
-            .verify(HOST, PORT, &server_key())
+            .verify(HOST, PORT, &server_key(), None)
             .expect("second key"));
     }
 
@@ -360,7 +401,7 @@ mod tests {
         let mut hosts = empty_store(dir.path());
         let pinned = server_key();
         let presented = server_key();
-        hosts.verify(HOST, PORT, &pinned).expect("first use");
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
 
         let error = match hosts.check_mismatch(HOST, PORT, &presented) {
             Ok(()) => panic!("a different host key was accepted as a match"),
@@ -373,21 +414,21 @@ mod tests {
                 presented: offered,
             } => {
                 assert_eq!(host, "prod.example.com:22");
-                assert_eq!(recorded, &pinned.fingerprint());
-                assert_eq!(offered, &presented.fingerprint());
+                assert_eq!(recorded, &fingerprint(&pinned));
+                assert_eq!(offered, &fingerprint(&presented));
             }
             other => panic!("unexpected error: {other}"),
         }
         let message = error.to_string();
-        assert!(message.contains(&pinned.fingerprint()), "{message}");
-        assert!(message.contains(&presented.fingerprint()), "{message}");
+        assert!(message.contains(&fingerprint(&pinned)), "{message}");
+        assert!(message.contains(&fingerprint(&presented)), "{message}");
     }
 
     #[test]
     fn a_removed_host_does_not_fall_back_to_first_use() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
-        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.verify(HOST, PORT, &server_key(), None).expect("first use");
         hosts.remove(HOST, PORT).expect("remove");
         assert!(hosts.list().is_empty());
 
@@ -395,7 +436,7 @@ mod tests {
         assert!(hosts
             .check_mismatch(HOST, PORT, &attacker)
             .is_err_and(|e| matches!(e, CoreError::HostKeyMismatch { .. })));
-        assert!(!hosts.verify(HOST, PORT, &attacker).expect("verify"));
+        assert!(!hosts.verify(HOST, PORT, &attacker, None).expect("verify"));
     }
 
     #[test]
@@ -403,10 +444,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
         let key = server_key();
-        hosts.verify(HOST, PORT, &key).expect("first use");
+        hosts.verify(HOST, PORT, &key, None).expect("first use");
         hosts.remove(HOST, PORT).expect("remove");
 
-        assert!(hosts.verify(HOST, PORT, &key).expect("reconnect"));
+        assert!(hosts.verify(HOST, PORT, &key, None).expect("reconnect"));
         assert_eq!(hosts.list().len(), 1);
     }
 
@@ -419,17 +460,17 @@ mod tests {
             &path,
             format!(
                 r#"{{"prod.example.com:22":{{"key_type":"{}","key_base64":"{}","fingerprint":"{}"}}}}"#,
-                pinned.name(),
+                pinned.algorithm().as_str(),
                 pinned.public_key_base64(),
-                pinned.fingerprint()
+                fingerprint(&pinned)
             ),
         )
         .expect("write known hosts");
 
         let mut hosts = KnownHosts::load(path).expect("load");
         assert_eq!(hosts.list().len(), 1);
-        assert!(hosts.verify(HOST, PORT, &pinned).expect("pinned key"));
-        assert!(!hosts.verify(HOST, PORT, &server_key()).expect("other key"));
+        assert!(hosts.verify(HOST, PORT, &pinned, None).expect("pinned key"));
+        assert!(!hosts.verify(HOST, PORT, &server_key(), None).expect("other key"));
     }
 
     #[test]
@@ -438,23 +479,23 @@ mod tests {
         let mut hosts = empty_store(dir.path());
         let pinned = server_key();
         let presented = server_key();
-        hosts.verify(HOST, PORT, &pinned).expect("first use");
-        hosts.hold_presented_key(HOST, PORT, &presented);
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
+        hosts.hold_presented_key(HOST, PORT, &presented, None);
 
         let changes = hosts.pending_changes();
         assert_eq!(changes.len(), 1);
-        assert_eq!(changes[0].pinned_fingerprint, pinned.fingerprint());
-        assert_eq!(changes[0].presented_fingerprint, presented.fingerprint());
+        assert_eq!(changes[0].pinned_fingerprint, fingerprint(&pinned));
+        assert_eq!(changes[0].presented_fingerprint, fingerprint(&presented));
 
         let error = hosts
-            .trust_presented_key(HOST, PORT, &pinned.fingerprint())
+            .trust_presented_key(HOST, PORT, &fingerprint(&pinned))
             .expect_err("a fingerprint the user never reviewed was accepted");
         assert!(error.to_string().contains("not the one that was reviewed"));
 
         hosts
-            .trust_presented_key(HOST, PORT, &presented.fingerprint())
+            .trust_presented_key(HOST, PORT, &fingerprint(&presented))
             .expect("trust reviewed key");
-        assert!(hosts.verify(HOST, PORT, &presented).expect("verify"));
+        assert!(hosts.verify(HOST, PORT, &presented, None).expect("verify"));
         assert!(hosts.pending_changes().is_empty());
     }
 
@@ -463,7 +504,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
         let pinned = server_key();
-        hosts.verify(HOST, PORT, &pinned).expect("first use");
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
 
         let error = hosts
             .trust_presented_key(HOST, PORT, "SHA256:whatever")
@@ -476,13 +517,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
         let key = server_key();
-        hosts.verify(HOST, PORT, &key).expect("first use");
+        hosts.verify(HOST, PORT, &key, None).expect("first use");
         hosts.remove(HOST, PORT).expect("remove");
 
         let removed = hosts.removed();
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].0, "prod.example.com:22");
-        assert_eq!(removed[0].2, key.fingerprint());
+        assert_eq!(removed[0].2, fingerprint(&key));
         assert!(hosts.list().is_empty());
     }
 
@@ -500,7 +541,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("known_hosts.json");
         let mut hosts = KnownHosts::load(path.clone()).expect("load");
-        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.verify(HOST, PORT, &server_key(), None).expect("first use");
         hosts.remove(HOST, PORT).expect("remove");
         let retained = hosts
             .forgettable_fingerprint(HOST, PORT)
@@ -531,9 +572,9 @@ mod tests {
         let mut hosts = KnownHosts::load(path.clone()).expect("load");
         let pinned = server_key();
         let presented = server_key();
-        hosts.verify(HOST, PORT, &pinned).expect("first use");
-        hosts.hold_presented_key(HOST, PORT, &presented);
-        let shown = presented.fingerprint();
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
+        hosts.hold_presented_key(HOST, PORT, &presented, None);
+        let shown = fingerprint(&presented);
 
         block_writes(&path);
         hosts
@@ -544,7 +585,7 @@ mod tests {
         // the presented key would be pinned in memory for the rest of the
         // process and absent after a restart, so the same host would be trusted
         // now and challenged later.
-        assert!(hosts.verify(HOST, PORT, &pinned).expect("original pin"));
+        assert!(hosts.verify(HOST, PORT, &pinned, None).expect("original pin"));
         assert!(hosts.check_mismatch(HOST, PORT, &presented).is_err());
     }
 
@@ -553,7 +594,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("known_hosts.json");
         let mut hosts = KnownHosts::load(path.clone()).expect("load");
-        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.verify(HOST, PORT, &server_key(), None).expect("first use");
         hosts.remove(HOST, PORT).expect("remove");
         hosts.forget(HOST, PORT).expect("forget");
 
@@ -566,7 +607,7 @@ mod tests {
         // The host is deliberately back on first use, which is the whole point
         // of forgetting it.
         let mut reloaded = KnownHosts::load(path).expect("reload");
-        assert!(reloaded.verify(HOST, PORT, &server_key()).expect("verify"));
+        assert!(reloaded.verify(HOST, PORT, &server_key(), None).expect("verify"));
     }
 
     #[test]
@@ -574,14 +615,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
         let pinned = server_key();
-        hosts.verify(HOST, PORT, &pinned).expect("first use");
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
 
         let error = hosts
             .forget(HOST, PORT)
             .expect_err("a live pin was erased without being removed first");
         assert!(error.to_string().contains("still trusted"), "{error}");
         assert_eq!(hosts.list().len(), 1);
-        assert!(!hosts.verify(HOST, PORT, &server_key()).expect("other key"));
+        assert!(!hosts.verify(HOST, PORT, &server_key(), None).expect("other key"));
     }
 
     #[test]
@@ -599,7 +640,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("known_hosts.json");
         let mut hosts = KnownHosts::load(path.clone()).expect("load");
-        hosts.verify(HOST, PORT, &server_key()).expect("first use");
+        hosts.verify(HOST, PORT, &server_key(), None).expect("first use");
 
         let live = std::fs::read_to_string(&path).expect("read back");
         assert!(!live.contains("removed"), "{live}");
