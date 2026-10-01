@@ -28,8 +28,9 @@ key's eye icon to reveal its public key; copy icon to copy; trash to delete.
 
 ## Gotchas
 
-- The native file dialog (`@tauri-apps/plugin-dialog` `open`) is **not**
-  mocked by the base fixture. Importing from a file will hang/fail in the
-  harness; use the paste-textarea import path instead, or extend the fixture.
+- Importing from a file goes through the `pick_key_file` command, which opens
+  the native file dialog in the backend. The base fixture does not mock it, so
+  that path fails in the harness; use the paste-textarea import path instead,
+  or extend the fixture.
 - Private key material is never rendered. Assert only on public keys /
   metadata (`list_keys` returns `KeyMeta` without private material).

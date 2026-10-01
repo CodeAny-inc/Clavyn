@@ -4,6 +4,7 @@ mod biometric;
 mod biometric_commands;
 mod commands;
 mod host_key_prompt;
+mod local_files;
 mod sftp_transfer;
 mod state;
 mod vault_commands;
@@ -108,6 +109,7 @@ fn main() {
                 .expect("no app data dir");
             let state = AppState::init(app.handle(), app_data)?;
             app.manage(state);
+            app.manage(local_files::LocalFileGrants::default());
 
             Ok(())
         })
@@ -163,9 +165,10 @@ fn main() {
             commands::sftp_remove_dir,
             commands::sftp_rename,
             commands::sftp_close,
+            local_files::sftp_pick_upload_file,
             sftp_transfer::sftp_download_to_local,
             sftp_transfer::sftp_upload_from_local,
-            commands::read_key_file,
+            local_files::pick_key_file,
             commands::get_app_info,
             commands::check_for_updates,
             commands::install_update,
