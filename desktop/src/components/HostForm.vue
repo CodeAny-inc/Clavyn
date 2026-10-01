@@ -2,6 +2,7 @@
 import { ref, computed, watch } from "vue";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
+import { useVaultStore } from "../stores/vault";
 import { useIdentitiesStore } from "../stores/identities";
 import Dialog from "./ui/Dialog.vue";
 import Button from "./ui/Button.vue";
@@ -17,6 +18,7 @@ const emit = defineEmits<{ close: [] }>();
 
 const hosts = useHostsStore();
 const keys = useKeysStore();
+const vault = useVaultStore();
 const identities = useIdentitiesStore();
 
 const showInlineGroup = ref(false);
@@ -256,7 +258,10 @@ async function save() {
               {{ key.label }} ({{ key.key_type }})
             </option>
           </Select>
-          <p v-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
+          <p v-if="!vault.unlocked" class="text-[11px] text-muted-foreground mt-1">
+            Unlock the vault to choose a key.
+          </p>
+          <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
             No keys available. Add one in the Keys section.
           </p>
         </FormGroup>

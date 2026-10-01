@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import * as api from "../api";
 import { useKeysStore } from "./keys";
 
@@ -17,6 +17,17 @@ export const useVaultStore = defineStore("vault", () => {
   const needsUnlock = computed(
     () => initialized.value && !unlocked.value,
   );
+
+  // Key metadata comes from the vault header and is only authenticated when the
+  // vault is decrypted, so the backend hands it out only while unlocked. It is
+  // loaded on every unlock and dropped on every lock, however either happens.
+  watch(unlocked, (isUnlocked) => {
+    if (isUnlocked) {
+      keysStore.load().catch((e) => console.error("Failed to load keys:", e));
+    } else {
+      keysStore.clear();
+    }
+  });
 
   let biometricStateRevision = 0;
   let biometricMutationTail: Promise<void> = Promise.resolve();
