@@ -130,7 +130,7 @@ fn test_import_with_passphrase_stores_the_key_decrypted() {
 fn test_import_without_passphrase_stores_the_key_as_given() {
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (_, stored) = import_openssh_private(&private_pem, None).expect("import key");
-    assert_eq!(stored.as_str(), private_pem);
+    assert_eq!(stored.as_str(), private_pem.as_str());
 }
 
 #[test]
@@ -302,7 +302,7 @@ async fn test_vault_add_and_get_key() {
         .get_key("passphrase", &key_id.to_string())
         .await
         .expect("get key");
-    let retrieved_str = String::from_utf8(retrieved).unwrap();
+    let retrieved_str = String::from_utf8(retrieved.to_vec()).unwrap();
     assert!(retrieved_str.contains("BEGIN OPENSSH PRIVATE KEY"));
 }
 
@@ -376,7 +376,7 @@ async fn test_vault_persistence() {
         .get_key("passphrase", &key_id.to_string())
         .await
         .expect("get key");
-    assert!(String::from_utf8(retrieved).unwrap().contains("OPENSSH PRIVATE KEY"));
+    assert!(String::from_utf8(retrieved.to_vec()).unwrap().contains("OPENSSH PRIVATE KEY"));
 }
 
 // ============================================================

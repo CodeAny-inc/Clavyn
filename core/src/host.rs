@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// A saved SSH host. Sensitive fields (passwords) are never serialized here —
-/// they live in the OS keychain. Key references point to vault key ids.
+/// A saved SSH host. Passwords are never stored: each connection prompts for
+/// one and drops it once the connection is made. Key references point to vault
+/// key ids.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Host {
     pub id: Uuid,
@@ -32,7 +33,9 @@ pub struct Host {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthMethod {
-    /// Password resolved at connect time from OS keychain by `credential_key`.
+    /// Password authentication. The password itself is prompted for at each
+    /// connection and never stored; `credential_key` is a label kept for the
+    /// stored format and nothing looks anything up by it.
     Password { credential_key: String },
     PublicKey,
     Agent,

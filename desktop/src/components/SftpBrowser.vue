@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { basename } from "@tauri-apps/api/path";
-import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
   ArrowUp,
@@ -19,7 +17,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-vue-next";
-import { sftpCanonicalize, type SftpEntry } from "../api";
+import { sftpCanonicalize, sftpPickUploadFile, type SftpEntry } from "../api";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { useSftpStore } from "../stores/sftp";
@@ -27,7 +25,6 @@ import {
   configuredSshEndpoint,
   effectiveSshIdentity,
   passwordAuth,
-  resolvedSshHost,
   sshConfigurationKey,
   sshIdentityReady,
 } from "../lib/sshIdentity";
@@ -160,11 +157,9 @@ async function connect() {
       sftp.error = "Connection settings changed. Re-enter credentials for the updated account.";
       return;
     }
-    // Freeze the exact effective identity into this attempt. Native SFTP then
-    // authenticates that reviewed username/auth/key snapshot instead of
-    // re-resolving a same-id identity that may have changed after preflight.
-    const transportHost = resolvedSshHost(latest, identities.identities);
-    const request = sftp.connect(transportHost, credential, effective.username);
+    // The backend resolves the saved host and its identity itself; passing the
+    // reviewed username makes it refuse an account that changed since preflight.
+    const request = sftp.connect(latest, credential, effective.username);
     credential = null;
     await request;
     showConnectForm.value = false;
@@ -301,9 +296,7 @@ async function downloadEntry(entry: SftpEntry) {
   if (entry.is_dir) return;
 
   try {
-    const localPath = await save({ defaultPath: entry.name });
-    if (!localPath) return;
-    await sftp.downloadFile(entry, localPath);
+    await sftp.downloadFile(entry);
   } catch {
     // Store exposes the error.
   }
@@ -311,12 +304,11 @@ async function downloadEntry(entry: SftpEntry) {
 
 async function upload() {
   try {
-    const localPath = await open({ multiple: false, directory: false });
-    if (!localPath || typeof localPath !== "string") return;
-
-    // Use Tauri's cross-platform path implementation rather than splitting on
-    // '/', which produced invalid remote names for Windows paths.
-    const fileName = await basename(localPath);
+    // The native dialog runs in the backend, which hands back a token for the
+    // picked file and its name, never the local path.
+    const picked = await sftpPickUploadFile();
+    if (!picked) return;
+    const fileName = picked.name;
     const existing = sftp.entries.find((entry) => entry.name === fileName);
     let overwrite = false;
 
@@ -331,7 +323,7 @@ async function upload() {
       if (!overwrite) return;
     }
 
-    await sftp.uploadFile(fileName, localPath, overwrite);
+    await sftp.uploadFile(fileName, picked.token, overwrite);
   } catch {
     // Store exposes transfer errors. Dialog cancellation returns above.
   }

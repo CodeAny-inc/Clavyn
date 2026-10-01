@@ -9,7 +9,8 @@ A community-driven alternative to Termius.
 ## Goals
 
 - **Secure by default.** Private keys encrypted at rest (Argon2id + AES-256-GCM).
-  OS keychain stores the vault passphrase. TOFU host-key verification with no
+  The vault passphrase is never stored (optional Touch ID unlock on macOS keeps
+  it in the Keychain). TOFU host-key verification with no
   silent auto-accept on mismatch. Private material is zeroized on drop.
 - **Fast & light.** Tauri shell (~10 MB binaries) instead of Electron.
 - **Cross-platform.** One Rust core, multiple UIs:
@@ -90,8 +91,8 @@ now just tell your OS it's fine to open Clavyn. :)
 | Asset                | At rest                         | In memory                |
 |----------------------|---------------------------------|--------------------------|
 | Private keys         | AES-256-GCM in `vault.json`     | `Zeroizing` wrappers     |
-| Vault passphrase     | OS keychain (UI-managed)        | `Zeroizing<String>`      |
-| Host passwords       | OS keychain only                | never in core state      |
+| Vault passphrase     | not stored (Keychain only with Touch ID unlock on macOS) | `Zeroizing<String>` while unlocked |
+| Host passwords       | not stored, asked per connection | `Zeroizing<String>` during connect |
 | known_hosts          | plaintext JSON (public keys)    | n/a                      |
 
 A server key that differs from the pinned one fails the connection with

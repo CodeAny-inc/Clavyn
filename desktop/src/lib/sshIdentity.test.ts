@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, linkedSshIdentityMissing, passwordAuth, resolvedSshHost, sshConfigurationKey } from "./sshIdentity";
+import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, linkedSshIdentityMissing, passwordAuth, sshConfigurationKey } from "./sshIdentity";
 import type { Host, Identity } from "../types";
 
 const host: Host = { id: "host", label: "Host", hostname: "server.example.test", port: 22,
@@ -13,38 +13,15 @@ describe("shared SSH identity presentation", () => {
     expect(configuredSshEndpoint(host, [identity])).toBe("root@server.example.test:22");
     expect(host.username).toBe("deploy");
   });
-  it("pins the complete effective identity into a transport-only host", () => {
-    let keyIdentity: Identity = { ...identity, auth: "publickey", key_id: "effective-key" };
-    const transport = resolvedSshHost(host, [keyIdentity]);
-
-    expect(transport).toEqual({
-      ...host,
-      username: "root",
-      auth: "publickey",
-      key_id: "effective-key",
-      identity_id: null,
-    });
-    expect(host).toEqual({
-      id: "host", label: "Host", hostname: "server.example.test", port: 22,
-      username: "deploy", auth: "agent", identity_id: "identity", key_id: "old", tags: [],
-    });
-
-    // A later edit to the saved identity cannot mutate this attempt's snapshot.
-    keyIdentity = { ...keyIdentity, auth: "agent", key_id: "replacement-key" };
-    expect(transport.auth).toBe("publickey");
-    expect(transport.key_id).toBe("effective-key");
-  });
   it("preserves a broken identity reference so native authentication can fail closed", () => {
     expect(linkedSshIdentityMissing(host, [])).toBe(true);
     expect(configuredSshEndpoint(host, [])).toBe("Missing SSH identity · server.example.test:22");
-    expect(resolvedSshHost(host, [])).toEqual(host);
     expect(effectiveSshIdentity(host, []).missing).toBe(true);
   });
   it("keeps direct hosts self-contained", () => {
     const direct = { ...host, identity_id: null };
     expect(linkedSshIdentityMissing(direct, [])).toBe(false);
     expect(configuredSshEndpoint(direct, [])).toBe("deploy@server.example.test:22");
-    expect(resolvedSshHost(direct, []).identity_id).toBeNull();
   });
   it("recognizes effective password auth and formats IPv6 unambiguously", () => {
     expect(passwordAuth(identity.auth)).toBe(true);

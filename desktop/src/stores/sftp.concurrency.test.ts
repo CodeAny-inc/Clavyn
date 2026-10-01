@@ -67,7 +67,7 @@ describe("SFTP connection ownership", () => {
     await expect(sftp.connect(otherHost, "ORION_SECRET", "root"))
       .rejects.toThrow("Another SFTP connection is still in progress");
     expect(calls("sftp_connect")).toHaveLength(1);
-    expect(calls("sftp_connect")[0][1].host.id).toBe("atlas");
+    expect(calls("sftp_connect")[0][1].hostId).toBe("atlas");
     expect(sftp.error).toContain("Another SFTP connection is still in progress");
 
     release();

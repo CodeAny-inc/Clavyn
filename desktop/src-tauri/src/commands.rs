@@ -152,8 +152,15 @@ pub async fn import_key(
     openssh_private: String,
     key_passphrase: Option<String>,
 ) -> ApiResult<KeyMeta> {
+    // Both arrive as plain strings from IPC; wrapping them here wipes them on
+    // every exit from this command.
+    let openssh_private = zeroize::Zeroizing::new(openssh_private);
+    let key_passphrase = key_passphrase.map(zeroize::Zeroizing::new);
+    let key_passphrase = key_passphrase.as_ref().map(|p| p.as_str());
+    // The vault is what protects stored keys, and connecting reads a stored key
+    // without a passphrase, so a key's own passphrase is removed before storing.
     let (mut meta, stored) =
-        import_openssh_private(&openssh_private, key_passphrase.as_deref()).map_err(err)?;
+        import_openssh_private(&openssh_private, key_passphrase).map_err(err)?;
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
@@ -461,6 +468,33 @@ pub struct SshConnectionInfo {
     pub port: u16,
 }
 
+/// A saved host and the identity it links to, read from the native store.
+///
+/// The webview names a host only by id. Hostname, port, account, key and
+/// startup command all come from what the user saved, so script running in the
+/// page cannot point a connection, or a stored key, at a server of its choice.
+/// A linked identity that no longer exists comes back as `None`, and
+/// `connection::connect` refuses that rather than falling back to the host's
+/// own credentials.
+async fn saved_host(state: &AppState, host_id: Uuid) -> ApiResult<(Host, Option<Identity>)> {
+    let store = state.store.lock().await;
+    let host = store
+        .hosts()
+        .iter()
+        .find(|h| h.id == host_id)
+        .cloned()
+        .ok_or("Host not found. Check the saved host configuration.")?;
+    let identity = host.identity_id.and_then(|identity_id| {
+        store
+            .data()
+            .identities
+            .iter()
+            .find(|i| i.id == identity_id)
+            .cloned()
+    });
+    Ok((host, identity))
+}
+
 fn ssh_connection_info(
     host: &Host,
     identity: Option<&Identity>,
@@ -486,7 +520,7 @@ fn ssh_connection_info(
 pub async fn connect_ssh(
     state: State<'_, Arc<AppState>>,
     session_id: String,
-    host: Host,
+    host_id: Uuid,
     password: Option<String>,
     cols: Option<u32>,
     rows: Option<u32>,
@@ -495,20 +529,12 @@ pub async fn connect_ssh(
 ) -> ApiResult<SshConnectionInfo> {
     // The owned input is transient and wiped on every exit; never persist or log it.
     let password = password.map(zeroize::Zeroizing::new);
+    // Bounded like `session_resize`, before anything else, so a zero-width or
+    // absurd terminal size is refused rather than requested from the server.
+    let cols = u32::from(pty_dimension("cols", cols.unwrap_or(80))?);
+    let rows = u32::from(pty_dimension("rows", rows.unwrap_or(24))?);
     let passphrase = state.vault_session.passphrase().await;
-
-    // Resolve identity if the host references one
-    let identity = if let Some(identity_id) = host.identity_id {
-        let store = state.store.lock().await;
-        store
-            .data()
-            .identities
-            .iter()
-            .find(|i| i.id == identity_id)
-            .cloned()
-    } else {
-        None
-    };
+    let (host, identity) = saved_host(&state, host_id).await?;
     let info = ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
 
     // Determine if we need the vault (publickey auth from host or identity)
@@ -527,8 +553,6 @@ pub async fn connect_ssh(
         None
     };
     let known_hosts = state.known_hosts.clone();
-    let cols = cols.unwrap_or(80);
-    let rows = rows.unwrap_or(24);
 
     // Register the sink before the session can produce output, so the first
     // bytes of the shell banner are never dropped.
@@ -926,25 +950,14 @@ pub async fn list_sessions(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<Str
 pub async fn sftp_connect(
     state: State<'_, Arc<AppState>>,
     session_id: String,
-    host: Host,
+    host_id: Uuid,
     password: Option<String>,
     expected_username: Option<String>,
 ) -> ApiResult<()> {
     // Match terminal SSH: do not retain the owned password after this command exits.
     let password = password.map(zeroize::Zeroizing::new);
     let passphrase = state.vault_session.passphrase().await;
-
-    let identity = if let Some(identity_id) = host.identity_id {
-        let store = state.store.lock().await;
-        store
-            .data()
-            .identities
-            .iter()
-            .find(|i| i.id == identity_id)
-            .cloned()
-    } else {
-        None
-    };
+    let (host, identity) = saved_host(&state, host_id).await?;
 
     // Re-resolve the linked identity from the native store and reject an account
     // change before any network/authentication work can consume this credential.
@@ -1049,28 +1062,6 @@ pub async fn sftp_rename(
 #[tauri::command]
 pub async fn sftp_close(state: State<'_, Arc<AppState>>, session_id: String) -> ApiResult<()> {
     state.sftp.close(&session_id).await.map_err(err)
-}
-
-// ============================================================
-// File I/O
-// ============================================================
-
-/// Read a private key file from the filesystem. Used by the key import
-/// dialog when the user browses for a file instead of pasting.
-#[tauri::command]
-pub async fn read_key_file(path: String) -> ApiResult<String> {
-    // Validate the path looks like a key file (basic sanity check)
-    let path = std::path::Path::new(&path);
-    if !path.is_file() {
-        return Err(format!("Not a file: {}", path.display()));
-    }
-    // Limit file size to 256KB to prevent reading huge files
-    let metadata = std::fs::metadata(path).map_err(err)?;
-    if metadata.len() > 256 * 1024 {
-        return Err("File too large (max 256KB)".to_string());
-    }
-    let content = std::fs::read_to_string(path).map_err(err)?;
-    Ok(content)
 }
 
 // ============================================================
@@ -1616,12 +1607,14 @@ mod connect_lock_tests {
         let mut host = Host::new("stalled", addr.ip().to_string(), addr.port(), "deploy");
         host.auth = AuthMethod::PublicKey;
         host.key_id = Some(key_id);
+        let host_id = host.id;
+        state.store.lock().await.add_host(host).expect("save host");
 
         app.manage(state);
         let connecting = connect_ssh(
             app.state(),
             "session".to_string(),
-            host,
+            host_id,
             None,
             None,
             None,
@@ -1646,6 +1639,115 @@ mod connect_lock_tests {
                 panic!("the silent peer unexpectedly finished a connection: {connected:?}");
             }
         }
+    }
+
+    /// A key imported with its own passphrase can be used afterwards: the
+    /// connect path reads stored keys without a passphrase.
+    #[tokio::test]
+    async fn a_passphrase_protected_key_imports_in_a_usable_form() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master.clone(),
+                    binding_id,
+                ),
+            )
+            .await;
+        app.manage(state);
+
+        let (plain, _) = generate_ed25519().expect("generate");
+        let (_, pair) = parse_openssh_private(&plain, None).expect("parse");
+        let mut protected = Vec::new();
+        russh::keys::encode_pkcs8_pem_encrypted(&pair, b"key passphrase", 16, &mut protected)
+            .expect("encrypt");
+        let protected = String::from_utf8(protected).expect("utf8");
+        let meta = import_key(app.state(), "protected".into(), protected, Some("key passphrase".into()))
+            .await
+            .expect("import");
+
+        let state = app.state::<Arc<AppState>>();
+        let vault = state.vault.lock().await;
+        let stored = vault.get_key_with(&master, &meta.id.to_string()).expect("stored key");
+        let stored = std::str::from_utf8(&stored).expect("utf8");
+        let (stored_meta, _) = parse_openssh_private(stored, None).expect("usable without passphrase");
+        assert_eq!(stored_meta.fingerprint, meta.fingerprint);
+    }
+
+    /// Only saved hosts can be reached. An id the store does not hold is refused
+    /// before any network or vault work, for both terminal and SFTP sessions.
+    #[tokio::test]
+    async fn an_unsaved_host_id_is_refused() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        app.manage(state);
+        let unknown = Uuid::new_v4();
+
+        let error = connect_ssh(
+            app.state(),
+            "session".to_string(),
+            unknown,
+            Some("password".to_string()),
+            None,
+            None,
+            None,
+            tauri::ipc::Channel::new(|_| Ok(())),
+        )
+        .await
+        .expect_err("an unsaved host must not connect");
+        assert!(error.contains("Host not found"), "{error}");
+
+        let error = sftp_connect(
+            app.state(),
+            "sftp".to_string(),
+            unknown,
+            Some("password".to_string()),
+            None,
+        )
+        .await
+        .expect_err("an unsaved host must not connect");
+        assert!(error.contains("Host not found"), "{error}");
+    }
+
+    /// Every connection detail comes from the saved host and the identity it
+    /// links to, never from the caller.
+    #[tokio::test]
+    async fn a_saved_host_resolves_with_its_linked_identity() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let identity = Identity::new("admin", "root");
+        let mut linked = Host::new("linked", "linked.example.test", 2222, "deploy");
+        linked.identity_id = Some(identity.id);
+        let direct = Host::new("direct", "direct.example.test", 22, "ops");
+        {
+            let mut store = state.store.lock().await;
+            store.add_identity(identity.clone()).expect("save identity");
+            store.add_host(linked.clone()).expect("save host");
+            store.add_host(direct.clone()).expect("save host");
+        }
+
+        let (host, resolved) = saved_host(&state, linked.id).await.expect("linked host");
+        assert_eq!(host.hostname, "linked.example.test");
+        assert_eq!(host.port, 2222);
+        assert_eq!(resolved.expect("identity").id, identity.id);
+
+        let (host, resolved) = saved_host(&state, direct.id).await.expect("direct host");
+        assert_eq!(host.hostname, "direct.example.test");
+        assert!(resolved.is_none());
     }
 }
 
