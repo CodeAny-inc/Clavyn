@@ -6,6 +6,7 @@ mod commands;
 mod host_key_prompt;
 mod local_files;
 mod sftp_transfer;
+mod startup_recovery;
 mod state;
 mod vault_commands;
 mod vault_initialize;
@@ -107,13 +108,28 @@ fn main() {
                 .path()
                 .app_data_dir()
                 .expect("no app data dir");
-            let state = AppState::init(app.handle(), app_data)?;
-            app.manage(state);
+            // A state file that cannot be loaded still gets a window: the
+            // frontend asks `startup_failure` first and shows what failed
+            // instead of the app. Returning the error here would end the process
+            // before any window exists.
+            match AppState::init(app.handle(), app_data) {
+                Ok(state) => {
+                    app.manage(state);
+                    app.manage(startup_recovery::StartupStatus::ready());
+                }
+                Err(error) => {
+                    tracing::error!("app state could not be loaded: {error}");
+                    app.manage(startup_recovery::StartupStatus::failed(&error));
+                }
+            }
             app.manage(local_files::LocalFileGrants::default());
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            startup_recovery::startup_failure,
+            startup_recovery::set_aside_unreadable_file,
+            startup_recovery::restart_app,
             commands::list_hosts,
             commands::add_host,
             commands::update_host,
