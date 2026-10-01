@@ -148,6 +148,7 @@ pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> Api
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &private).map_err(err)?;
+    state.record_vault_epoch(&vault);
     Ok(meta)
 }
 
@@ -170,13 +171,16 @@ pub async fn import_key(
     let stored = unprotected_private_key(&openssh_private, key_passphrase).map_err(err)?;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
+    state.record_vault_epoch(&vault);
     Ok(meta)
 }
 
 #[tauri::command]
 pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
-    vault.remove_key(&key, &key_id.to_string()).map_err(err)
+    vault.remove_key(&key, &key_id.to_string()).map_err(err)?;
+    state.record_vault_epoch(&vault);
+    Ok(())
 }
 
 // ============================================================

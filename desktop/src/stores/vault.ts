@@ -4,6 +4,16 @@ import * as api from "../api";
 import { useKeysStore } from "./keys";
 
 const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
+const ROLLBACK_ERROR_MARKER = "[vault-rollback]";
+
+/**
+ * The explanation carried by an unlock error that refused an older copy of the
+ * vault, or null for any other error.
+ */
+export function vaultRollbackMessage(error: string): string | null {
+  const at = error.indexOf(ROLLBACK_ERROR_MARKER);
+  return at === -1 ? null : error.slice(at + ROLLBACK_ERROR_MARKER.length).trim();
+}
 
 export const useVaultStore = defineStore("vault", () => {
   const initialized = ref(false);
@@ -139,10 +149,10 @@ export const useVaultStore = defineStore("vault", () => {
     }
   }
 
-  async function unlock(passphrase: string) {
+  async function unlock(passphrase: string, acceptOlder = false) {
     error.value = null;
     try {
-      await api.unlockVault(passphrase);
+      await api.unlockVault(passphrase, acceptOlder);
       unlocked.value = true;
     } catch (e) {
       error.value = String(e);
