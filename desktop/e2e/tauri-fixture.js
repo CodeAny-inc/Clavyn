@@ -27,7 +27,8 @@
   let vaultUnlocked = true;
   const state = {
     calls: [], connects: [], closes: [], writes: [], live: {}, pending: [],
-    holdNext: false, failNext: false,
+    holdNext: false, failNext: false, servedHosts: null,
+    hostById(id) { return id ? (state.servedHosts ?? hosts).find(host => host.id === id) ?? null : null; },
     // Frames waiting on the asynchronous delivery route, and the switch that
     // puts them there.
     holdOutput: false, heldFrames: [],
@@ -74,7 +75,9 @@
         const id = ++sequence; listeners.set(id, args); return id;
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
-      if (command === "list_hosts") return structuredClone(hosts);
+      // Keep the exact objects served, including any edits a scenario makes to
+      // them, so connects can resolve a host by id the way the backend does.
+      if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
       if (["list_groups", "list_identities", "list_keys", "list_workspaces", "list_known_hosts", "list_removed_known_hosts", "list_host_key_changes"].includes(command)) return [];
       if (["vault_is_initialized"].includes(command)) return vaultInitialized;
       if (["is_vault_unlocked"].includes(command)) return vaultUnlocked;
@@ -83,7 +86,7 @@
       if (command === "check_for_updates") return { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;
-        const host = args.host;
+        const host = args.host ?? state.hostById(args.hostId);
         // Register before any await so held connections can still be driven.
         if (args.onOutput) sinks.set(id, { id: args.onOutput.id, index: 0 });
         state.connects.push({ id, host: host?.id ?? "local" });

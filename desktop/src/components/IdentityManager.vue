@@ -25,7 +25,6 @@ import {
   Folder,
   FolderPlus,
 } from "lucide-vue-next";
-import { open } from "@tauri-apps/plugin-dialog";
 import * as api from "../api";
 import type { Identity, AuthMethod } from "../types";
 
@@ -227,16 +226,8 @@ async function deleteIdentity(id: Identity) {
 async function browseForKeyFile() {
   browsingFile.value = true;
   try {
-    const selected = await open({
-      multiple: false,
-      directory: false,
-      filters: [
-        { name: "SSH Private Keys", extensions: ["pem", "key", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"] },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
-    if (typeof selected === "string" && selected) {
-      const content = await api.readKeyFile(selected);
+    const content = await api.pickKeyFile();
+    if (content !== null) {
       importKeyText.value = content;
     }
   } catch (e) {

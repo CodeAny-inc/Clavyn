@@ -34,7 +34,8 @@ function authenticationFixture(mode) {
       return structuredClone(state.identity);
     }
     if (command === "connect_ssh") {
-      const effective = args.host.identity_id === state.identity.id ? state.identity : args.host;
+      const host = window.__terminalTest.hostById(args.hostId);
+      const effective = host.identity_id === state.identity.id ? state.identity : host;
       if (args.expectedUsername !== effective.username)
         throw new Error("SSH identity changed. Reload identities and reconnect to review the account.");
       const needsPassword = typeof effective.auth === "object";
@@ -43,8 +44,8 @@ function authenticationFixture(mode) {
       if (!accepted) throw new Error("Fixture: authentication rejected");
       // Never retain the password in the base fixture's call log or JSON artifacts.
       await original(command, { ...args, password: args.password === null ? null : "[redacted]",
-        host: { ...args.host, username: effective.username } });
-      return { username: effective.username, hostname: args.host.hostname, port: args.host.port };
+        host: { ...host, username: effective.username } });
+      return { username: effective.username, hostname: host.hostname, port: host.port };
     }
     return original(command, args);
   };
