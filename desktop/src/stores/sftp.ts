@@ -30,7 +30,8 @@ export const useSftpStore = defineStore("sftp", () => {
   }
 
   function connectionRequestKey(host: Host, expectedUsername?: string) {
-    // The host passed here is already the frozen transport snapshot. Passwords
+    // The host is the saved host plus the reviewed username; the backend
+    // resolves its identity and connection details from the store. Passwords
     // are intentionally excluded so duplicate submit/click events share one task.
     return JSON.stringify([host, expectedUsername ?? null]);
   }

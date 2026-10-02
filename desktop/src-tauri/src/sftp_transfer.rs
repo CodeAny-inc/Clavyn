@@ -9,12 +9,33 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// The last path segment of a remote path, offered as the local file name.
-fn remote_file_name(remote_path: &str) -> &str {
-    remote_path
-        .rsplit('/')
+/// A local file name to offer for a remote path, safe to put in a save dialog.
+///
+/// The remote side chooses this name, and a Linux SFTP server may legally serve
+/// `C:\Users\Public\...\Startup\x.bat`, `..\..\x` or `\\attacker\share\x`.
+/// Windows `IFileSaveDialog` resolves a drive-qualified, backslash-relative or
+/// UNC name typed into its name box, so a user who just clicks Save would write
+/// outside the folder the dialog is showing, and a UNC name would also start an
+/// outbound SMB — and NTLM — attempt. So the name is taken after both
+/// separators, the characters no Windows file name may hold are replaced, and
+/// anything that does not name a file falls back to `download`.
+fn remote_file_name(remote_path: &str) -> String {
+    let last = remote_path
+        .rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
-        .unwrap_or("download")
+        .unwrap_or_default();
+    let cleaned: String = last
+        .chars()
+        .map(|c| match c {
+            ':' | '*' | '?' | '"' | '<' | '>' | '|' | '/' | '\\' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    match cleaned.as_str() {
+        "" | "." | ".." => "download".to_string(),
+        _ => cleaned,
+    }
 }
 
 /// Ask where to save a remote SFTP file, then stream it straight there. File
@@ -75,5 +96,24 @@ mod tests {
         assert_eq!(remote_file_name("README.md"), "README.md");
         assert_eq!(remote_file_name("/srv/app/"), "app");
         assert_eq!(remote_file_name("/"), "download");
+    }
+
+    /// The server picks this name, and these are all legal entry names on a
+    /// Linux SFTP server. The save dialog must not be handed one that resolves
+    /// anywhere but the folder it is showing.
+    #[test]
+    fn a_name_the_server_chose_cannot_steer_the_save_dialog() {
+        assert_eq!(
+            remote_file_name(r"C:\Users\Public\Start Menu\Programs\Startup\x.bat"),
+            "x.bat"
+        );
+        assert_eq!(remote_file_name(r"..\..\x"), "x");
+        assert_eq!(remote_file_name(r"\\attacker\share\x"), "x");
+        assert_eq!(remote_file_name("C:x.bat"), "C_x.bat");
+        assert_eq!(remote_file_name("a?b*c|d\"e<f>g.txt"), "a_b_c_d_e_f_g.txt");
+        assert_eq!(remote_file_name("name\u{7}with\u{1b}controls"), "name_with_controls");
+        assert_eq!(remote_file_name("/srv/.."), "download");
+        assert_eq!(remote_file_name("/srv/."), "download");
+        assert_eq!(remote_file_name(r"\"), "download");
     }
 }

@@ -39,6 +39,15 @@ pub enum CoreError {
     #[error("{path} is corrupt and was not loaded: {reason}")]
     CorruptState { path: String, reason: String },
 
+    /// A state file exists but could not be read at all — a permission
+    /// problem, a sharing violation, a redirected folder that timed out. The
+    /// contents are not known to be bad, so the recovery screen names the file
+    /// and offers a retry, never a move: whatever is in there is still the
+    /// authoritative copy. The path travels with the error because an
+    /// `io::Error` carries none.
+    #[error("{path} could not be read: {reason}")]
+    UnreadableState { path: String, reason: String },
+
     /// The in-memory state serializes to a document this same version cannot
     /// parse back. Writing it would leave a file that fails the fail-closed
     /// load on the next start, so the write is refused and the previous file

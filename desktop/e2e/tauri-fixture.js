@@ -75,6 +75,7 @@
         const id = ++sequence; listeners.set(id, args); return id;
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
+      if (command === "startup_failure") return null;
       // Keep the exact objects served, including any edits a scenario makes to
       // them, so connects can resolve a host by id the way the backend does.
       if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
@@ -87,6 +88,11 @@
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;
         const host = args.host ?? state.hostById(args.hostId);
+        // The backend and the Vitest mock both fail an SSH connect whose host
+        // id resolves to nothing. Without this a pane that sent the wrong id
+        // would connect as the mocked local transport, and a test that only
+        // waits for data-connected would still pass.
+        if (command === "connect_ssh" && !host) throw new Error("Host not found");
         // Register before any await so held connections can still be driven.
         if (args.onOutput) sinks.set(id, { id: args.onOutput.id, index: 0 });
         state.connects.push({ id, host: host?.id ?? "local" });

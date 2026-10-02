@@ -212,6 +212,8 @@ pub struct AppState {
     pub output_sinks: OutputSinks,
     pub local_terminals: Mutex<LocalTerminals>,
     pub app_data_dir: PathBuf,
+    /// Highest vault epoch seen per vault generation; see `vault_epoch`.
+    pub epoch_store: Arc<dyn crate::vault_epoch::EpochStore>,
 }
 
 /// Live local terminals and the ids currently being opened.
@@ -346,7 +348,13 @@ impl LocalTerminals {
 
 /// A local terminal session backed by portable-pty.
 pub struct LocalTerminal {
-    pub writer: Box<dyn std::io::Write + Send>,
+    /// Behind its own lock so a write never runs under the terminal map's
+    /// lock. A write to a PTY master blocks once the tty input buffer fills and
+    /// the foreground process is not reading its stdin, and holding the map
+    /// lock across that would stall every operation keyed on the map — a local
+    /// paste into a shell sitting at `sleep 100` would hold up SSH connects,
+    /// which take the same lock to admit a session id.
+    pub writer: Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
     /// Kept alive so the shell is not reaped, and polled with `try_wait` to
     /// tell a live terminal from one whose shell has already exited.
@@ -426,7 +434,24 @@ impl AppState {
             output_sinks,
             local_terminals: Mutex::new(LocalTerminals::default()),
             app_data_dir: app_data,
+            epoch_store: crate::vault_epoch::default_store(),
         }))
+    }
+
+    /// Record the epoch `vault` is now at, after it was saved or opened.
+    ///
+    /// Awaited rather than spawned so a caller that goes on to read the record
+    /// sees this write, and run on the blocking pool because the credential
+    /// store is synchronous and can stop on a prompt.
+    pub async fn record_vault_epoch(&self, vault: &Vault) {
+        if let Some(binding_id) = vault.binding_id() {
+            crate::vault_epoch::record_off_thread(
+                self.epoch_store.clone(),
+                binding_id.to_string(),
+                vault.epoch(),
+            )
+            .await;
+        }
     }
 
     /// A held guard on the vault together with the master key for its current
@@ -494,7 +519,9 @@ mod local_terminal_ownership_tests {
             .slave
             .spawn_command(CommandBuilder::new(shell))
             .expect("a shell can be spawned");
-        let writer = pair.master.take_writer().expect("the master has a writer");
+        let writer = Arc::new(std::sync::Mutex::new(
+            pair.master.take_writer().expect("the master has a writer"),
+        ));
         let owns_session_id = Arc::new(AtomicBool::new(true));
         (
             LocalTerminal {

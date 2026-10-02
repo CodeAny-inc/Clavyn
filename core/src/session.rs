@@ -6,7 +6,7 @@ use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
 use russh::ChannelMsg;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, Mutex};
@@ -29,8 +29,80 @@ async fn sleep_until(deadline: Option<Instant>) {
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, SshSession>>,
+    /// Every id held by an SSH session, from the moment it is claimed — before
+    /// the connection exists — until the session is closed. `sessions` only
+    /// learns an id once the connection is up, seconds later, so it cannot tell
+    /// whether an id is free. A plain mutex, never held across an await, so
+    /// callers can consult it while holding their own locks.
+    claimed: Arc<std::sync::Mutex<HashSet<String>>>,
     data_callback: DataCallback,
     close_callback: CloseCallback,
+}
+
+/// An SSH session id, reserved for a session that is about to connect.
+///
+/// Dropping the claim frees the id again, unless the session was started, in
+/// which case the id passes to the [`ClaimedId`] guards that outlive this.
+/// Callers therefore keep the claim until they have finished unwinding a failed
+/// connect: an id freed earlier than that can be taken by another connect whose
+/// output sink the unwinding caller then removes.
+pub struct SessionClaim {
+    id: String,
+    claimed: Arc<std::sync::Mutex<HashSet<String>>>,
+    committed: std::sync::atomic::AtomicBool,
+}
+
+impl SessionClaim {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Hand the id over to a guard that holds it for as long as anything can
+    /// still act under it, and stop this claim from freeing it.
+    fn commit(&self) -> Arc<ClaimedId> {
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Arc::new(ClaimedId {
+            id: self.id.clone(),
+            claimed: self.claimed.clone(),
+        })
+    }
+}
+
+impl Drop for SessionClaim {
+    fn drop(&mut self) {
+        if !self.committed.load(std::sync::atomic::Ordering::Relaxed) {
+            lock_claims(&self.claimed).remove(&self.id);
+        }
+    }
+}
+
+/// Holds a session id for as long as anything can still act under it.
+///
+/// One of these is shared by the map entry and the reader task, and the id is
+/// released only when both are gone. Closing a session deliberately leaves the
+/// reader running so it can flush the trailing output and announce the close,
+/// and both of those carry nothing but the id — so freeing the id when the map
+/// entry goes would let a new session take it and then have the old reader
+/// render its tail in the new pane, remove the new pane's output sink and
+/// report the new session as closed.
+struct ClaimedId {
+    id: String,
+    claimed: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Drop for ClaimedId {
+    fn drop(&mut self) {
+        lock_claims(&self.claimed).remove(&self.id);
+    }
+}
+
+/// A poisoned set still holds valid ids; a panic elsewhere is no reason to
+/// stop tracking them.
+fn lock_claims(
+    claimed: &std::sync::Mutex<HashSet<String>>,
+) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    claimed.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 struct SshSession {
@@ -39,6 +111,9 @@ struct SshSession {
     handle: Arc<Mutex<Handle<connection::SshHandler>>>,
     channel_id: russh::ChannelId,
     resize_tx: mpsc::Sender<(u32, u32)>,
+    /// Held so the id stays reserved while this entry exists.
+    #[allow(dead_code)]
+    claim: Arc<ClaimedId>,
 }
 
 // Re-export the handler type so the session manager can use it.
@@ -48,16 +123,43 @@ impl SessionManager {
     pub fn new(data_callback: DataCallback, close_callback: CloseCallback) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            claimed: Arc::new(std::sync::Mutex::new(HashSet::new())),
             data_callback,
             close_callback,
         }
     }
 
+    /// Reserve `session_id` for an SSH session, or refuse it when an SSH session
+    /// already holds it, connected or still connecting.
+    ///
+    /// Session ids are the only address `write`, `resize` and the output stream
+    /// use, so two sessions on one id would each receive the other's traffic.
+    /// The check and the reservation are one step under one lock, so of two
+    /// concurrent claims on the same id exactly one succeeds.
+    pub fn claim(&self, session_id: &str) -> Result<SessionClaim> {
+        if !lock_claims(&self.claimed).insert(session_id.to_string()) {
+            return Err(CoreError::InvalidInput(
+                "session id is already in use by an SSH session".into(),
+            ));
+        }
+        Ok(SessionClaim {
+            id: session_id.to_string(),
+            claimed: self.claimed.clone(),
+            committed: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Whether an SSH session holds `session_id`, connected or still
+    /// connecting.
+    pub fn is_claimed(&self, session_id: &str) -> bool {
+        lock_claims(&self.claimed).contains(session_id)
+    }
+
     /// Connect to a host, open a channel, request PTY + shell, and start
-    /// streaming data. Returns the session id.
+    /// streaming data on the id `claim` reserved.
     pub async fn create_ssh_session(
         &self,
-        session_id: String,
+        claim: &SessionClaim,
         host: &Host,
         identity: Option<&crate::identity::Identity>,
         known_hosts: Arc<Mutex<KnownHosts>>,
@@ -67,6 +169,7 @@ impl SessionManager {
         cols: u32,
         rows: u32,
     ) -> Result<()> {
+        let session_id = claim.id.clone();
         let handle =
             connection::connect(host, identity, known_hosts, vault, passphrase, password).await?;
         let channel = handle.channel_open_session().await.map_err(|e| {
@@ -107,11 +210,13 @@ impl SessionManager {
         let handle = Arc::new(Mutex::new(handle));
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
+        let held = claim.commit();
         let session = SshSession {
             id: session_id.clone(),
             handle: handle.clone(),
             channel_id,
             resize_tx,
+            claim: held.clone(),
         };
 
         self.sessions.lock().await.insert(session_id.clone(), session);
@@ -123,6 +228,9 @@ impl SessionManager {
         let mut channel = channel;
 
         tokio::spawn(async move {
+            // Dropped when this task ends, after the close has been announced,
+            // which is the moment the id is free for another session.
+            let _held = held;
             let mut pending_resize: Option<(u32, u32)> = None;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
@@ -204,6 +312,8 @@ impl SessionManager {
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.remove(session_id) {
+            // The entry's share of the id goes with it; the reader task still
+            // holds one until it has flushed and announced the close.
             let handle = session.handle.lock().await;
             let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
         }
@@ -234,5 +344,70 @@ impl SessionManager {
                 .await;
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::SessionManager;
+    use std::sync::Arc;
+
+    fn manager() -> SessionManager {
+        SessionManager::new(Arc::new(|_, _| {}), Arc::new(|_, _| {}))
+    }
+
+    #[test]
+    fn an_id_can_be_claimed_once() {
+        let sessions = manager();
+        let claim = sessions.claim("s").expect("first claim");
+        assert_eq!(claim.id(), "s");
+        assert!(sessions.is_claimed("s"));
+        let error = sessions.claim("s").err().expect("second claim refused");
+        assert!(error.to_string().contains("already in use"), "{error}");
+        assert!(sessions.claim("other").is_ok());
+    }
+
+    #[test]
+    fn an_unused_claim_frees_its_id_when_dropped() {
+        let sessions = manager();
+        drop(sessions.claim("s").expect("claim"));
+        assert!(!sessions.is_claimed("s"));
+        assert!(sessions.claim("s").is_ok());
+    }
+
+    /// A connect that fails consumes its claim, and the id is free again, so a
+    /// retry on the same pane is not refused.
+    #[tokio::test]
+    async fn a_failed_connect_frees_its_id() {
+        let sessions = manager();
+        let host: crate::host::Host = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "label": "Fixture",
+            "hostname": "must-not-connect.example.test",
+            "port": 22,
+            "username": "deploy",
+            "auth": "agent",
+            "tags": []
+        }))
+        .expect("host");
+        let known_hosts = std::env::temp_dir().join(format!(
+            "clavyn-claim-test-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        let known_hosts = Arc::new(tokio::sync::Mutex::new(
+            crate::known_hosts::KnownHosts::load(known_hosts).expect("known hosts"),
+        ));
+
+        let claim = sessions.claim("s").expect("claim");
+        // Agent auth is refused before any network work, so this fails fast.
+        assert!(sessions
+            .create_ssh_session(&claim, &host, None, known_hosts, None, None, None, 80, 24)
+            .await
+            .is_err());
+        // The caller still holds the claim: it unwinds its own output sink
+        // first, and the id must not be takeable until it has.
+        assert!(sessions.is_claimed("s"));
+        drop(claim);
+        assert!(!sessions.is_claimed("s"));
     }
 }

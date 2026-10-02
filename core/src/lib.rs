@@ -19,6 +19,9 @@
 
 pub mod connection;
 pub mod error;
+/// Private so that the module stays an implementation detail: the three items
+/// below are the whole of its contract, and a `pub` helper added here later
+/// would otherwise become part of core's API without anyone deciding so.
 mod fs_util;
 pub mod host;
 pub mod identity;
@@ -32,3 +35,4 @@ pub mod vault;
 pub mod workspace;
 
 pub use error::{CoreError, Result};
+pub use fs_util::{remove_private, write_private, write_private_bytes, RemovePrivateOutcome};

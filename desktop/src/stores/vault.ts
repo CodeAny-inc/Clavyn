@@ -1,9 +1,19 @@
 import { defineStore } from "pinia";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import * as api from "../api";
 import { useKeysStore } from "./keys";
 
 const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
+const ROLLBACK_ERROR_MARKER = "[vault-rollback]";
+
+/**
+ * The explanation carried by an unlock error that refused an older copy of the
+ * vault, or null for any other error.
+ */
+export function vaultRollbackMessage(error: string): string | null {
+  const at = error.indexOf(ROLLBACK_ERROR_MARKER);
+  return at === -1 ? null : error.slice(at + ROLLBACK_ERROR_MARKER.length).trim();
+}
 
 export const useVaultStore = defineStore("vault", () => {
   const initialized = ref(false);
@@ -17,6 +27,17 @@ export const useVaultStore = defineStore("vault", () => {
   const needsUnlock = computed(
     () => initialized.value && !unlocked.value,
   );
+
+  // Key metadata comes from the vault header and is only authenticated when the
+  // vault is decrypted, so the backend hands it out only while unlocked. It is
+  // loaded on every unlock and dropped on every lock, however either happens.
+  watch(unlocked, (isUnlocked) => {
+    if (isUnlocked) {
+      keysStore.load().catch((e) => console.error("Failed to load keys:", e));
+    } else {
+      keysStore.clear();
+    }
+  });
 
   let biometricStateRevision = 0;
   let biometricMutationTail: Promise<void> = Promise.resolve();
@@ -128,10 +149,10 @@ export const useVaultStore = defineStore("vault", () => {
     }
   }
 
-  async function unlock(passphrase: string) {
+  async function unlock(passphrase: string, acceptOlder = false) {
     error.value = null;
     try {
-      await api.unlockVault(passphrase);
+      await api.unlockVault(passphrase, acceptOlder);
       unlocked.value = true;
     } catch (e) {
       error.value = String(e);

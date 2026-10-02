@@ -29,14 +29,10 @@ pub struct Store {
 impl Store {
     pub fn load(path: PathBuf) -> Result<Self> {
         let data = if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
             // Fail closed. Falling back to an empty store would drop every host,
             // identity and workspace, and the next save() would overwrite the
             // file that still holds them.
-            serde_json::from_str(&raw).map_err(|e| CoreError::CorruptState {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?
+            crate::fs_util::read_state_file(&path)?
         } else {
             StoreData::default()
         };

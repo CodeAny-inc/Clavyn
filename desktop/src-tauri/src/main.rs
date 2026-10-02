@@ -1,13 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod app_data_migration;
 mod biometric;
 mod biometric_commands;
 mod commands;
 mod host_key_prompt;
 mod local_files;
 mod sftp_transfer;
+mod startup_recovery;
 mod state;
 mod vault_commands;
+mod vault_epoch;
 mod vault_initialize;
 mod vault_keychain_cleanup;
 
@@ -49,6 +52,25 @@ fn single_instance_guard_applies() -> bool {
 /// I/O and nothing to fail on.
 fn guard_applies(is_debug_build: bool, bus_addressable: bool) -> bool {
     !is_debug_build && bus_addressable
+}
+
+/// Restart the app, releasing the single-instance guard first.
+///
+/// `request_restart` normally asks the runtime to exit, which emits
+/// `RunEvent::Exit`; the plugin releases the guard from that event, before the
+/// replacement process is spawned. When the runtime refuses the exit request,
+/// `request_restart` spawns the replacement straight from the caller's thread
+/// and no exit event is ever emitted — without this release the successor finds
+/// the guard held and exits on startup, leaving no Clavyn running. Releasing an
+/// already-released guard is a no-op, so the ordinary path pays nothing.
+///
+/// Guarded by the same condition as registration: a build that never claimed
+/// the guard must not release one an installed build is holding.
+pub(crate) fn restart_app_releasing_guard(app: &tauri::AppHandle) {
+    if single_instance_guard_applies() {
+        tauri_plugin_single_instance::destroy(app);
+    }
+    app.request_restart();
 }
 
 /// Whether the address the single-instance plugin resolves on startup parses.
@@ -103,17 +125,34 @@ fn main() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let app_data = app
-                .path()
-                .app_data_dir()
-                .expect("no app data dir");
-            let state = AppState::init(app.handle(), app_data)?;
-            app.manage(state);
+            // State lives in the non-roaming directory, so a roaming profile
+            // never copies the vault to a file server; files an earlier build
+            // left in the roaming one are moved across first.
+            let roaming = app.path().app_data_dir().expect("no app data dir");
+            let local = app.path().app_local_data_dir().expect("no local app data dir");
+            let app_data = app_data_migration::settle_state_dir(&roaming, &local);
+            // A state file that cannot be loaded still gets a window: the
+            // frontend asks `startup_failure` first and shows what failed
+            // instead of the app. Returning the error here would end the process
+            // before any window exists.
+            match AppState::init(app.handle(), app_data) {
+                Ok(state) => {
+                    app.manage(state);
+                    app.manage(startup_recovery::StartupStatus::ready());
+                }
+                Err(error) => {
+                    tracing::error!("app state could not be loaded: {error}");
+                    app.manage(startup_recovery::StartupStatus::failed(&error));
+                }
+            }
             app.manage(local_files::LocalFileGrants::default());
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            startup_recovery::startup_failure,
+            startup_recovery::set_aside_unreadable_file,
+            startup_recovery::restart_app,
             commands::list_hosts,
             commands::add_host,
             commands::update_host,

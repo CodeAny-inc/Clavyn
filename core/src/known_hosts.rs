@@ -49,14 +49,9 @@ fn is_false(value: &bool) -> bool {
 impl KnownHosts {
     pub fn load(path: PathBuf) -> Result<Self> {
         let entries = if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
             // Fail closed. Treating an unreadable file as "no known hosts" would
             // silently downgrade every pinned host back to trust-on-first-use.
-            let stored = serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-            normalize_entries(stored)
+            normalize_entries(crate::fs_util::read_state_file(&path)?)
         } else {
             HashMap::new()
         };
@@ -69,6 +64,14 @@ impl KnownHosts {
 
     pub fn save(&self) -> Result<()> {
         let data = serde_json::to_string_pretty(&self.entries)?;
+        // Never write pins this same build could not load again: `load` fails
+        // closed, so an unreadable file would stop the app from starting.
+        serde_json::from_str::<HashMap<String, KnownHostEntry>>(&data).map_err(|e| {
+            CoreError::UnwritableState {
+                path: self.path.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
         crate::fs_util::write_private(&self.path, &data)
     }
 
@@ -348,10 +351,18 @@ impl KnownHosts {
 
 /// The key a host's pin is stored under.
 ///
-/// The host is normalized first, so every spelling of one machine shares one
-/// pin. Without that, `PROD.example.com`, `prod.example.com.` and the several
-/// textual forms of an IPv6 address would each be a separate first contact,
-/// and connecting through a new spelling would pin whatever key answered.
+/// The host is normalized first, so the spellings that differ only in writing
+/// share one pin: letter case, a trailing root dot, surrounding whitespace, the
+/// brackets an IPv6 literal is written in, the several textual forms of one
+/// IPv6 address, and the IPv4-mapped form of an IPv4 address. Without that,
+/// `PROD.example.com`, `prod.example.com.` and `[::FFFF:192.0.2.10]` would each
+/// be a separate first contact, and connecting through a new spelling would pin
+/// whatever key answered.
+///
+/// Normalization is textual, so what it cannot unify stays separate: a host
+/// name and its IP address are different pins, and the `inet_aton` short and
+/// octal IPv4 forms (`127.1`, `010.0.0.1`, `0x7f.0.0.1`) are refused by Rust's
+/// strict parser and kept as names.
 fn key_path(host: &str, port: u16) -> String {
     format!("{}:{port}", normalize_host(host))
 }
@@ -367,7 +378,11 @@ fn normalize_host(host: &str) -> String {
         .and_then(|inner| inner.strip_suffix(']'))
         .unwrap_or(host);
     match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => ip.to_string(),
+        // `to_canonical` unwraps an IPv4-mapped IPv6 address to the IPv4 one it
+        // holds. On a dual-stack host `::ffff:192.0.2.10` and `192.0.2.10`
+        // reach the same machine, so leaving them in different forms would make
+        // the mapped spelling a first use that pins whatever key answers.
+        Ok(ip) => ip.to_canonical().to_string(),
         Err(_) => host.to_ascii_lowercase(),
     }
 }
@@ -801,6 +816,57 @@ mod normalization_tests {
         assert_eq!(normalize_host("[2001:db8::1]"), "2001:db8::1");
         assert_eq!(normalize_host("[2001:db8::1]."), "2001:db8::1");
         assert_eq!(normalize_host("192.168.1.10"), "192.168.1.10");
+        // On a dual-stack host the mapped form reaches the same machine as the
+        // IPv4 one, so it must not be a separate first use.
+        assert_eq!(normalize_host("::ffff:192.0.2.10"), "192.0.2.10");
+        assert_eq!(normalize_host("[::FFFF:192.0.2.10]"), "192.0.2.10");
+        // What normalization cannot unify stays its own pin rather than
+        // silently merging with a host it may not be.
+        assert_eq!(normalize_host("127.1"), "127.1");
+        assert_eq!(normalize_host("010.0.0.1"), "010.0.0.1");
+    }
+
+    /// Migration splits the stored key on its last colon, which is the part
+    /// that has to get IPv6 right: a bracketed and an unbracketed spelling of
+    /// one address must come back as one entry.
+    #[test]
+    fn stored_ipv6_spellings_merge_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let key = server_key();
+        let mut hosts = load_file(
+            dir.path(),
+            &[
+                pin_json("[2001:DB8::1]:22", &key, true),
+                pin_json("2001:db8:0:0:0:0:0:1:22", &key, false),
+            ],
+        );
+
+        let list = hosts.list();
+        assert_eq!(list.len(), 1, "{list:?}");
+        assert_eq!(list[0].0, "2001:db8::1:22");
+        assert!(hosts.verify("2001:db8::1", 22, &key, None).expect("verify"));
+    }
+
+    /// The same host on two ports is two machines' worth of pins, and must stay
+    /// that way through the same split.
+    #[test]
+    fn stored_pins_on_different_ports_stay_separate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = server_key();
+        let second = server_key();
+        let hosts = load_file(
+            dir.path(),
+            &[
+                pin_json("prod.example.com:22", &first, false),
+                pin_json("prod.example.com:2222", &second, false),
+            ],
+        );
+
+        let mut list = hosts.list();
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(list.len(), 2, "{list:?}");
+        assert_eq!(list[0].0, "prod.example.com:22");
+        assert_eq!(list[1].0, "prod.example.com:2222");
     }
 
     #[test]

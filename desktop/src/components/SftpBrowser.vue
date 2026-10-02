@@ -303,11 +303,21 @@ async function downloadEntry(entry: SftpEntry) {
 }
 
 async function upload() {
+  // The native dialog runs in the backend, which hands back a token for the
+  // picked file and its name, never the local path. Picking can fail on its own
+  // — an unsupported file name, a dialog that could not be shown — and the
+  // store never sees those, so they are surfaced here instead of leaving the
+  // Upload button looking like it did nothing.
+  let picked;
   try {
-    // The native dialog runs in the backend, which hands back a token for the
-    // picked file and its name, never the local path.
-    const picked = await sftpPickUploadFile();
-    if (!picked) return;
+    picked = await sftpPickUploadFile();
+  } catch (e) {
+    sftp.error = String(e);
+    return;
+  }
+  if (!picked) return;
+
+  try {
     const fileName = picked.name;
     const existing = sftp.entries.find((entry) => entry.name === fileName);
     let overwrite = false;
@@ -325,7 +335,7 @@ async function upload() {
 
     await sftp.uploadFile(fileName, picked.token, overwrite);
   } catch {
-    // Store exposes transfer errors. Dialog cancellation returns above.
+    // Store exposes transfer errors.
   }
 }
 </script>

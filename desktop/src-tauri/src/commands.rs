@@ -131,8 +131,14 @@ pub async fn is_vault_unlocked(state: State<'_, Arc<AppState>>) -> ApiResult<boo
 
 #[tauri::command]
 pub async fn list_keys(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<KeyMeta>> {
-    let vault = state.vault.lock().await;
-    Ok(vault.keys_meta().to_vec())
+    // Key metadata sits in the vault header, and the public key in it is what a
+    // user copies into a server's authorized_keys. Read straight off a locked
+    // vault it is whatever the file says, so it is handed out only once the
+    // vault opens with the session key, and only in the form the file can
+    // vouch for — which for a legacy vault means derived from the private keys
+    // themselves, since its header is not authenticated at all.
+    let (key, vault) = state.unlocked_vault().await?;
+    vault.authenticated_keys_meta(&key).map_err(err)
 }
 
 #[tauri::command]
@@ -142,6 +148,7 @@ pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> Api
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &private).map_err(err)?;
+    state.record_vault_epoch(&vault).await;
     Ok(meta)
 }
 
@@ -164,13 +171,16 @@ pub async fn import_key(
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
+    state.record_vault_epoch(&vault).await;
     Ok(meta)
 }
 
 #[tauri::command]
 pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
-    vault.remove_key(&key, &key_id.to_string()).map_err(err)
+    vault.remove_key(&key, &key_id.to_string()).map_err(err)?;
+    state.record_vault_epoch(&vault).await;
+    Ok(())
 }
 
 // ============================================================
@@ -470,12 +480,21 @@ pub struct SshConnectionInfo {
 
 /// A saved host and the identity it links to, read from the native store.
 ///
-/// The webview names a host only by id. Hostname, port, account, key and
-/// startup command all come from what the user saved, so script running in the
-/// page cannot point a connection, or a stored key, at a server of its choice.
-/// A linked identity that no longer exists comes back as `None`, and
+/// The webview names a host only by id, and hostname, port, account, key and
+/// startup command all come from the saved store rather than from the call's
+/// arguments. A linked identity that no longer exists comes back as `None`, and
 /// `connection::connect` refuses that rather than falling back to the host's
 /// own credentials.
+///
+/// That is the whole of the guarantee: connection details are the saved ones.
+/// It is not a guarantee about what the page can reach, because the page can
+/// also write the store — `add_host`, `update_host` and `update_identity` take
+/// a whole `Host`/`Identity`, and `Store` neither validates them nor asks the
+/// user. Two calls still point a stored key at a server of the caller's
+/// choosing: add a host, then connect to it, and a first-seen host key is
+/// accepted without a prompt. Closing that needs a native confirmation on
+/// writes that introduce or change `hostname`, `port`, `key_id`, `identity_id`
+/// or `startup_command`.
 async fn saved_host(state: &AppState, host_id: Uuid) -> ApiResult<(Host, Option<Identity>)> {
     let store = state.store.lock().await;
     let host = store
@@ -554,13 +573,32 @@ pub async fn connect_ssh(
     };
     let known_hosts = state.known_hosts.clone();
 
+    // Claim the id before the output sink is registered: registering on an id
+    // another session holds would hand that session's output to this caller.
+    // The local map is checked and the SSH id claimed under the local-terminal
+    // lock, the lock `create_local_terminal` holds for its own check, so the
+    // two cannot both take one id. The claim is released on every failure
+    // below by being dropped.
+    let claim = {
+        let locals = state.local_terminals.lock().await;
+        if locals.contains(&session_id) {
+            return Err("session id is already in use by a local terminal".into());
+        }
+        state.sessions.claim(&session_id).map_err(err)?
+    };
+
     // Register the sink before the session can produce output, so the first
     // bytes of the shell banner are never dropped.
     state.register_output(session_id.clone(), on_output);
+    // The claim is kept here rather than handed over, so it is still held while
+    // the sink below is released. A claim freed inside core on a failed connect
+    // would let a concurrent `connect_ssh` take the same id and register its own
+    // sink, which this call's `release_output` would then remove — leaving that
+    // session connected with nowhere to send its output.
     let started = state
         .sessions
         .create_ssh_session(
-            session_id.clone(),
+            &claim,
             &host,
             identity.as_ref(),
             known_hosts,
@@ -574,6 +612,7 @@ pub async fn connect_ssh(
     if started.is_err() {
         state.release_output(&session_id);
     }
+    drop(claim);
     started.map_err(err)?;
     Ok(info)
 }
@@ -592,20 +631,20 @@ const MAX_LOCAL_TERMINALS: usize = 16;
 /// keep going to SSH while the new PTY's output is rendered in the SSH pane.
 /// Refuse the collision here instead of resolving it arbitrarily.
 ///
-/// This guards local-terminal creation only. `connect_ssh` performs no such
-/// check and `SessionManager::create_ssh_session` inserts unconditionally, so
-/// an SSH session can still be opened on an id a local terminal already holds,
-/// or on top of another SSH session. Uniqueness is therefore a property of this
-/// entry point, not an invariant of session ids in general.
+/// `ssh_claimed` is whether an SSH session holds the id, connected or still
+/// connecting. The caller reads it while holding the local-terminal lock, the
+/// same lock `connect_ssh` holds while it checks the local map and claims an
+/// SSH id, so the two kinds of session cannot claim one id between each
+/// other's check and claim.
 fn admit_local_terminal(
     session_id: &str,
     locals: &LocalTerminals,
-    ssh_session_ids: &[String],
+    ssh_claimed: bool,
 ) -> ApiResult<()> {
     if locals.contains(session_id) {
         return Err("session id is already in use by a local terminal".into());
     }
-    if ssh_session_ids.iter().any(|id| id == session_id) {
+    if ssh_claimed {
         return Err("session id is already in use by an SSH session".into());
     }
     if locals.len() >= MAX_LOCAL_TERMINALS {
@@ -640,13 +679,6 @@ pub async fn create_local_terminal(
     let rows = pty_dimension("rows", rows.unwrap_or(24))?;
     let cols = pty_dimension("cols", cols.unwrap_or(80))?;
 
-    // `SessionManager::list` takes and releases its own lock and returns a copy,
-    // so this snapshot is stale by the time the local map is locked: the guard
-    // below covers the local map and the cap, not the SSH half of the check.
-    // Taking it first is deliberate — every site that touches both maps drops
-    // the `sessions` guard before taking `local_terminals`, and nesting them
-    // here would be the only place with the opposite order.
-    let ssh_session_ids = state.sessions.list().await;
     let (dead, admission) = {
         let mut locals = state.local_terminals.lock().await;
         // An entry outlives its shell: nothing removes it before `close_session`
@@ -661,7 +693,8 @@ pub async fn create_local_terminal(
         // processes already existed. The reservation carries a token so a close
         // that drops it — and a re-open that claims the id again — cannot be
         // answered by this request's later `fulfil` or `release`.
-        let admission = admit_local_terminal(&session_id, &locals, &ssh_session_ids)
+        let ssh_claimed = state.sessions.is_claimed(&session_id);
+        let admission = admit_local_terminal(&session_id, &locals, ssh_claimed)
             .map(|()| locals.reserve(session_id.clone()));
         (dead, admission)
     };
@@ -712,7 +745,10 @@ pub async fn create_local_terminal(
 
     let mut reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
 
-    let writer = release_on_err!(pair.master.take_writer(), "take writer");
+    let writer = Arc::new(std::sync::Mutex::new(release_on_err!(
+        pair.master.take_writer(),
+        "take writer"
+    )));
 
     let master = pair.master;
 
@@ -724,10 +760,8 @@ pub async fn create_local_terminal(
     // A close in the meantime drops this request's reservation — possibly for
     // a newer open on the same id — and `fulfil` matches the token, not the id
     // alone, so a superseded request can neither install its terminal nor free
-    // the newer request's slot. Only the SSH half of the check needs
-    // re-checking, because `connect_ssh` never consults the local map and so
-    // cannot be held off by a reservation.
-    let ssh_session_ids = state.sessions.list().await;
+    // the newer request's slot. SSH cannot have taken the id meanwhile:
+    // `connect_ssh` refuses any id the local map holds, reservations included.
     let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let terminal = LocalTerminal {
         writer,
@@ -737,23 +771,14 @@ pub async fn create_local_terminal(
     };
     let refused = {
         let mut locals = state.local_terminals.lock().await;
-        if ssh_session_ids.iter().any(|id| id == &session_id) {
-            locals.release(&session_id, reservation);
-            Some((
-                "session id is already in use by an SSH session".to_string(),
-                terminal,
-            ))
-        } else {
-            // A reservation that is no longer this request's means the session
-            // was closed while its shell was starting, so this terminal is not
-            // wanted.
-            match locals.fulfil(&session_id, reservation, terminal) {
-                Ok(()) => None,
-                Err(unwanted) => Some((
-                    "session was closed while the terminal was starting".to_string(),
-                    unwanted,
-                )),
-            }
+        // A reservation that is no longer this request's means the session was
+        // closed while its shell was starting, so this terminal is not wanted.
+        match locals.fulfil(&session_id, reservation, terminal) {
+            Ok(()) => None,
+            Err(unwanted) => Some((
+                "session was closed while the terminal was starting".to_string(),
+                unwanted,
+            )),
         }
     };
     if let Some((error, _refused)) = refused {
@@ -847,17 +872,26 @@ pub async fn session_write(
     if state.sessions.list().await.contains(&session_id) {
         return state.sessions.write(&session_id, &data).await.map_err(err);
     }
-    // Try local terminal
-    let mut locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get_live_mut(&session_id) {
+    // Try local terminal. The writer is taken out from under the map lock and
+    // the write runs on the blocking pool: it blocks for as long as the
+    // foreground process leaves its stdin unread, and neither the terminal map
+    // nor an async worker may be held for that.
+    let writer = {
+        let mut locals = state.local_terminals.lock().await;
+        match locals.get_live_mut(&session_id) {
+            Some(term) => term.writer.clone(),
+            None => return Err("session not found".into()),
+        }
+    };
+    tokio::task::spawn_blocking(move || {
         use std::io::Write;
-        term.writer
-            .write_all(&data)
-            .map_err(|e| format!("write: {e}"))?;
-        term.writer.flush().map_err(|e| format!("flush: {e}"))?;
-        return Ok(());
-    }
-    Err("session not found".into())
+        let mut writer = writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer.write_all(&data)?;
+        writer.flush()
+    })
+    .await
+    .map_err(|e| format!("write: {e}"))?
+    .map_err(|e| format!("write: {e}"))
 }
 
 /// Narrow a webview-supplied terminal dimension to the `u16` the local PTY
@@ -1286,23 +1320,9 @@ pub async fn install_update(app: AppHandle) -> ApiResult<()> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // Release the single-instance guard for the one restart path that never
-    // reaches the plugin's own release. `request_restart` normally asks the
-    // runtime to exit, which emits `RunEvent::Exit`; the plugin releases the
-    // guard from that event, before the replacement process is spawned. When
-    // the runtime refuses the exit request, `request_restart` spawns the
-    // replacement straight from the caller's thread and no exit event is ever
-    // emitted — without this call the successor would find the guard held and
-    // exit on startup, leaving no Clavyn running after an update. Releasing an
-    // already-released guard is a no-op, so the ordinary path pays nothing.
-    // Guarded by the same condition as registration: a build that never
-    // claimed the guard must not release one an installed build is holding.
-    if crate::single_instance_guard_applies() {
-        tauri_plugin_single_instance::destroy(&app);
-    }
-
-    // Restart the app to apply the update
-    app.request_restart();
+    // Restart the app to apply the update. The successor must find the
+    // single-instance guard free, or an update ends with no Clavyn running.
+    crate::restart_app_releasing_guard(&app);
 
     Ok(())
 }
@@ -1324,34 +1344,32 @@ mod admit_local_terminal_tests {
 
     #[test]
     fn accepts_a_fresh_id_while_slots_remain() {
-        assert!(admit_local_terminal("fresh", &opening(1), &["ssh-a".to_string()]).is_ok());
+        assert!(admit_local_terminal("fresh", &opening(1), false).is_ok());
     }
 
     #[test]
     fn rejects_an_id_already_held_by_a_local_terminal() {
-        let error = admit_local_terminal("local-0", &opening(2), &[]).unwrap_err();
+        let error = admit_local_terminal("local-0", &opening(2), false).unwrap_err();
         assert!(error.contains("local terminal"), "{error}");
     }
 
     #[test]
     fn rejects_an_id_already_held_by_an_ssh_session() {
-        let error =
-            admit_local_terminal("ssh-a", &LocalTerminals::default(), &["ssh-a".to_string()])
-                .unwrap_err();
+        let error = admit_local_terminal("ssh-a", &LocalTerminals::default(), true).unwrap_err();
         assert!(error.contains("SSH session"), "{error}");
     }
 
     #[test]
     fn rejects_a_fresh_id_once_the_concurrent_limit_is_reached() {
-        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), &[]).is_ok());
-        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+        assert!(admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS - 1), false).is_ok());
+        let error = admit_local_terminal("fresh", &opening(MAX_LOCAL_TERMINALS), false).unwrap_err();
         assert!(error.contains("too many local terminals"), "{error}");
     }
 
     #[test]
     fn reports_the_collision_rather_than_the_limit_when_both_apply() {
         let error =
-            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), &[]).unwrap_err();
+            admit_local_terminal("local-0", &opening(MAX_LOCAL_TERMINALS), false).unwrap_err();
         assert!(error.contains("local terminal"), "{error}");
     }
 
@@ -1366,7 +1384,7 @@ mod admit_local_terminal_tests {
         let mut admitted = 0;
         for i in 0..MAX_LOCAL_TERMINALS * 2 {
             let id = format!("burst-{i}");
-            if admit_local_terminal(&id, &locals, &[]).is_ok() {
+            if admit_local_terminal(&id, &locals, false).is_ok() {
                 locals.reserve(id);
                 admitted += 1;
             }
@@ -1381,10 +1399,10 @@ mod admit_local_terminal_tests {
     fn releasing_a_reservation_returns_its_slot() {
         let mut locals = opening(MAX_LOCAL_TERMINALS - 1);
         let reservation = locals.reserve("release-me".to_string());
-        assert!(admit_local_terminal("fresh", &locals, &[]).is_err());
+        assert!(admit_local_terminal("fresh", &locals, false).is_err());
         locals.release("release-me", reservation);
-        assert!(admit_local_terminal("fresh", &locals, &[]).is_ok());
-        assert!(admit_local_terminal("release-me", &locals, &[]).is_ok());
+        assert!(admit_local_terminal("fresh", &locals, false).is_ok());
+        assert!(admit_local_terminal("release-me", &locals, false).is_ok());
     }
 
     /// A superseded request must not free the slot a newer request claimed for
@@ -1748,6 +1766,80 @@ mod connect_lock_tests {
         let (host, resolved) = saved_host(&state, direct.id).await.expect("direct host");
         assert_eq!(host.hostname, "direct.example.test");
         assert!(resolved.is_none());
+    }
+
+    /// An SSH connect on an id a local terminal or another SSH session holds is
+    /// refused before it can register an output sink on that id, and the
+    /// refusal leaves the other session's claim in place.
+    #[tokio::test]
+    async fn a_connect_on_a_held_id_is_refused() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        state.local_terminals.lock().await.reserve("local".to_string());
+        let held = state.sessions.claim("ssh").expect("claim");
+        let host = Host::new("fixture", "must-not-connect.example.test", 22, "deploy");
+        let host_id = host.id;
+        state.store.lock().await.add_host(host).expect("save host");
+        app.manage(state);
+
+        for id in ["local", "ssh"] {
+            let error = connect_ssh(
+                app.state(),
+                id.to_string(),
+                host_id,
+                None,
+                None,
+                None,
+                None,
+                tauri::ipc::Channel::new(|_| Ok(())),
+            )
+            .await
+            .expect_err("a held id must be refused");
+            assert!(error.contains("already in use"), "{id}: {error}");
+        }
+
+        let state = app.state::<Arc<AppState>>();
+        assert!(state.sessions.is_claimed("ssh"));
+        drop(held);
+        assert!(!state.sessions.is_claimed("ssh"));
+    }
+
+    /// Key metadata is only handed out once the vault opens with the session
+    /// key; on a locked vault it is unauthenticated header text.
+    #[tokio::test]
+    async fn keys_are_listed_only_while_the_vault_is_unlocked() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let (private, _public) = generate_ed25519().expect("generate");
+        let (meta, _) = parse_openssh_private(&private, None).expect("parse");
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            vault.add_key(&master, meta, &private).expect("add key");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        app.manage(state);
+
+        let error = list_keys(app.state()).await.expect_err("locked vault lists no keys");
+        assert!(error.contains("locked"), "{error}");
+
+        let state = app.state::<Arc<AppState>>();
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+        assert_eq!(list_keys(app.state()).await.expect("unlocked").len(), 1);
     }
 }
 

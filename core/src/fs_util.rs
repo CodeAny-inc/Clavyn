@@ -1,6 +1,34 @@
 use crate::Result;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// A staging file younger than this may still be the target of a save that is
+/// running right now, in this process or another one, so the sweep after a
+/// successful write leaves it alone. Anything older is a leftover of a save
+/// that did not finish.
+const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
+
+/// Load a state file, keeping "could not be read" and "is not valid state"
+/// apart and naming the file in both.
+///
+/// The bytes are read and parsed as bytes rather than through a `String`: a
+/// file that is not valid UTF-8 — hand-edited in an ANSI or UTF-16 editor, or
+/// with a flipped high bit — would otherwise fail inside `read_to_string` as a
+/// path-less `io::Error` before serde ever runs, which reaches the recovery
+/// screen as a failure it can only offer to retry, forever. As a parse failure
+/// it is `CorruptState`, which is what makes moving the file aside the right
+/// offer.
+pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    let bytes = std::fs::read(path).map_err(|e| crate::CoreError::UnreadableState {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    serde_json::from_slice(&bytes).map_err(|e| crate::CoreError::CorruptState {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })
+}
 
 /// Write `contents` to `path` atomically, readable only by the owner.
 ///
@@ -16,12 +44,22 @@ use std::path::{Path, PathBuf};
 ///   left behind with looser permissions by an earlier version is replaced by a
 ///   restricted one on the next save. `rename` carries the temporary file's
 ///   permissions over to the target on both platforms.
-/// * The temporary file is always a new one. Any leftover from an interrupted
-///   save is unlinked, and the open then refuses a file it did not create, so
-///   the object that gets renamed over the target is never one another process
-///   planted at the temporary path for this one to write through. That matters
-///   beyond the contents: a file object carries its ownership across a rename,
-///   and on Windows an owner outranks the DACL.
+/// * The temporary file is always a new one, under a name unique to this
+///   write, and the open refuses a file it did not create. So two writers never
+///   share a staging file — one of them unlinking or overwriting the other's
+///   half-written bytes and renaming them into place — and the object renamed
+///   over the target is never one another process planted for this one to
+///   write through. That matters beyond the contents: a file object carries its
+///   ownership across a rename, and on Windows an owner outranks the DACL.
+///   Leftovers from interrupted saves are removed once a save succeeds, but
+///   only once they are old enough that no save can still be writing them: a
+///   staging file belonging to a concurrent writer must survive, or that
+///   writer's `rename` fails and it reports a save failure it did not have.
+/// * On Unix the directory is synced after the rename, so the new name is on
+///   disk and not only the new bytes. A failed sync is logged rather than
+///   returned: the rename has already published the file, and callers roll
+///   their in-memory state back on an error, which would leave memory older
+///   than the file.
 ///
 /// The mechanism differs per platform because the permission models do:
 ///
@@ -37,19 +75,33 @@ use std::path::{Path, PathBuf};
 /// private keys are persisted, so a store that cannot keep it to one account is
 /// a store this refuses to use; the previous file is left intact and the error
 /// reaches the caller, naming the file and the reason it could not be written.
-pub(crate) fn write_private(path: &Path, contents: &str) -> Result<()> {
+pub fn write_private(path: &Path, contents: &str) -> Result<()> {
+    write_private_bytes(path, contents.as_bytes())
+}
+
+/// `write_private` for contents that are not text.
+///
+/// State files are JSON, so the text form is what every writer here wants. A
+/// copy of a file whose bytes are not valid UTF-8 — a state file hand-edited in
+/// an ANSI editor, or one a flipped bit got to — has to go through this one, or
+/// the copy fails on exactly the files that most need to survive being moved.
+pub fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| save_failed(path, e))?;
     }
 
     let tmp = temp_path(path);
-    match write_temp(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(save_failed(path, e))
-        }
+    if let Err(e) = write_temp(&tmp, contents).and_then(|()| std::fs::rename(&tmp, path)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(save_failed(path, e));
     }
+    for leftover in leftover_temp_files(path, Some(LEFTOVER_MIN_AGE)) {
+        let _ = std::fs::remove_file(leftover);
+    }
+    if let Err(e) = sync_parent_directory(path) {
+        tracing::warn!("saved {} but could not sync its directory: {e}", path.display());
+    }
+    Ok(())
 }
 
 /// Name the file a failed save was targeting. Every caller of `write_private`
@@ -68,8 +120,8 @@ fn save_failed(path: &Path, error: std::io::Error) -> crate::CoreError {
 /// Result of unlinking a private file. A directory-sync failure is reported
 /// separately because the irreversible unlink has already happened and callers
 /// must still clear any in-memory state that could authorize the deleted data.
-pub(crate) struct RemovePrivateOutcome {
-    pub(crate) durability_error: Option<std::io::Error>,
+pub struct RemovePrivateOutcome {
+    pub durability_error: Option<std::io::Error>,
 }
 
 /// Remove an atomically-written private file and any crash-leftover sibling
@@ -78,7 +130,7 @@ pub(crate) struct RemovePrivateOutcome {
 /// behind. Once unlinking succeeds, a containing-directory sync failure is
 /// returned in the outcome rather than rewinding the operation: the target is
 /// already gone and higher layers must cross their destructive reset boundary.
-pub(crate) fn remove_private(path: &Path) -> Result<RemovePrivateOutcome> {
+pub fn remove_private(path: &Path) -> Result<RemovePrivateOutcome> {
     remove_private_with_sync(path, sync_parent_directory)
 }
 
@@ -86,7 +138,13 @@ fn remove_private_with_sync<F>(path: &Path, sync_parent: F) -> Result<RemovePriv
 where
     F: FnOnce(&Path) -> std::io::Result<()>,
 {
-    let removed_tmp = remove_if_present(&temp_path(path))?;
+    // Unlike the sweep after a save, this takes every staging file whatever its
+    // age: the point of a reset is that no copy of the ciphertext is left, and
+    // a half-written one is still a copy.
+    let mut removed_tmp = false;
+    for leftover in leftover_temp_files(path, None) {
+        removed_tmp |= remove_if_present(&leftover)?;
+    }
     let removed_target = remove_if_present(path)?;
     let durability_error = if removed_tmp || removed_target {
         sync_parent(path).err()
@@ -122,22 +180,76 @@ fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_WRITES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Make every `write_private` on the calling thread fail before anything is
+/// renamed over its target, until switched off again. Lets tests exercise a
+/// failed save without depending on how the staging file is named.
+#[cfg(test)]
+pub(crate) fn fail_writes_on_this_thread(fail: bool) {
+    FAIL_WRITES.with(|flag| flag.set(fail));
+}
+
+/// A staging name for one write: `<name>.<unique>.tmp`, beside the target.
 fn temp_path(path: &Path) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".tmp");
+    name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     path.with_file_name(name)
 }
 
-fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
-    // An interrupted save can leave a temporary file behind, and anyone who can
-    // add a file to the directory can put one there deliberately. Either way it
-    // is unlinked rather than written through, so the crash leftover never
-    // blocks a save and the planted one never becomes the target: `create_new`
-    // below opens nothing that already exists, which makes this process the
-    // creator — and therefore the owner — of the file it is about to rename
-    // into place.
-    remove_if_present(tmp)?;
+/// Staging files for `path` left behind by saves that did not finish,
+/// including the fixed `<name>.tmp` name earlier builds used.
+///
+/// With `min_age`, only files last modified longer ago than that are returned.
+/// A file whose modification time cannot be read, or which claims a time in the
+/// future, is treated as young and kept: the cost of keeping a leftover is one
+/// stale file, the cost of removing a live one is another writer's save
+/// failing.
+fn leftover_temp_files(path: &Path, min_age: Option<Duration>) -> Vec<PathBuf> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{name}.");
+    let dir = match path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        Some(parent) => parent,
+        None => Path::new("."),
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|file| file.starts_with(&prefix) && file.ends_with(".tmp"))
+        })
+        .filter(|entry| match min_age {
+            None => true,
+            Some(min_age) => entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= min_age),
+        })
+        .map(|entry| entry.path())
+        .collect()
+}
 
+fn write_temp(tmp: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(test)]
+    if FAIL_WRITES.with(|flag| flag.get()) {
+        return Err(std::io::Error::other("write failure injected by a test"));
+    }
+    // `create_new` opens nothing that already exists, which makes this process
+    // the creator — and therefore the owner — of the file it is about to rename
+    // into place. The name is unique to this write, so nothing legitimate is
+    // ever there first.
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -164,19 +276,18 @@ fn write_temp(tmp: &Path, contents: &str) -> std::io::Result<()> {
     // supplied never covers any of the contents.
     #[cfg(windows)]
     owner_only::restrict_to_owner(&file).map_err(unrestrictable_volume)?;
-    file.write_all(contents.as_bytes())?;
+    file.write_all(contents)?;
     file.sync_all()
 }
 
 /// Say what a refused create means. `create_new` reports `AlreadyExists` —
-/// `ERROR_FILE_EXISTS` on Windows, `EEXIST` on Unix — only for a file that
-/// appeared at the temporary path after `write_temp`'s unlink cleared it, so
-/// it is one this process did not create. Refusing it is the point: a file
-/// object carries its permissions and its owner across a rename, so writing
-/// through a planted file and renaming it over the target would hand the state
-/// file an owner and an access decision chosen by whoever planted it. The save
-/// fails and the previous state file is left intact, but the bare error says
-/// none of that.
+/// `ERROR_FILE_EXISTS` on Windows, `EEXIST` on Unix — only for a file at a
+/// temporary path unique to this write, so it is one this process did not
+/// create. Refusing it is the point: a file object carries its permissions and
+/// its owner across a rename, so writing through a planted file and renaming it
+/// over the target would hand the state file an owner and an access decision
+/// chosen by whoever planted it. The save fails and the previous state file is
+/// left intact, but the bare error says none of that.
 fn occupied_temp_path(tmp: &Path, error: std::io::Error) -> std::io::Error {
     if error.kind() != std::io::ErrorKind::AlreadyExists {
         return error;
@@ -384,7 +495,54 @@ mod owner_only {
 
 #[cfg(test)]
 mod tests {
-    use super::{remove_private, remove_private_with_sync, write_private};
+    use super::{remove_private, remove_private_with_sync, temp_path, write_private, LEFTOVER_MIN_AGE};
+
+    /// Backdate a file so the sweep after a save counts it as a leftover rather
+    /// than as a staging file some other writer is still filling in.
+    fn backdate(path: &std::path::Path) {
+        let when = std::time::SystemTime::now() - LEFTOVER_MIN_AGE - std::time::Duration::from_secs(1);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open to backdate")
+            .set_modified(when)
+            .expect("backdate");
+    }
+
+    /// Two writers of one file must not stage through one temporary file, or
+    /// one can unlink or overwrite the other's half-written bytes and rename
+    /// them into place.
+    #[test]
+    fn each_write_stages_through_its_own_temporary_file() {
+        let path = std::path::Path::new("state.json");
+        assert_ne!(temp_path(path), temp_path(path));
+        let name = temp_path(path).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("state.json.") && name.ends_with(".tmp"), "{name}");
+    }
+
+    #[test]
+    fn leftovers_under_either_naming_are_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let unrelated = dir.path().join("store.json.0123.tmp");
+        for leftover in ["vault.json.tmp", "vault.json.0123abcd.tmp"] {
+            let leftover = dir.path().join(leftover);
+            std::fs::write(&leftover, "older ciphertext").expect("seed");
+            backdate(&leftover);
+        }
+        std::fs::write(&unrelated, "another file's leftover").expect("seed");
+        backdate(&unrelated);
+
+        write_private(&path, "{}").expect("write");
+        assert!(!dir.path().join("vault.json.tmp").exists());
+        assert!(!dir.path().join("vault.json.0123abcd.tmp").exists());
+        assert!(unrelated.exists(), "a leftover of another file was removed");
+
+        std::fs::write(dir.path().join("vault.json.4567.tmp"), "older").expect("seed");
+        remove_private(&path).expect("remove");
+        assert!(!dir.path().join("vault.json.4567.tmp").exists());
+        assert!(!path.exists());
+    }
 
     #[test]
     fn writes_and_then_replaces_the_target() {
@@ -427,6 +585,7 @@ mod tests {
         let path = dir.path().join("state.json");
         let tmp = dir.path().join("state.json.tmp");
         std::fs::write(&tmp, "half-written").expect("seed leftover");
+        backdate(&tmp);
 
         write_private(&path, "{\"saved\":true}").expect("write");
 
@@ -435,6 +594,25 @@ mod tests {
             "{\"saved\":true}"
         );
         assert!(!tmp.exists());
+    }
+
+    /// The sweep must not unlink a staging file another writer is still
+    /// filling in: that writer's `rename` would then fail and it would report a
+    /// save failure and roll back a change that was fine.
+    #[test]
+    fn a_staging_file_of_a_concurrent_writer_survives_the_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let in_flight = temp_path(&path);
+        std::fs::write(&in_flight, "another writer's bytes").expect("seed");
+
+        write_private(&path, "{\"saved\":true}").expect("write");
+
+        assert!(in_flight.exists(), "a live staging file was swept away");
+        assert_eq!(
+            std::fs::read_to_string(&in_flight).expect("read"),
+            "another writer's bytes"
+        );
     }
 
     #[test]
