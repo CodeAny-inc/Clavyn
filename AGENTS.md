@@ -364,6 +364,36 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
   - `APPLE_API_KEY` — App Store Connect API key
   - `APPLE_API_ISSUER` — Issuer ID
   - `APPLE_API_KEY_PATH` — path to API key file
+- In CI, `release.yml` signs and notarizes as soon as these repository secrets
+  exist, and stays ad-hoc signed without them: `APPLE_CERTIFICATE` (base64
+  `.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`,
+  `APPLE_PASSWORD`, `APPLE_TEAM_ID`.
+
+## Windows code signing
+- Installers are unsigned until the `WINDOWS_CERTIFICATE` (base64 `.pfx`) and
+  `WINDOWS_CERTIFICATE_PASSWORD` repository secrets exist. With them,
+  `release.yml` imports the certificate and Authenticode-signs with SHA-256
+  and an RFC 3161 timestamp, then removes the key from the runner's
+  certificate store.
+- The `.pfx` path only works for a legacy exportable certificate. Since June
+  2023 the CA/Browser Forum baseline requires a new code-signing key to be
+  generated and held on hardware (a token, an HSM or a cloud signing service),
+  so a freshly issued certificate generally cannot be exported at all. The
+  expected route for one of those is `bundle.windows.signCommand` in
+  `tauri.conf.json` pointing at the provider's signer (Azure Trusted Signing,
+  or a cloud KMS signer), which replaces the thumbprint path entirely.
+- `bundle.publisher` is deliberately unset. NSIS uses it as `MANUFACTURER` and
+  keys the remembered install directory on it
+  (`HKCU\Software\${MANUFACTURER}\Clavyn`), so setting it moves that key away
+  from the `clavyn` the identifier currently yields, and an update run — which
+  skips the uninstall — installs a second copy for anyone who chose a
+  non-default directory. Setting it needs an NSIS hook that falls back to the
+  old key, and a name that is final.
+
+## Release checksums
+- `publish-manifest` uploads `SHA256SUMS` covering every release asset,
+  `latest.json` and the `.sig` files included. README explains how to check a
+  download against it.
 
 ## Git author config
 - All commits must be authored by `computerbox124 <computerbox124@users.noreply.github.com>`.
