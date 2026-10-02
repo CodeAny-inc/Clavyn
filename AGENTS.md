@@ -309,11 +309,18 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
   and turns `createUpdaterArtifacts` off for its own build, since the bundler
   refuses to build updater artifacts without the key. It packs the macOS
   `.app.tar.gz` itself.
+- `signer-tool` compiles `cargo-tauri` at a pinned version with
+  `cargo install tauri-cli --locked` — which runs its crates.io dependency
+  tree's build scripts and proc-macros, so it must never share a runner with
+  the key — and publishes the binary plus its sha256 as a job output.
 - `sign` is the only job with the key. It checks out no code, installs no npm
-  packages and uses no third-party actions: it installs the Tauri CLI with
-  `cargo install tauri-cli --locked` at a pinned version, signs the updater
-  artifacts on the release (`.app.tar.gz`, AppImage, deb, rpm, NSIS setup) and
-  uploads the `.sig` files. It always runs on a GitHub-hosted runner.
+  packages and uses no third-party actions: it downloads the signer binary,
+  verifies it against the sha256 `signer-tool` published, signs the exact
+  updater artifacts for this version (`.app.tar.gz`, AppImage, deb, rpm, NSIS
+  setup), verifies every `.sig` against `plugins.updater.pubkey` in
+  `tauri.conf.json` and uploads the signatures. The key only ever shares a
+  step with the digest-verified binary. It always runs on a GitHub-hosted
+  runner.
 - Auto-detects prerelease (alpha/beta/rc in version string)
 - Generates `latest.json` with all platform signatures
 - Uploads everything to the GitHub release
