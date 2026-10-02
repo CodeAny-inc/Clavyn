@@ -124,15 +124,27 @@ fn pick_key_dialog<R: Runtime>(app: &AppHandle<R>) -> FileDialogBuilder<R> {
         .add_filter("All Files", &["*"])
 }
 
+/// The size is checked on the same open handle the read then uses, and the read
+/// itself stops one byte past the cap. Checking a path and then reading it lets
+/// a file that grows in between get past the limit.
 fn read_key_file(path: &std::path::Path) -> ApiResult<String> {
-    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
     if !metadata.is_file() {
         return Err(format!("Not a file: {}", path.display()));
     }
     if metadata.len() > MAX_KEY_FILE_BYTES {
         return Err("File too large (max 256KB)".to_string());
     }
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    let mut contents = String::new();
+    file.take(MAX_KEY_FILE_BYTES + 1)
+        .read_to_string(&mut contents)
+        .map_err(|e| e.to_string())?;
+    if contents.len() as u64 > MAX_KEY_FILE_BYTES {
+        return Err("File too large (max 256KB)".to_string());
+    }
+    Ok(contents)
 }
 
 /// Let the user pick a private key file and return its contents, or `None`

@@ -480,12 +480,21 @@ pub struct SshConnectionInfo {
 
 /// A saved host and the identity it links to, read from the native store.
 ///
-/// The webview names a host only by id. Hostname, port, account, key and
-/// startup command all come from what the user saved, so script running in the
-/// page cannot point a connection, or a stored key, at a server of its choice.
-/// A linked identity that no longer exists comes back as `None`, and
+/// The webview names a host only by id, and hostname, port, account, key and
+/// startup command all come from the saved store rather than from the call's
+/// arguments. A linked identity that no longer exists comes back as `None`, and
 /// `connection::connect` refuses that rather than falling back to the host's
 /// own credentials.
+///
+/// That is the whole of the guarantee: connection details are the saved ones.
+/// It is not a guarantee about what the page can reach, because the page can
+/// also write the store — `add_host`, `update_host` and `update_identity` take
+/// a whole `Host`/`Identity`, and `Store` neither validates them nor asks the
+/// user. Two calls still point a stored key at a server of the caller's
+/// choosing: add a host, then connect to it, and a first-seen host key is
+/// accepted without a prompt. Closing that needs a native confirmation on
+/// writes that introduce or change `hostname`, `port`, `key_id`, `identity_id`
+/// or `startup_command`.
 async fn saved_host(state: &AppState, host_id: Uuid) -> ApiResult<(Host, Option<Identity>)> {
     let store = state.store.lock().await;
     let host = store
