@@ -142,12 +142,21 @@ jobs:
         # dependency and vue-demi's shim already targets Vue 3.
         run: npm ci --ignore-scripts
 
+      # The updater signing key is not available to this job. Everything here
+      # runs third-party code (npm packages, build scripts, tauri-action), so
+      # the bundles are built unsigned and the `sign` job signs them in a job
+      # that runs none of it. With `createUpdaterArtifacts` on and no key the
+      # bundler refuses to build, so it is switched off for this build only;
+      # the updater artifacts are the installers themselves on Windows and
+      # Linux, and the macOS one is packed below.
+      - name: Disable updater signing for this build
+        shell: bash
+        run: echo '{"bundle":{"createUpdaterArtifacts":false}}' > "$RUNNER_TEMP/unsigned-updater.json"
+
       - name: Build and bundle Tauri app
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           tagName: ${{ needs.prepare.outputs.tag }}
@@ -155,98 +164,215 @@ jobs:
           releaseBody: "Clavyn ${{ needs.prepare.outputs.version }} — see assets below."
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
-          args: ${{ matrix.args }}
+          uploadUpdaterJson: false
+          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json
 
-      - name: Upload .sig files to release
+      - name: Pack the macOS updater archive
+        # The bundler builds `<app>.app.tar.gz` only alongside a signature, so
+        # it is packed here from the finished bundle in the same shape: a gzip
+        # tar holding the `.app` directory. Named as tauri-action names it.
+        if: startsWith(matrix.platform, 'macos')
         shell: bash
-        working-directory: ${{ github.workspace }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
           RUST_TARGET: ${{ matrix.rust_target }}
         run: |
-          # Fallback: upload any .sig files that tauri-action didn't upload.
-          # With createUpdaterArtifacts: true, tauri-action should handle this,
-          # but we keep this as a safety net.
-          echo "Working directory: $(pwd)"
-          echo "GITHUB_WORKSPACE: ${GITHUB_WORKSPACE}"
-          echo "RUST_TARGET: ${RUST_TARGET}"
+          case "$RUST_TARGET" in
+            aarch64-apple-darwin) ARCH=aarch64 ;;
+            x86_64-apple-darwin) ARCH=x64 ;;
+            *) echo "unexpected macOS target '$RUST_TARGET'" >&2; exit 1 ;;
+          esac
+          BUNDLE_DIR="$GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle/macos"
+          ARCHIVE="$RUNNER_TEMP/Clavyn_${VERSION}_${ARCH}.app.tar.gz"
+          # No AppleDouble `._` entries for extended attributes.
+          COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$ARCHIVE" -C "$BUNDLE_DIR" Clavyn.app
+          gh release upload "$TAG" "$ARCHIVE" --clobber --repo "$GITHUB_REPOSITORY"
 
-          if [ -n "$RUST_TARGET" ]; then
-            TARGET_DIR="$GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle"
-          else
-            TARGET_DIR="$GITHUB_WORKSPACE/target/release/bundle"
-          fi
-          echo "Expected bundle dir: $TARGET_DIR"
+  # ──────────────────────────────────────────────
+  # Build the signer binary
+  # ──────────────────────────────────────────────
+  # `cargo install tauri-cli --locked` compiles tauri-cli's lockfile (~850
+  # crates) including their build scripts and proc-macros, none of which may
+  # run on the machine that holds the key. This job produces the binary on an
+  # isolated runner, publishes it as an artifact and exports its sha256 so
+  # `sign` can verify the exact bytes it is about to execute.
+  signer-tool:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    permissions: {}
+    outputs:
+      signer_sha256: ${{ steps.digest.outputs.sha256 }}
+    steps:
+      - name: Build the Tauri signer
+        run: |
+          cargo install tauri-cli --version 2.11.4 --locked --root "$RUNNER_TEMP/tauri-cli"
+          install -m 755 "$RUNNER_TEMP/tauri-cli/bin/cargo-tauri" "$RUNNER_TEMP/cargo-tauri"
 
-          ALT_DIRS="$GITHUB_WORKSPACE/target/release/bundle $GITHUB_WORKSPACE/desktop/src-tauri/target/release/bundle"
-          if [ -n "$RUST_TARGET" ]; then
-            ALT_DIRS="$ALT_DIRS $GITHUB_WORKSPACE/target/$RUST_TARGET/release/bundle $GITHUB_WORKSPACE/desktop/src-tauri/target/$RUST_TARGET/release/bundle"
-          fi
+      - name: Publish the signer digest
+        id: digest
+        run: sha256sum "$RUNNER_TEMP/cargo-tauri" | awk '{print "sha256=" $1}' >> "$GITHUB_OUTPUT"
 
-          upload_sig() {
-            local sigfile="$1"
-            local basename
-            basename=$(basename "$sigfile")
-            # macOS .app.tar.gz.sig → rename to include arch
-            if [ "$basename" = "Clavyn.app.tar.gz.sig" ] && [ -n "$RUST_TARGET" ]; then
-              local arch=""
-              if [ "$RUST_TARGET" = "aarch64-apple-darwin" ]; then
-                arch="aarch64"
-              elif [ "$RUST_TARGET" = "x86_64-apple-darwin" ]; then
-                arch="x64"
-              fi
-              if [ -n "$arch" ]; then
-                local newname="Clavyn_${arch}.app.tar.gz.sig"
-                echo "Uploading: $sigfile as $newname"
-                cp "$sigfile" "/tmp/$newname"
-                gh release upload "$TAG" "/tmp/$newname" --clobber
-                return
-              fi
-            fi
-            echo "Uploading: $sigfile"
-            gh release upload "$TAG" "$sigfile" --clobber
-          }
+      - name: Upload the signer binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tauri-signer
+          path: ${{ runner.temp }}/cargo-tauri
+          if-no-files-found: error
+          retention-days: 1
 
-          UPLOADED=0
-          for dir in $ALT_DIRS; do
-            if [ -d "$dir" ]; then
-              echo "Searching in: $dir"
-              find "$dir" -name "*.sig" -type f -exec echo "Found: {}" \; 2>/dev/null || true
-              SIG_LIST=$(find "$dir" -name "*.sig" -type f 2>/dev/null || true)
-              if [ -n "$SIG_LIST" ]; then
-                echo "$SIG_LIST" | while IFS= read -r sigfile; do
-                  upload_sig "$sigfile"
-                done
-                UPLOADED=1
-              fi
-            fi
+  # ──────────────────────────────────────────────
+  # Sign the updater artifacts
+  # ──────────────────────────────────────────────
+  # The only job that holds the updater signing key, which is the sole root of
+  # trust for every installed client's auto-update. It checks out no code and
+  # installs nothing: it fetches the signer binary built by `signer-tool`,
+  # verifies it against the digest that job exported, and signs the release
+  # assets the updater installs — the key only ever shares a step with that
+  # verified binary. It always runs on an ephemeral GitHub-hosted runner,
+  # including when `runner_mode` sends the builds to self-hosted machines.
+  sign:
+    needs: [prepare, build, signer-tool]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the Tauri signer
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: tauri-signer
+          path: ${{ runner.temp }}/signer
+
+      - name: Verify the signer digest
+        env:
+          EXPECTED_SHA256: ${{ needs.signer-tool.outputs.signer_sha256 }}
+        run: |
+          echo "$EXPECTED_SHA256  $RUNNER_TEMP/signer/cargo-tauri" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/signer/cargo-tauri"
+
+      - name: Download the updater artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets"
+          # The exact files this version's release must carry; `gh` fails the
+          # step if any expected name is absent. A glob would sign stray
+          # assets too — e.g. a leftover `Clavyn_x64.app.tar.gz` from another
+          # version — and could pair a signature with the wrong file.
+          expected=(
+            "Clavyn_${VERSION}_aarch64.app.tar.gz"
+            "Clavyn_${VERSION}_x64.app.tar.gz"
+            "Clavyn_${VERSION}_amd64.AppImage"
+            "Clavyn_${VERSION}_amd64.deb"
+            "Clavyn-${VERSION}-1.x86_64.rpm"
+            "Clavyn_${VERSION}_x64-setup.exe"
+          )
+          for name in "${expected[@]}"; do
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --dir "$RUNNER_TEMP/assets" --clobber --pattern "$name"
+          done
+          ls -la "$RUNNER_TEMP/assets"
+
+      - name: Sign
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          for file in "$RUNNER_TEMP"/assets/*; do
+            "$RUNNER_TEMP/signer/cargo-tauri" signer sign "$file"
           done
 
-          if [ "$UPLOADED" -eq 0 ]; then
-            echo "No .sig files found in expected dirs. Searching entire target..."
-            SIG_LIST=$(find "$GITHUB_WORKSPACE/target" -name "*.sig" -type f 2>/dev/null || true)
-            if [ -n "$SIG_LIST" ]; then
-              echo "$SIG_LIST" | while IFS= read -r sigfile; do
-                upload_sig "$sigfile"
-              done
-              UPLOADED=1
-            fi
-          fi
+      - name: Verify signatures against the updater pubkey
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          # `signer sign` never checks the key against `plugins.updater.pubkey`,
+          # so a rotated or mismatched secret would ship silently and break
+          # auto-update on every client. Verify each .sig before uploading.
+          gh api "repos/$GITHUB_REPOSITORY/contents/desktop/src-tauri/tauri.conf.json?ref=$RELEASE_TAG" \
+            --jq .content | base64 -d > "$RUNNER_TEMP/tauri.conf.json"
+          python3 << 'PYEOF'
+          import base64, glob, json, os, subprocess, sys
 
-          if [ "$UPLOADED" -eq 0 ]; then
-            echo "WARNING: No .sig files were uploaded"
-            echo "Listing $TARGET_DIR:"
-            ls -laR "$TARGET_DIR" 2>/dev/null || echo "Bundle directory not found"
-          fi
+          runner_temp = os.environ["RUNNER_TEMP"]
+          with open(f"{runner_temp}/tauri.conf.json") as f:
+              pubkey_cfg = json.load(f)["plugins"]["updater"]["pubkey"]
 
-          echo "Done uploading .sig files"
+          # The config value is the base64 of a minisign public-key file; its
+          # key line decodes to [alg | keynum(8) | ed25519 key(32)].
+          pub_text = base64.b64decode(pubkey_cfg).decode()
+          pub = base64.b64decode(
+              next(l for l in pub_text.splitlines() if l and not l.startswith("untrusted")))
+          if pub[:2] != b"Ed" or len(pub) != 42:
+              sys.exit("unexpected updater pubkey format in tauri.conf.json")
+          keynum = pub[2:10]
+          with open(f"{runner_temp}/pubkey.der", "wb") as f:
+              f.write(bytes.fromhex("302a300506032b6570032100") + pub[10:])
+
+          failed = []
+          for path in sorted(glob.glob(f"{runner_temp}/assets/*")):
+              if path.endswith(".sig"):
+                  continue
+              name = os.path.basename(path)
+              sig_path = path + ".sig"
+              if not os.path.exists(sig_path):
+                  print(f"{name}: missing .sig")
+                  failed.append(name)
+                  continue
+              # Each .sig is the base64 of a minisign signature box; its
+              # signature line decodes to [alg | keynum(8) | ed25519 sig(64)].
+              box = base64.b64decode(open(sig_path, "rb").read()).decode()
+              sig = base64.b64decode(
+                  next(l for l in box.splitlines()
+                       if l and not l.startswith(("untrusted", "trusted"))))
+              if sig[:2] not in (b"Ed", b"ED") or len(sig) != 74 or sig[2:10] != keynum:
+                  print(f"{name}: signature algorithm or keynum mismatch")
+                  failed.append(name)
+                  continue
+              # Minisign's "ED" covers the BLAKE2b-512 digest of the file;
+              # "Ed" covers the file itself.
+              if sig[:2] == b"ED":
+                  with open(f"{runner_temp}/digest.bin", "wb") as f:
+                      f.write(subprocess.run(
+                          ["openssl", "dgst", "-blake2b512", "-binary", path],
+                          capture_output=True, check=True).stdout)
+                  msg_path = f"{runner_temp}/digest.bin"
+              else:
+                  msg_path = path
+              with open(f"{runner_temp}/sig.bin", "wb") as f:
+                  f.write(sig[10:])
+              r = subprocess.run(
+                  ["openssl", "pkeyutl", "-verify", "-rawin",
+                   "-in", msg_path,
+                   "-sigfile", f"{runner_temp}/sig.bin",
+                   "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
+                   "-keyform", "DER"],
+                  capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"{name}: signature verified")
+              else:
+                  print(f"{name}: {r.stderr.strip() or 'signature verification failed'}")
+                  failed.append(name)
+
+          if failed:
+              sys.exit(f"signature verification failed for: {', '.join(failed)}")
+          PYEOF
+
+      - name: Upload signatures
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$RELEASE_TAG" "$RUNNER_TEMP"/assets/*.sig --clobber --repo "$GITHUB_REPOSITORY"
 
   # ──────────────────────────────────────────────
   # Generate and upload latest.json (update manifest)
   # ──────────────────────────────────────────────
   publish-manifest:
-    needs: [prepare, build]
+    needs: [prepare, sign]
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
     permissions:
       contents: write
@@ -279,77 +405,38 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
           REPO: ${{ github.repository }}
         run: |
-          # Build the manifest with Python for proper JSON escaping
-          # Uses glob patterns to find .sig files regardless of exact naming
+          # Build the manifest with Python for proper JSON escaping. The `sign`
+          # job signs an exact set of files for this version, so pair each
+          # signature with the file it was produced from by name — globbing
+          # could pick a signature and a URL from different files, and a stray
+          # asset matching the pattern would shadow the real one.
           python3 << 'PYEOF'
-          import json, os, glob
+          import json, os
 
           version = os.environ["VERSION"]
           tag = os.environ["TAG"]
           repo = os.environ["REPO"]
 
-          def read_sig(path):
-              try:
-                  with open(path) as f:
-                      return f.read().strip()
-              except FileNotFoundError:
-                  return ""
-
-          def find_sig(pattern):
-              matches = glob.glob(f"./assets/{pattern}")
-              if matches:
-                  return read_sig(matches[0])
-              return ""
-
-          def find_asset_url(pattern):
-              """Find the actual asset name on the release and return its URL."""
-              matches = glob.glob(f"./assets/{pattern}")
-              if matches:
-                  filename = os.path.basename(matches[0])
-                  return f"https://github.com/{repo}/releases/download/{tag}/{filename}"
-              return None
+          expected = {
+              "darwin-aarch64": f"Clavyn_{version}_aarch64.app.tar.gz",
+              "darwin-x86_64": f"Clavyn_{version}_x64.app.tar.gz",
+              "linux-x86_64": f"Clavyn_{version}_amd64.AppImage",
+              "windows-x86_64": f"Clavyn_{version}_x64-setup.exe",
+          }
 
           platforms = {}
-
-          # macOS aarch64 — .app.tar.gz has NO version in filename
-          # e.g. Clavyn_aarch64.app.tar.gz
-          sig = find_sig("*aarch64.app.tar.gz.sig")
-          url = find_asset_url("*aarch64.app.tar.gz")
-          if sig and url:
-              platforms["darwin-aarch64"] = {"signature": sig, "url": url}
-              print(f"darwin-aarch64: {url}")
-          else:
-              print(f"WARNING: darwin-aarch64 missing (sig={bool(sig)}, url={url})")
-
-          # macOS x86_64 — .app.tar.gz has NO version in filename
-          # e.g. Clavyn_x64.app.tar.gz
-          sig = find_sig("*x64.app.tar.gz.sig")
-          url = find_asset_url("*x64.app.tar.gz")
-          if sig and url:
-              platforms["darwin-x86_64"] = {"signature": sig, "url": url}
-              print(f"darwin-x86_64: {url}")
-          else:
-              print(f"WARNING: darwin-x86_64 missing (sig={bool(sig)}, url={url})")
-
-          # Linux x86_64 — AppImage signed directly
-          # e.g. Clavyn_0.1.1-alpha.23_amd64.AppImage
-          sig = find_sig("*amd64.AppImage.sig")
-          url = find_asset_url("*amd64.AppImage")
-          if sig and url:
-              platforms["linux-x86_64"] = {"signature": sig, "url": url}
-              print(f"linux-x86_64: {url}")
-          else:
-              print(f"WARNING: linux-x86_64 missing (sig={bool(sig)}, url={url})")
-
-          # Windows x86_64 — NSIS setup exe signed directly
-          # e.g. Clavyn_0.1.1-alpha.23_x64-setup.exe
-          sig = find_sig("*x64-setup.exe.sig")
-          url = find_asset_url("*x64-setup.exe")
-          if sig and url:
-              platforms["windows-x86_64"] = {"signature": sig, "url": url}
-              print(f"windows-x86_64: {url}")
-          else:
-              print(f"WARNING: windows-x86_64 missing (sig={bool(sig)}, url={url})")
+          missing = []
+          for platform, filename in expected.items():
+              sig_path = f"./assets/{filename}.sig"
+              if not os.path.exists(f"./assets/{filename}") or not os.path.exists(sig_path):
+                  print(f"WARNING: {platform} missing ({filename})")
+                  missing.append(platform)
+                  continue
+              with open(sig_path) as f:
+                  sig = f.read().strip()
+              url = f"https://github.com/{repo}/releases/download/{tag}/{filename}"
+              platforms[platform] = {"signature": sig, "url": url}
+              print(f"{platform}: {url}")
 
           manifest = {
               "version": version,
@@ -364,11 +451,8 @@ jobs:
           print("\nGenerated latest.json:")
           print(json.dumps(manifest, indent=2))
 
-          if not platforms:
-              print("\nERROR: No platforms found! Check that .sig files were uploaded.")
-              print("Available .sig files:")
-              for f in sorted(glob.glob("./assets/*.sig")):
-                  print(f"  {f}")
+          if missing:
+              print(f"\nERROR: missing assets for: {', '.join(missing)}")
               print("All assets:")
               for f in sorted(os.listdir("./assets")):
                   print(f"  {f}")

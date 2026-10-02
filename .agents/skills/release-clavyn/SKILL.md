@@ -95,9 +95,10 @@ co-author trailers.
     gh run list --workflow release.yml --limit 1
     gh run watch <run-id> --exit-status
 
-The `prepare` → 4× `build` → `publish-manifest` pipeline takes ~10 minutes.
+The `prepare` → 4× `build` → `sign` → `publish-manifest` pipeline. `sign`
+builds the Tauri CLI from crates.io before signing, which adds a few minutes.
 `publish-manifest` fails if any platform's `.sig`/asset is missing — check
-its log first on failure.
+the `sign` log first on failure, then `publish-manifest`.
 
 ### 7. Replace the placeholder release notes
 
@@ -141,9 +142,10 @@ Do not amend or force-push the tagged release commit.
   commit first or use `--dry-run` to preview.
 - `release.sh --notes` content is embedded into `latest.json` via a Python
   triple-quoted string — never put `'''` in notes.
-- `createUpdaterArtifacts: true` in `tauri.conf.json` is what produces the
-  signed `.app.tar.gz`/installer `.sig` files the updater needs — do not
-  disable it.
+- `createUpdaterArtifacts: true` in `tauri.conf.json` is what makes a local
+  `scripts/release.sh` build produce the signed `.app.tar.gz`/installer `.sig`
+  files — do not disable it there. CI turns it off only inside the `build`
+  job, which has no key; the `sign` job produces the `.sig` files instead.
 - The app is ad-hoc signed on macOS; users may need
   `xattr -cr /Applications/Clavyn.app`. That is expected for unsigned
   builds, not a release failure.
