@@ -169,7 +169,13 @@ export function onUpdateExtracting(cb: () => void): Promise<UnlistenFn> {
 }
 
 /** What stopped the app state from loading at startup, if anything did. */
-export interface StartupFailure { file: string | null; file_name: string | null; reason: string }
+export interface StartupFailure {
+  file: string | null;
+  file_name: string | null;
+  /** True only when the file's contents are the problem, so renaming it away is the right offer. */
+  can_set_aside: boolean;
+  reason: string;
+}
 export const getStartupFailure = () => invoke<StartupFailure | null>("startup_failure");
 /** Renames the unreadable file aside and returns its new path. */
 export const setAsideUnreadableFile = () => invoke<string>("set_aside_unreadable_file");

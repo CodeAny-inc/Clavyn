@@ -21,10 +21,19 @@ type ApiResult<T> = std::result::Result<T, String>;
 
 /// Why startup stopped short of loading the app state.
 struct StartupFailure {
-    /// The unreadable file, when the failure is one file that could not be
-    /// parsed. Other failures (an unreadable directory, say) name no file and
-    /// offer no move.
+    /// The state file the failure is about. Both loader failures name one —
+    /// contents that will not parse, and a file that could not be read at all.
+    /// Anything else (an unreadable directory, say) names none.
     file: Option<PathBuf>,
+    /// Whether moving that file aside is the right offer.
+    ///
+    /// Only unparseable contents qualify. A file that could not be read is
+    /// still the authoritative copy, and the cause is usually outside it and
+    /// temporary — a permission change, a backup or indexer holding it, a
+    /// redirected folder that timed out. Renaming `vault.json` over one of
+    /// those would discard every stored key to work around a problem that
+    /// fixes itself, so that failure offers only a retry.
+    can_set_aside: bool,
     reason: String,
 }
 
@@ -44,10 +53,17 @@ impl StartupStatus {
         let failure = match error {
             CoreError::CorruptState { path, reason } => StartupFailure {
                 file: Some(PathBuf::from(path)),
+                can_set_aside: true,
+                reason: reason.clone(),
+            },
+            CoreError::UnreadableState { path, reason } => StartupFailure {
+                file: Some(PathBuf::from(path)),
+                can_set_aside: false,
                 reason: reason.clone(),
             },
             other => StartupFailure {
                 file: None,
+                can_set_aside: false,
                 reason: other.to_string(),
             },
         };
@@ -63,10 +79,12 @@ impl StartupStatus {
 
 #[derive(Serialize)]
 pub struct StartupFailureView {
-    /// Full path of the unreadable file, if the failure is one file.
+    /// Full path of the file the failure is about, if it is about one file.
     pub file: Option<String>,
     /// Its name alone, for the heading.
     pub file_name: Option<String>,
+    /// Whether the screen may offer to move that file aside.
+    pub can_set_aside: bool,
     pub reason: String,
 }
 
@@ -80,6 +98,7 @@ pub fn startup_failure(status: State<'_, StartupStatus>) -> Option<StartupFailur
             .as_ref()
             .and_then(|f| f.file_name())
             .map(|name| name.to_string_lossy().into_owned()),
+        can_set_aside: failure.can_set_aside,
         reason: failure.reason.clone(),
     })
 }
@@ -91,6 +110,7 @@ pub fn set_aside_unreadable_file(status: State<'_, StartupStatus>) -> ApiResult<
     let mut failure = status.lock();
     let file = failure
         .as_ref()
+        .filter(|f| f.can_set_aside)
         .and_then(|f| f.file.clone())
         .ok_or("there is no unreadable file to move aside")?;
     let moved = set_aside(&file, unix_seconds()).map_err(|e| {
@@ -105,9 +125,17 @@ pub fn set_aside_unreadable_file(status: State<'_, StartupStatus>) -> ApiResult<
 
 /// Restart the app so it loads its state again, with the unreadable file out
 /// of the way or its cause fixed.
+///
+/// Gated on the failure state like `set_aside_unreadable_file`: once the app
+/// has started normally this command is still registered, and nothing else
+/// lets page script end the session.
 #[tauri::command]
-pub fn restart_app(app: AppHandle) {
-    app.request_restart();
+pub fn restart_app(app: AppHandle, status: State<'_, StartupStatus>) -> ApiResult<()> {
+    if status.lock().is_none() {
+        return Err("the app started normally; there is nothing to restart for".into());
+    }
+    crate::restart_app_releasing_guard(&app);
+    Ok(())
 }
 
 fn unix_seconds() -> u64 {
@@ -131,11 +159,27 @@ fn set_aside(file: &Path, seconds: u64) -> std::io::Result<PathBuf> {
             n => format!("{name}.unreadable-{seconds}-{n}"),
         };
         let target = file.with_file_name(suffix);
-        if target.exists() {
-            continue;
+        // `rename` replaces an existing target on both Unix and Windows, so
+        // checking `exists()` first and then renaming is check-then-act.
+        // `hard_link` refuses an existing name itself, which makes "never
+        // replacing an existing file" hold without a window in between.
+        match std::fs::hard_link(file, &target) {
+            Ok(()) => {
+                std::fs::remove_file(file)?;
+                return Ok(target);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            // A volume with no hard links (exFAT, FAT32, some network shares)
+            // fails here for a reason that has nothing to do with the name, so
+            // fall back to the checked rename on it.
+            Err(_) => {
+                if target.exists() {
+                    continue;
+                }
+                std::fs::rename(file, &target)?;
+                return Ok(target);
+            }
         }
-        std::fs::rename(file, &target)?;
-        return Ok(target);
     }
     Err(std::io::Error::other("no free name to move the file to"))
 }
@@ -161,6 +205,32 @@ mod tests {
         let status = StartupStatus::failed(&CoreError::Io(std::io::Error::other("denied")));
         assert!(status.lock().as_ref().expect("failure").file.is_none());
         assert!(StartupStatus::ready().lock().is_none());
+    }
+
+    /// A file that could not be read is still the authoritative copy: name it
+    /// so the user knows what to fix, but never offer to rename it away.
+    #[test]
+    fn an_unreadable_file_is_named_but_not_offered_for_moving() {
+        let status = StartupStatus::failed(&CoreError::UnreadableState {
+            path: "/data/known_hosts.json".into(),
+            reason: "permission denied".into(),
+        });
+        let failure = status.lock();
+        let failure = failure.as_ref().expect("failure");
+        assert_eq!(
+            failure.file.as_deref(),
+            Some(Path::new("/data/known_hosts.json"))
+        );
+        assert!(!failure.can_set_aside);
+    }
+
+    #[test]
+    fn a_parse_failure_may_be_moved_aside() {
+        let status = StartupStatus::failed(&CoreError::CorruptState {
+            path: "/data/store.json".into(),
+            reason: "expected value".into(),
+        });
+        assert!(status.lock().as_ref().expect("failure").can_set_aside);
     }
 
     #[test]

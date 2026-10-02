@@ -37,9 +37,42 @@ pub trait EpochStore: Send + Sync {
 #[cfg_attr(test, allow(dead_code))]
 pub struct CredentialEpochStore;
 
+/// The entry the mark for one vault generation lives in.
+///
+/// The mark says what this device has already opened, so it has to stay on this
+/// device. Windows is the one store where that is not the default:
+/// `windows-native-keyring-store` creates credentials as
+/// `CRED_PERSIST_ENTERPRISE`, which follows a roaming profile — the profile the
+/// state files are deliberately kept out of. A mark that roams is shared by two
+/// machines whose vaults diverged once their state stopped roaming: each
+/// machine's saves raise the one mark, the other machine then reports a
+/// rollback on every unlock, and each "Open this older copy" lowers the mark for
+/// both. `keyring::Entry` cannot pass store modifiers, so the Windows entry is
+/// built through `keyring_core` instead, after `store_status` has initialized
+/// the same default store `keyring::Entry::new` would use.
+///
+/// The modifier applies when the credential is created, not to one that is
+/// already there, so a mark written by an earlier build keeps the persistence
+/// it was created with until that vault generation is replaced.
+#[cfg_attr(test, allow(dead_code))]
+#[cfg(windows)]
+fn epoch_entry(binding_id: &str) -> keyring::Result<keyring_core::Entry> {
+    if keyring::Entry::store_status().is_err() {
+        return Err(keyring::Error::NoDefaultStore);
+    }
+    let modifiers = std::collections::HashMap::from([("persistence", "Local")]);
+    keyring_core::Entry::new_with_modifiers(SERVICE, binding_id, &modifiers)
+}
+
+#[cfg_attr(test, allow(dead_code))]
+#[cfg(not(windows))]
+fn epoch_entry(binding_id: &str) -> keyring::Result<keyring::Entry> {
+    keyring::Entry::new(SERVICE, binding_id)
+}
+
 impl EpochStore for CredentialEpochStore {
     fn read(&self, binding_id: &str) -> ApiResult<Option<u64>> {
-        let entry = keyring::Entry::new(SERVICE, binding_id).map_err(|e| e.to_string())?;
+        let entry = epoch_entry(binding_id).map_err(|e| e.to_string())?;
         match entry.get_password() {
             Ok(value) => value
                 .trim()
@@ -52,7 +85,7 @@ impl EpochStore for CredentialEpochStore {
     }
 
     fn write(&self, binding_id: &str, epoch: u64) -> ApiResult<()> {
-        keyring::Entry::new(SERVICE, binding_id)
+        epoch_entry(binding_id)
             .and_then(|entry| entry.set_password(&epoch.to_string()))
             .map_err(|e| e.to_string())
     }
@@ -122,11 +155,60 @@ pub fn check_on_unlock(
             write_logged(store, binding_id, file_epoch);
             Ok(())
         }
+        // `seen` is already in hand, so the decision is made from it rather
+        // than through another round trip: every call into the credential
+        // store can block on a prompt the user has to answer.
+        Some(seen) if seen >= file_epoch => Ok(()),
         _ => {
-            record(store, binding_id, file_epoch);
+            write_logged(store, binding_id, file_epoch);
             Ok(())
         }
     }
+}
+
+/// `check_on_unlock`, off the async worker.
+///
+/// Every credential-store call is synchronous and can park its thread until a
+/// user answers a prompt — a macOS Keychain access dialog, a Secret Service
+/// collection unlock. Run on an async worker while the vault mutex is held,
+/// that stalls every other vault operation, SSH connects that need a vault
+/// snapshot included, for as long as the dialog stays up.
+pub async fn check_on_unlock_off_thread(
+    store: std::sync::Arc<dyn EpochStore>,
+    binding_id: String,
+    file_epoch: u64,
+    accept_older: bool,
+) -> ApiResult<()> {
+    blocking_store_call(move || check_on_unlock(&*store, &binding_id, file_epoch, accept_older))
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("vault rollback protection unavailable: {error}");
+            Ok(())
+        })
+}
+
+/// `record`, off the async worker, for the same reason.
+pub async fn record_off_thread(
+    store: std::sync::Arc<dyn EpochStore>,
+    binding_id: String,
+    epoch: u64,
+) {
+    if let Err(error) = blocking_store_call(move || record(&*store, &binding_id, epoch)).await {
+        tracing::warn!("could not record the vault epoch: {error}");
+    }
+}
+
+/// Run a credential-store call on the blocking pool. A pool that cannot take
+/// the work is reported rather than panicking: rollback protection is not worth
+/// failing an unlock over.
+async fn blocking_store_call<T, F>(call: F) -> std::result::Result<T, String>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(call)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Raise the recorded epoch after the vault was saved or opened. A failure is

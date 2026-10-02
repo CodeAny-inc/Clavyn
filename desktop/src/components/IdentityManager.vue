@@ -466,8 +466,11 @@ function hostsUsingIdentity(identityId: string): number {
                 {{ key.label }} ({{ key.key_type }})
               </option>
             </Select>
-            <p v-if="!vault.unlocked" class="text-[11px] text-muted-foreground mt-1">
+            <p v-if="vault.needsUnlock" class="text-[11px] text-muted-foreground mt-1">
               Unlock the vault to choose a key.
+            </p>
+            <p v-else-if="vault.needsSetup" class="text-[11px] text-muted-foreground mt-1">
+              Set up the vault in the Vault section to add and choose keys.
             </p>
             <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
               No keys available. Use Generate or Import to create one.

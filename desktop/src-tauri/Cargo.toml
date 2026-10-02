@@ -48,6 +48,13 @@ russh = { workspace = true }
 # depends on so both resolve the address the same way.
 zbus = "5.9"
 
+[target.'cfg(windows)'.dependencies]
+# `keyring`'s own Entry has no way to pass store modifiers, and the Windows
+# store needs one so the vault epoch mark is not written as a roaming
+# credential. Already in the tree as keyring's own dependency; pinned to the
+# version keyring 4.2.0 resolves.
+keyring-core = "=1.0.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep Security.framework cleanup available even when Touch ID enrollment/unlock
 # is compiled out. Data Protection Keychain visibility still depends on the

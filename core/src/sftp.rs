@@ -54,11 +54,17 @@ impl SftpManager {
         passphrase: Option<&str>,
         password: Option<&str>,
     ) -> Result<()> {
-        // Check if already connected
+        // An id already in use is refused rather than reported as connected.
+        // Returning Ok here would have the caller's later list_dir, remove_file
+        // or rename run against whichever host holds the id — the same
+        // collision the check below refuses, answered differently only because
+        // the other connect happened to finish first.
         {
             let sessions = self.sessions.lock().await;
             if sessions.contains_key(&session_id) {
-                return Ok(());
+                return Err(CoreError::InvalidInput(
+                    "session id is already in use by an SFTP session".into(),
+                ));
             }
         }
 

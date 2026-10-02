@@ -15,9 +15,13 @@ export const useKeysStore = defineStore("keys", () => {
     if (started === generation) keys.value = loaded;
   }
 
+  // An add that was in flight when the vault locked must not put a key back
+  // into the list the lock cleared: the pickers in HostForm and
+  // IdentityManager read that list, and would offer the key while locked.
   async function generateKey(label: string) {
+    const started = generation;
     const key = await api.generateKey(label);
-    keys.value.push(key);
+    if (started === generation) keys.value.push(key);
     return key;
   }
 
@@ -26,8 +30,9 @@ export const useKeysStore = defineStore("keys", () => {
     opensshPrivate: string,
     keyPassphrase: string | null,
   ) {
+    const started = generation;
     const key = await api.importKey(label, opensshPrivate, keyPassphrase);
-    keys.value.push(key);
+    if (started === generation) keys.value.push(key);
     return key;
   }
 

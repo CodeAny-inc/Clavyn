@@ -678,6 +678,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
  "keyring",
+ "keyring-core",
  "objc2-local-authentication",
  "portable-pty",
  "reqwest 0.12.28",

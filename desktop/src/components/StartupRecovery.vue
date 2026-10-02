@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { AlertTriangle } from "lucide-vue-next";
 import { restartApp, setAsideUnreadableFile, type StartupFailure } from "../api";
 import Button from "./ui/Button.vue";
@@ -7,6 +7,9 @@ import Button from "./ui/Button.vue";
 const props = defineProps<{ failure: StartupFailure }>();
 
 const movedTo = ref<string | null>(null);
+const canMove = computed(
+  () => Boolean(props.failure.file) && props.failure.can_set_aside && !movedTo.value,
+);
 const error = ref<string | null>(null);
 const busy = ref(false);
 
@@ -45,12 +48,18 @@ async function restart() {
       <p class="mb-3 text-[13px] text-muted-foreground" data-testid="startup-reason">{{ props.failure.reason }}</p>
 
       <template v-if="props.failure.file">
-        <p class="mb-3 text-[13px]">
+        <p v-if="props.failure.can_set_aside" class="mb-3 text-[13px]">
           Clavyn does not start on a file it cannot read, and does not replace it on its own:
           starting empty would overwrite it. You can move it aside and start without it. The file
           is renamed, not deleted, so nothing in it is lost.
         </p>
-        <p v-if="props.failure.file_name === 'vault.json'" class="mb-3 text-[13px]" data-testid="vault-note">
+        <p v-else class="mb-3 text-[13px]" data-testid="unreadable-note">
+          The file is there but could not be read, so what it holds is still intact. That is
+          usually something outside the file and temporary — a permission change, a backup or
+          antivirus holding it open, a network drive that was not reachable. Fix that and try
+          again; Clavyn will not rename this file away.
+        </p>
+        <p v-if="props.failure.file_name === 'vault.json' && props.failure.can_set_aside" class="mb-3 text-[13px]" data-testid="vault-note">
           vault.json holds your stored SSH keys, encrypted. Without it Clavyn starts with no
           stored keys until the file is repaired and put back.
         </p>
@@ -63,10 +72,10 @@ async function restart() {
       <p v-if="error" class="mb-4 text-[13px] text-destructive">{{ error }}</p>
 
       <div class="flex flex-wrap gap-2">
-        <Button v-if="props.failure.file && !movedTo" :disabled="busy" @click="setAside">
+        <Button v-if="canMove" :disabled="busy" @click="setAside">
           Move aside
         </Button>
-        <Button :variant="props.failure.file && !movedTo ? 'outline' : 'default'" :disabled="busy" @click="restart">
+        <Button :variant="canMove ? 'outline' : 'default'" :disabled="busy" @click="restart">
           {{ movedTo ? "Restart" : "Try again" }}
         </Button>
       </div>

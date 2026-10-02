@@ -6,31 +6,32 @@ import { getInvokeMock, setInvokeHandler } from "../test/setup";
 const calls = (command: string) =>
   getInvokeMock().mock.calls.filter(([name]) => name === command);
 
-const unreadableStore = {
+const corruptStore = {
   file: "/data/com.clavyn.app/store.json",
   file_name: "store.json",
+  can_set_aside: true,
   reason: "expected value at line 1 column 1",
 };
 
 describe("StartupRecovery", () => {
   it("names the unreadable file and why it could not be read", () => {
-    const view = mount(StartupRecovery, { props: { failure: unreadableStore } });
+    const view = mount(StartupRecovery, { props: { failure: corruptStore } });
     expect(view.text()).toContain("Clavyn could not load store.json");
-    expect(view.get('[data-testid="startup-reason"]').text()).toBe(unreadableStore.reason);
-    expect(view.text()).toContain(unreadableStore.file);
+    expect(view.get('[data-testid="startup-reason"]').text()).toBe(corruptStore.reason);
+    expect(view.text()).toContain(corruptStore.file);
     expect(view.find('[data-testid="vault-note"]').exists()).toBe(false);
   });
 
   it("warns that a vault set aside takes the stored keys with it", () => {
     const view = mount(StartupRecovery, {
-      props: { failure: { ...unreadableStore, file: "/data/vault.json", file_name: "vault.json" } },
+      props: { failure: { ...corruptStore, file: "/data/vault.json", file_name: "vault.json" } },
     });
     expect(view.get('[data-testid="vault-note"]').text()).toContain("stored SSH keys");
   });
 
   it("moves the file aside, shows where it went, then restarts", async () => {
     setInvokeHandler("set_aside_unreadable_file", () => "/data/store.json.unreadable-1700000000");
-    const view = mount(StartupRecovery, { props: { failure: unreadableStore } });
+    const view = mount(StartupRecovery, { props: { failure: corruptStore } });
 
     await view.get("button").trigger("click");
     await flushPromises();
@@ -45,9 +46,27 @@ describe("StartupRecovery", () => {
     expect(calls("restart_app")).toHaveLength(1);
   });
 
+  it("offers only a retry when the file could not be read at all", () => {
+    const view = mount(StartupRecovery, {
+      props: {
+        failure: {
+          file: "/data/com.clavyn.app/vault.json",
+          file_name: "vault.json",
+          can_set_aside: false,
+          reason: "permission denied",
+        },
+      },
+    });
+    expect(view.findAll("button").map(b => b.text())).toEqual(["Try again"]);
+    expect(view.get('[data-testid="unreadable-note"]').text()).toContain("still intact");
+    // Renaming a vault away over a problem outside the file would discard
+    // every stored key, so the note that explains that move must stay hidden.
+    expect(view.find('[data-testid="vault-note"]').exists()).toBe(false);
+  });
+
   it("offers only a retry when no single file is to blame", () => {
     const view = mount(StartupRecovery, {
-      props: { failure: { file: null, file_name: null, reason: "permission denied" } },
+      props: { failure: { file: null, file_name: null, can_set_aside: false, reason: "permission denied" } },
     });
     const buttons = view.findAll("button");
     expect(buttons.map(b => b.text())).toEqual(["Try again"]);

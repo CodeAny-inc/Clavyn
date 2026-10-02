@@ -88,12 +88,13 @@ pub async fn secure_unlock_vault(
     // Compared only now, with the passphrase verified, so the epoch is the
     // authenticated one. `accept_older` is the user choosing a copy this check
     // refused, such as a backup they restored.
-    crate::vault_epoch::check_on_unlock(
-        &*state.epoch_store,
-        &binding_id,
+    crate::vault_epoch::check_on_unlock_off_thread(
+        state.epoch_store.clone(),
+        binding_id.clone(),
         vault.epoch(),
         accept_older.unwrap_or(false),
-    )?;
+    )
+    .await?;
     // A vault stored in an older on-disk format is rewritten in the
     // authenticated one here, the one moment the master key is available. The
     // rewrite is atomic and preserves the salt, so a failure leaves the file and
@@ -101,7 +102,7 @@ pub async fn secure_unlock_vault(
     if let Err(error) = vault.migrate_to_current_format(&key) {
         tracing::warn!("vault format upgrade deferred: {error}");
     }
-    state.record_vault_epoch(&vault);
+    state.record_vault_epoch(&vault).await;
     drop(vault);
 
     let session = VaultSession::new(passphrase, key, binding_id);

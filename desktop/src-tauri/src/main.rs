@@ -54,6 +54,25 @@ fn guard_applies(is_debug_build: bool, bus_addressable: bool) -> bool {
     !is_debug_build && bus_addressable
 }
 
+/// Restart the app, releasing the single-instance guard first.
+///
+/// `request_restart` normally asks the runtime to exit, which emits
+/// `RunEvent::Exit`; the plugin releases the guard from that event, before the
+/// replacement process is spawned. When the runtime refuses the exit request,
+/// `request_restart` spawns the replacement straight from the caller's thread
+/// and no exit event is ever emitted — without this release the successor finds
+/// the guard held and exits on startup, leaving no Clavyn running. Releasing an
+/// already-released guard is a no-op, so the ordinary path pays nothing.
+///
+/// Guarded by the same condition as registration: a build that never claimed
+/// the guard must not release one an installed build is holding.
+pub(crate) fn restart_app_releasing_guard(app: &tauri::AppHandle) {
+    if single_instance_guard_applies() {
+        tauri_plugin_single_instance::destroy(app);
+    }
+    app.request_restart();
+}
+
 /// Whether the address the single-instance plugin resolves on startup parses.
 ///
 /// `zbus::Address::session()` is the exact call the plugin unwraps: it reads

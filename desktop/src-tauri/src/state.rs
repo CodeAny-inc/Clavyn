@@ -348,7 +348,13 @@ impl LocalTerminals {
 
 /// A local terminal session backed by portable-pty.
 pub struct LocalTerminal {
-    pub writer: Box<dyn std::io::Write + Send>,
+    /// Behind its own lock so a write never runs under the terminal map's
+    /// lock. A write to a PTY master blocks once the tty input buffer fills and
+    /// the foreground process is not reading its stdin, and holding the map
+    /// lock across that would stall every operation keyed on the map — a local
+    /// paste into a shell sitting at `sleep 100` would hold up SSH connects,
+    /// which take the same lock to admit a session id.
+    pub writer: Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
     /// Kept alive so the shell is not reaped, and polled with `try_wait` to
     /// tell a live terminal from one whose shell has already exited.
@@ -433,9 +439,18 @@ impl AppState {
     }
 
     /// Record the epoch `vault` is now at, after it was saved or opened.
-    pub fn record_vault_epoch(&self, vault: &Vault) {
+    ///
+    /// Awaited rather than spawned so a caller that goes on to read the record
+    /// sees this write, and run on the blocking pool because the credential
+    /// store is synchronous and can stop on a prompt.
+    pub async fn record_vault_epoch(&self, vault: &Vault) {
         if let Some(binding_id) = vault.binding_id() {
-            crate::vault_epoch::record(&*self.epoch_store, binding_id, vault.epoch());
+            crate::vault_epoch::record_off_thread(
+                self.epoch_store.clone(),
+                binding_id.to_string(),
+                vault.epoch(),
+            )
+            .await;
         }
     }
 
@@ -504,7 +519,9 @@ mod local_terminal_ownership_tests {
             .slave
             .spawn_command(CommandBuilder::new(shell))
             .expect("a shell can be spawned");
-        let writer = pair.master.take_writer().expect("the master has a writer");
+        let writer = Arc::new(std::sync::Mutex::new(
+            pair.master.take_writer().expect("the master has a writer"),
+        ));
         let owns_session_id = Arc::new(AtomicBool::new(true));
         (
             LocalTerminal {

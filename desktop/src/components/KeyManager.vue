@@ -180,7 +180,7 @@ async function browseForKeyFile() {
       <!-- Key metadata is only authenticated by decrypting the vault, so it is
            not shown until the vault is unlocked. An empty list here would read
            as lost keys next to the reset button. -->
-      <div v-if="!vault.unlocked" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-locked">
+      <div v-if="vault.needsUnlock" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-locked">
         <Lock class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
           <p class="text-[14px] font-medium text-foreground">Vault locked</p>
@@ -190,6 +190,18 @@ async function browseForKeyFile() {
           <Lock class="size-3.5" :stroke-width="1.75" />
           Unlock
         </Button>
+      </div>
+      <!-- With no vault yet there is nothing to unlock: the passphrase prompt
+           would reach derive_key with an empty salt and fail on an Argon2 error.
+           Keys live in the vault, so this is the step that comes first. -->
+      <div v-else-if="vault.needsSetup" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-no-vault">
+        <Lock class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">No vault yet</p>
+          <p class="text-[12px] text-muted-foreground mt-1">
+            Keys are stored encrypted in the vault. Set one up in the Vault section to add keys.
+          </p>
+        </div>
       </div>
       <div v-else-if="keys.keys.length" class="flex flex-col gap-1.5">
         <div

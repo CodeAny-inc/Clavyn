@@ -131,14 +131,14 @@ pub async fn is_vault_unlocked(state: State<'_, Arc<AppState>>) -> ApiResult<boo
 
 #[tauri::command]
 pub async fn list_keys(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<KeyMeta>> {
-    // Key metadata sits in the vault header, where only a decrypt checks it
-    // against the tag. Read straight off a locked vault it is whatever the file
-    // says, and the public key in it is what a user copies into a server's
-    // authorized_keys. So it is handed out only once the vault opens with the
-    // session key, which fails for a header that was edited.
+    // Key metadata sits in the vault header, and the public key in it is what a
+    // user copies into a server's authorized_keys. Read straight off a locked
+    // vault it is whatever the file says, so it is handed out only once the
+    // vault opens with the session key, and only in the form the file can
+    // vouch for — which for a legacy vault means derived from the private keys
+    // themselves, since its header is not authenticated at all.
     let (key, vault) = state.unlocked_vault().await?;
-    vault.verify_key(&key).map_err(err)?;
-    Ok(vault.keys_meta().to_vec())
+    vault.authenticated_keys_meta(&key).map_err(err)
 }
 
 #[tauri::command]
@@ -148,7 +148,7 @@ pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> Api
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &private).map_err(err)?;
-    state.record_vault_epoch(&vault);
+    state.record_vault_epoch(&vault).await;
     Ok(meta)
 }
 
@@ -171,7 +171,7 @@ pub async fn import_key(
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
-    state.record_vault_epoch(&vault);
+    state.record_vault_epoch(&vault).await;
     Ok(meta)
 }
 
@@ -179,7 +179,7 @@ pub async fn import_key(
 pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.remove_key(&key, &key_id.to_string()).map_err(err)?;
-    state.record_vault_epoch(&vault);
+    state.record_vault_epoch(&vault).await;
     Ok(())
 }
 
@@ -581,10 +581,15 @@ pub async fn connect_ssh(
     // Register the sink before the session can produce output, so the first
     // bytes of the shell banner are never dropped.
     state.register_output(session_id.clone(), on_output);
+    // The claim is kept here rather than handed over, so it is still held while
+    // the sink below is released. A claim freed inside core on a failed connect
+    // would let a concurrent `connect_ssh` take the same id and register its own
+    // sink, which this call's `release_output` would then remove — leaving that
+    // session connected with nowhere to send its output.
     let started = state
         .sessions
         .create_ssh_session(
-            claim,
+            &claim,
             &host,
             identity.as_ref(),
             known_hosts,
@@ -598,6 +603,7 @@ pub async fn connect_ssh(
     if started.is_err() {
         state.release_output(&session_id);
     }
+    drop(claim);
     started.map_err(err)?;
     Ok(info)
 }
@@ -730,7 +736,10 @@ pub async fn create_local_terminal(
 
     let mut reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
 
-    let writer = release_on_err!(pair.master.take_writer(), "take writer");
+    let writer = Arc::new(std::sync::Mutex::new(release_on_err!(
+        pair.master.take_writer(),
+        "take writer"
+    )));
 
     let master = pair.master;
 
@@ -854,17 +863,26 @@ pub async fn session_write(
     if state.sessions.list().await.contains(&session_id) {
         return state.sessions.write(&session_id, &data).await.map_err(err);
     }
-    // Try local terminal
-    let mut locals = state.local_terminals.lock().await;
-    if let Some(term) = locals.get_live_mut(&session_id) {
+    // Try local terminal. The writer is taken out from under the map lock and
+    // the write runs on the blocking pool: it blocks for as long as the
+    // foreground process leaves its stdin unread, and neither the terminal map
+    // nor an async worker may be held for that.
+    let writer = {
+        let mut locals = state.local_terminals.lock().await;
+        match locals.get_live_mut(&session_id) {
+            Some(term) => term.writer.clone(),
+            None => return Err("session not found".into()),
+        }
+    };
+    tokio::task::spawn_blocking(move || {
         use std::io::Write;
-        term.writer
-            .write_all(&data)
-            .map_err(|e| format!("write: {e}"))?;
-        term.writer.flush().map_err(|e| format!("flush: {e}"))?;
-        return Ok(());
-    }
-    Err("session not found".into())
+        let mut writer = writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer.write_all(&data)?;
+        writer.flush()
+    })
+    .await
+    .map_err(|e| format!("write: {e}"))?
+    .map_err(|e| format!("write: {e}"))
 }
 
 /// Narrow a webview-supplied terminal dimension to the `u16` the local PTY
@@ -1293,23 +1311,9 @@ pub async fn install_update(app: AppHandle) -> ApiResult<()> {
         .await
         .map_err(|e| e.to_string())?;
 
-    // Release the single-instance guard for the one restart path that never
-    // reaches the plugin's own release. `request_restart` normally asks the
-    // runtime to exit, which emits `RunEvent::Exit`; the plugin releases the
-    // guard from that event, before the replacement process is spawned. When
-    // the runtime refuses the exit request, `request_restart` spawns the
-    // replacement straight from the caller's thread and no exit event is ever
-    // emitted — without this call the successor would find the guard held and
-    // exit on startup, leaving no Clavyn running after an update. Releasing an
-    // already-released guard is a no-op, so the ordinary path pays nothing.
-    // Guarded by the same condition as registration: a build that never
-    // claimed the guard must not release one an installed build is holding.
-    if crate::single_instance_guard_applies() {
-        tauri_plugin_single_instance::destroy(&app);
-    }
-
-    // Restart the app to apply the update
-    app.request_restart();
+    // Restart the app to apply the update. The successor must find the
+    // single-instance guard free, or an update ends with no Clavyn running.
+    crate::restart_app_releasing_guard(&app);
 
     Ok(())
 }

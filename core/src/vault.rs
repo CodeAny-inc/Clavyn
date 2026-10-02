@@ -137,11 +137,7 @@ impl Drop for SecretText {
 impl Vault {
     pub fn open(path: PathBuf) -> Result<Self> {
         let file = if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
-            serde_json::from_str(&data).map_err(|e| CoreError::CorruptState {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?
+            crate::fs_util::read_state_file(&path)?
         } else {
             VaultFile::uninitialized()
         };
@@ -166,9 +162,24 @@ impl Vault {
         self.file.version
     }
 
-    /// Monotonic counter over saves of this vault generation.
+    /// Monotonic counter over saves of this vault generation, as far as the
+    /// file can prove it.
+    ///
+    /// A version 1 header is associated data for the AEAD, so its `epoch` is
+    /// covered by the tag and cannot be edited. A version 0 file is opened with
+    /// `open_unbound` and no associated data, so its `epoch` is a plain field
+    /// anyone who can write the file can set — and every release up to
+    /// v0.1.2-alpha.5 wrote version 0, so pre-upgrade backups and synced copies
+    /// are still out there carrying today's salt. Taking that number at face
+    /// value would let a forged high epoch pass the rollback check, be recorded
+    /// as the mark, and then be carried into the migrated version 1 file, which
+    /// is exactly the rollback the mark exists to catch. So version 0 reports
+    /// 0: the epoch of a vault no build has yet saved under authentication.
     pub fn epoch(&self) -> u64 {
-        self.file.epoch
+        match self.file.version {
+            0 => 0,
+            _ => self.file.epoch,
+        }
     }
 
     /// Return a non-secret identifier that is stable for the lifetime of this
@@ -341,6 +352,39 @@ impl Vault {
         self.finish_reset(removal)
     }
 
+    /// Key metadata the file can prove belongs to the keys it holds.
+    ///
+    /// `keys_meta` is a header field, and the `public_key_base64` in it is what
+    /// a user copies into a server's `authorized_keys`, so serving a value the
+    /// file does not vouch for chooses which key that server will trust.
+    ///
+    /// For version 1 the header is associated data, so a decrypt that succeeds
+    /// is proof the metadata is the one that was sealed. The payload is not
+    /// parsed on that path: a call that only reads metadata has no reason to
+    /// leave every private key in serde's scratch copies.
+    ///
+    /// Version 0 authenticates nothing but the ciphertext — `open_unbound`, no
+    /// associated data — so its header carries no proof at all. There the
+    /// metadata is derived from the private keys the vault actually holds,
+    /// which is the same derivation the format migration uses.
+    pub fn authenticated_keys_meta(&self, key: &VaultKey) -> Result<Vec<KeyMeta>> {
+        if !self.is_initialized() {
+            return Err(CoreError::Vault("vault not initialized".into()));
+        }
+        match self.file.version {
+            0 => {
+                let plaintext = self.decrypt(key)?;
+                let payload: VaultPayload = serde_json::from_slice(&plaintext)?;
+                drop(plaintext);
+                migrated_keys_meta(&self.file.keys_meta, &payload)
+            }
+            _ => {
+                self.decrypt(key)?;
+                Ok(self.file.keys_meta.clone())
+            }
+        }
+    }
+
     fn finish_reset(&mut self, removal: crate::fs_util::RemovePrivateOutcome) -> Result<()> {
         self.file = VaultFile::uninitialized();
 
@@ -405,9 +449,10 @@ impl Vault {
         Ok(())
     }
 
+    /// Counts from the authenticated epoch, so a number a version 0 header
+    /// carries is never the base a version 1 file is sealed against.
     fn next_epoch(&self) -> Result<u64> {
-        self.file
-            .epoch
+        self.epoch()
             .checked_add(1)
             .ok_or_else(|| CoreError::Vault("vault epoch would overflow".into()))
     }
@@ -973,6 +1018,75 @@ mod tests {
         );
     }
 
+    /// A version 0 header is not covered by the tag, so its `epoch` is a number
+    /// anyone who can write the file can choose. Taking it at face value would
+    /// let a forged one pass the rollback check, become the recorded mark, and
+    /// then be sealed into the migrated file — so the file reports 0 until a
+    /// build that authenticates the header has saved it.
+    #[tokio::test]
+    async fn a_forged_epoch_on_a_legacy_vault_counts_for_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (meta, private) = a_key();
+        write_unbound_vault(
+            &path,
+            "correct horse battery staple",
+            vec![(meta.id.to_string(), private)],
+            vec![meta],
+        );
+        let mut file: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("parse");
+        file["epoch"] = serde_json::json!(1_000_000u64);
+        std::fs::write(&path, serde_json::to_string(&file).expect("serialize")).expect("write");
+
+        let mut vault = Vault::open(path.clone()).expect("open");
+        assert_eq!(vault.format_version(), 0);
+        assert_eq!(vault.epoch(), 0, "a version 0 epoch must not be believed");
+
+        let key = vault
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("unlock");
+        assert!(vault.migrate_to_current_format(&key).expect("migrate"));
+        // The migrated file is sealed against the authenticated count, so the
+        // forged value is not carried forward either.
+        assert_eq!(vault.epoch(), 1);
+        assert_eq!(Vault::open(path).expect("reopen").epoch(), 1);
+    }
+
+    /// A version 0 header is unauthenticated, so the public key in its
+    /// `keys_meta` — the one a user copies into `authorized_keys` — has to come
+    /// from the private keys the vault holds, not from the file's own claim.
+    #[tokio::test]
+    async fn legacy_key_metadata_is_rebuilt_from_the_stored_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (meta, private) = a_key();
+        let real_public_key = meta.public_key_base64.clone();
+        let substituted = KeyMeta {
+            public_key_base64: "AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                .to_string(),
+            ..meta.clone()
+        };
+        write_unbound_vault(
+            &path,
+            "correct horse battery staple",
+            vec![(meta.id.to_string(), private)],
+            vec![substituted],
+        );
+
+        let vault = Vault::open(path).expect("open");
+        let key = vault
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("unlock");
+        // The unauthenticated header still says what it was edited to say.
+        assert_ne!(vault.keys_meta()[0].public_key_base64, real_public_key);
+        let authenticated = vault.authenticated_keys_meta(&key).expect("metadata");
+        assert_eq!(authenticated.len(), 1);
+        assert_eq!(authenticated[0].public_key_base64, real_public_key);
+    }
+
     #[tokio::test]
     async fn a_migrated_vault_detects_metadata_substitution() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1503,6 +1617,50 @@ mod tests {
                 assert_eq!(reported, path.display().to_string());
             }
             Err(other) => panic!("expected CorruptState, got {other}"),
+            Ok(_) => panic!("an unreadable vault opened"),
+        }
+    }
+
+    /// A vault saved as ANSI or UTF-16 — hand-edited in Notepad, or hit by a
+    /// flipped bit — must read as corrupt, not as a path-less io error, or the
+    /// recovery screen can only offer a retry that fails on every start.
+    #[test]
+    fn a_vault_file_that_is_not_utf8_is_reported_as_corrupt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, b"{\"salt\":\"caf\xe9\"}").expect("seed");
+        match Vault::open(path.clone()) {
+            Err(crate::CoreError::CorruptState { path: reported, .. }) => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            Err(other) => panic!("expected CorruptState, got {other}"),
+            Ok(_) => panic!("a vault that is not UTF-8 opened"),
+        }
+    }
+
+    /// A file that exists but cannot be read is a different failure: the
+    /// contents are not known to be bad, so it names the file and nothing
+    /// offers to move it aside.
+    #[test]
+    #[cfg(unix)]
+    fn a_vault_file_that_cannot_be_read_names_its_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, "{}").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+        // A mode of 000 does not stop root, so skip rather than assert there.
+        let enforced = std::fs::read(&path).is_err();
+        let opened = Vault::open(path.clone());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("restore");
+        if !enforced {
+            return;
+        }
+        match opened {
+            Err(crate::CoreError::UnreadableState { path: reported, .. }) => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
             Ok(_) => panic!("an unreadable vault opened"),
         }
     }

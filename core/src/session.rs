@@ -41,26 +41,59 @@ pub struct SessionManager {
 
 /// An SSH session id, reserved for a session that is about to connect.
 ///
-/// Dropping the claim without handing it to
-/// [`SessionManager::create_ssh_session`], or when that call fails, frees the
-/// id again.
+/// Dropping the claim frees the id again, unless the session was started, in
+/// which case the id passes to the [`ClaimedId`] guards that outlive this.
+/// Callers therefore keep the claim until they have finished unwinding a failed
+/// connect: an id freed earlier than that can be taken by another connect whose
+/// output sink the unwinding caller then removes.
 pub struct SessionClaim {
     id: String,
     claimed: Arc<std::sync::Mutex<HashSet<String>>>,
-    committed: bool,
+    committed: std::sync::atomic::AtomicBool,
 }
 
 impl SessionClaim {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    /// Hand the id over to a guard that holds it for as long as anything can
+    /// still act under it, and stop this claim from freeing it.
+    fn commit(&self) -> Arc<ClaimedId> {
+        self.committed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Arc::new(ClaimedId {
+            id: self.id.clone(),
+            claimed: self.claimed.clone(),
+        })
+    }
 }
 
 impl Drop for SessionClaim {
     fn drop(&mut self) {
-        if !self.committed {
+        if !self.committed.load(std::sync::atomic::Ordering::Relaxed) {
             lock_claims(&self.claimed).remove(&self.id);
         }
+    }
+}
+
+/// Holds a session id for as long as anything can still act under it.
+///
+/// One of these is shared by the map entry and the reader task, and the id is
+/// released only when both are gone. Closing a session deliberately leaves the
+/// reader running so it can flush the trailing output and announce the close,
+/// and both of those carry nothing but the id — so freeing the id when the map
+/// entry goes would let a new session take it and then have the old reader
+/// render its tail in the new pane, remove the new pane's output sink and
+/// report the new session as closed.
+struct ClaimedId {
+    id: String,
+    claimed: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Drop for ClaimedId {
+    fn drop(&mut self) {
+        lock_claims(&self.claimed).remove(&self.id);
     }
 }
 
@@ -78,6 +111,9 @@ struct SshSession {
     handle: Arc<Mutex<Handle<connection::SshHandler>>>,
     channel_id: russh::ChannelId,
     resize_tx: mpsc::Sender<(u32, u32)>,
+    /// Held so the id stays reserved while this entry exists.
+    #[allow(dead_code)]
+    claim: Arc<ClaimedId>,
 }
 
 // Re-export the handler type so the session manager can use it.
@@ -109,7 +145,7 @@ impl SessionManager {
         Ok(SessionClaim {
             id: session_id.to_string(),
             claimed: self.claimed.clone(),
-            committed: false,
+            committed: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -123,7 +159,7 @@ impl SessionManager {
     /// streaming data on the id `claim` reserved.
     pub async fn create_ssh_session(
         &self,
-        mut claim: SessionClaim,
+        claim: &SessionClaim,
         host: &Host,
         identity: Option<&crate::identity::Identity>,
         known_hosts: Arc<Mutex<KnownHosts>>,
@@ -174,17 +210,16 @@ impl SessionManager {
         let handle = Arc::new(Mutex::new(handle));
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
+        let held = claim.commit();
         let session = SshSession {
             id: session_id.clone(),
             handle: handle.clone(),
             channel_id,
             resize_tx,
+            claim: held.clone(),
         };
 
         self.sessions.lock().await.insert(session_id.clone(), session);
-        // The id stays claimed for as long as the session is in the map;
-        // `close` and `close_all` release it.
-        claim.committed = true;
 
         // Spawn the reading task
         let sid = session_id.clone();
@@ -193,6 +228,9 @@ impl SessionManager {
         let mut channel = channel;
 
         tokio::spawn(async move {
+            // Dropped when this task ends, after the close has been announced,
+            // which is the moment the id is free for another session.
+            let _held = held;
             let mut pending_resize: Option<(u32, u32)> = None;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
@@ -274,7 +312,8 @@ impl SessionManager {
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(session) = sessions.remove(session_id) {
-            lock_claims(&self.claimed).remove(session_id);
+            // The entry's share of the id goes with it; the reader task still
+            // holds one until it has flushed and announced the close.
             let handle = session.handle.lock().await;
             let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
         }
@@ -295,14 +334,7 @@ impl SessionManager {
     pub async fn close_all(&self) -> usize {
         let drained: Vec<SshSession> = {
             let mut sessions = self.sessions.lock().await;
-            let mut claimed = lock_claims(&self.claimed);
-            sessions
-                .drain()
-                .map(|(id, session)| {
-                    claimed.remove(&id);
-                    session
-                })
-                .collect()
+            sessions.drain().map(|(_, session)| session).collect()
         };
         let count = drained.len();
         for session in &drained {
@@ -369,9 +401,13 @@ mod claim_tests {
         let claim = sessions.claim("s").expect("claim");
         // Agent auth is refused before any network work, so this fails fast.
         assert!(sessions
-            .create_ssh_session(claim, &host, None, known_hosts, None, None, None, 80, 24)
+            .create_ssh_session(&claim, &host, None, known_hosts, None, None, None, 80, 24)
             .await
             .is_err());
+        // The caller still holds the claim: it unwinds its own output sink
+        // first, and the id must not be takeable until it has.
+        assert!(sessions.is_claimed("s"));
+        drop(claim);
         assert!(!sessions.is_claimed("s"));
     }
 }

@@ -150,6 +150,7 @@ describe("KeyManager while the vault is locked", () => {
   });
 
   it("shows a locked state with an unlock action instead of an empty list", async () => {
+    useVaultStore().initialized = true;
     const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
     expect(wrapper.find('[data-testid="keys-locked"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("No SSH keys yet");
@@ -166,6 +167,7 @@ describe("KeyManager while the vault is locked", () => {
     const writeText = vi.fn(() => Promise.resolve());
     vi.stubGlobal("navigator", { clipboard: { writeText } });
     const vault = useVaultStore();
+    vault.initialized = true;
     const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
 
     vault.unlocked = true;
@@ -181,10 +183,21 @@ describe("KeyManager while the vault is locked", () => {
     wrapper.unmount();
   });
 
+  // With no vault yet there is nothing to unlock: the passphrase modal would
+  // reach derive_key with an empty salt and fail on an Argon2 error.
+  it("points at vault setup instead of an unlock when no vault exists", async () => {
+    const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
+    expect(wrapper.find('[data-testid="keys-locked"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="keys-no-vault"]').text()).toContain("No vault yet");
+    expect(wrapper.find('[data-testid="keys-no-vault"] button').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("does not put keys back when a load finishes after the lock", async () => {
     let finish!: (keys: unknown[]) => void;
     setInvokeHandler("list_keys", () => new Promise(resolve => { finish = resolve; }));
     const vault = useVaultStore();
+    vault.initialized = true;
     const keys = useKeysStore();
 
     vault.unlocked = true;

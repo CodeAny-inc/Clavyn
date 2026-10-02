@@ -1,4 +1,4 @@
-use clavyn_core::fs_util::{remove_private, write_private};
+use clavyn_core::{remove_private, write_private};
 use std::path::{Path, PathBuf};
 
 type ApiResult<T> = std::result::Result<T, String>;
