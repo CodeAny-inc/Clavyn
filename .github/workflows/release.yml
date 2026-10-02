@@ -170,9 +170,35 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           if [ -z "$APPLE_CERTIFICATE" ]; then
+            if [ -n "$APPLE_SIGNING_IDENTITY$APPLE_ID$APPLE_PASSWORD$APPLE_TEAM_ID" ]; then
+              echo "::error::Apple signing secrets are set without APPLE_CERTIFICATE. Add the base64 .p12, or drop the others to stay ad-hoc signed."
+              exit 1
+            fi
             echo "No Apple certificate configured; the app stays ad-hoc signed."
             exit 0
           fi
+          # A half-configured set breaks both macOS builds rather than leaving
+          # them ad-hoc signed: a certificate with no identity leaves the
+          # bundler on the "-" from tauri.conf.json and fails with `certificate
+          # ... does not match provided identity "-"`, and an Apple ID without
+          # a team id fails with MissingTeamId. Name the missing secret here,
+          # before a build that takes twenty minutes to reach the bundler.
+          missing=""
+          for name in APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          notarize=""
+          if [ -n "$APPLE_ID$APPLE_PASSWORD$APPLE_TEAM_ID" ]; then
+            notarize="yes"
+            for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              [ -n "${!name}" ] || missing="$missing $name"
+            done
+          fi
+          if [ -n "$missing" ]; then
+            echo "::error::Apple code signing is configured but incomplete, missing:$missing"
+            exit 1
+          fi
+          [ -n "$notarize" ] || echo "No notarization credentials; the app is signed but not notarized."
           for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
             value="${!name}"
             if [ -n "$value" ]; then
@@ -189,19 +215,39 @@ jobs:
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           if (-not $env:WINDOWS_CERTIFICATE) {
+            if ($env:WINDOWS_CERTIFICATE_PASSWORD) {
+              Write-Output "::error::WINDOWS_CERTIFICATE_PASSWORD is set without WINDOWS_CERTIFICATE."
+              exit 1
+            }
             Write-Output "No Authenticode certificate configured; the installer stays unsigned."
             exit 0
+          }
+          # ConvertTo-SecureString throws on an empty string, so an unset
+          # password would otherwise fail the build with a parameter-binding
+          # error that says nothing about which secret is missing.
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            Write-Output "::error::WINDOWS_CERTIFICATE is set without WINDOWS_CERTIFICATE_PASSWORD. Export the .pfx with a password and add it as a secret."
+            exit 1
           }
           $pfx = Join-Path $env:RUNNER_TEMP "authenticode.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
           $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
           $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
           Remove-Item $pfx
+          # The certificate and its private key stay in the runner's user store
+          # until the cleanup step removes them. On a self-hosted machine that
+          # store outlives the job, so the thumbprint is handed on and the
+          # removal runs whether or not the build succeeds.
+          "AUTHENTICODE_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
           $config = Join-Path $env:RUNNER_TEMP "authenticode.json"
+          # tsp selects RFC 3161 timestamping (signtool /tr /td sha256); without
+          # it the bundler falls back to the legacy Authenticode /t timestamp,
+          # which does not carry the SHA-256 digest this signature uses.
           @{ bundle = @{ windows = @{
               certificateThumbprint = $cert.Thumbprint
               digestAlgorithm = "sha256"
               timestampUrl = "http://timestamp.digicert.com"
+              tsp = $true
           } } } | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 $config
           "SIGNING_CONFIG_ARGS=--config $config" >> $env:GITHUB_ENV
 
@@ -218,6 +264,14 @@ jobs:
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
           uploadUpdaterJson: false
           args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }}
+
+      - name: Remove the Authenticode certificate from the runner store
+        # The macOS keychain the bundler creates is temporary and goes with the
+        # job. This store is not: on a self-hosted Windows runner the imported
+        # key would stay available to every later job on that machine.
+        if: ${{ always() && matrix.platform == 'windows-latest' && env.AUTHENTICODE_THUMBPRINT != '' }}
+        shell: pwsh
+        run: Remove-Item "Cert:\CurrentUser\My\$env:AUTHENTICODE_THUMBPRINT" -DeleteKey -Force
 
       - name: Pack the macOS updater archive
         # The bundler builds `<app>.app.tar.gz` only alongside a signature, so

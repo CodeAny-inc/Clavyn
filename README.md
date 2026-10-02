@@ -88,8 +88,8 @@ now just tell your OS it's fine to open Clavyn. :)
 
 ## Verifying a download
 
-Every release publishes a `SHA256SUMS` file listing the SHA-256 checksum of
-each asset. Download it next to the installer and check:
+Each new release publishes a `SHA256SUMS` file listing the SHA-256 checksum
+of each asset. Download it next to the installer and check:
 
 ```sh
 # Linux
