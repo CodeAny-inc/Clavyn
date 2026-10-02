@@ -546,14 +546,23 @@ mod marker_tests {
         write_marker, CredentialObservation, EnrollmentMarker, TrackingState, MARKER_VERSION,
     };
 
-    /// The marker goes through the core's private writer: a file planted at
-    /// the staging path is not written through, the result is owner-only, and
-    /// removal clears it.
+    /// The marker goes through the core's private writer: a file planted under
+    /// the fixed staging name is neither written through nor renamed into
+    /// place, the result is owner-only, and removal clears it.
+    ///
+    /// The planted object is also reachable under a second name, so what
+    /// happened to it is visible whatever happens to the planted name. Checking
+    /// only that the planted name is gone would pass just as well if the file
+    /// behind it had been written through and renamed over the marker — which
+    /// is the case that matters, because a file object carries its owner across
+    /// a rename.
     #[test]
     fn the_marker_is_written_and_removed_like_the_other_state_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let planted = dir.path().join("vault-biometric-binding.tmp");
         std::fs::write(&planted, "planted").expect("plant");
+        let witness = dir.path().join("witness");
+        std::fs::hard_link(&planted, &witness).expect("link");
 
         let marker = EnrollmentMarker {
             version: MARKER_VERSION,
@@ -564,12 +573,18 @@ mod marker_tests {
         write_marker(dir.path(), &marker).expect("write marker");
 
         assert_eq!(read_marker(dir.path()).expect("read"), Some(marker));
-        assert!(!planted.exists());
+        assert_eq!(std::fs::read_to_string(&witness).expect("read"), "planted");
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(marker_path(dir.path())).expect("metadata").permissions().mode();
-            assert_eq!(mode & 0o777, 0o600);
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let marker = std::fs::metadata(marker_path(dir.path())).expect("metadata");
+            assert_eq!(marker.permissions().mode() & 0o777, 0o600);
+            let planted = std::fs::metadata(&witness).expect("metadata");
+            assert_ne!(
+                (marker.dev(), marker.ino()),
+                (planted.dev(), planted.ino()),
+                "the marker is the object that was planted"
+            );
         }
 
         remove_marker_file(dir.path()).expect("remove marker");
