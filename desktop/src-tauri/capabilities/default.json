@@ -4,9 +4,10 @@
   "description": "Default capability for the main window",
   "windows": ["main"],
   "permissions": [
-    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:webview:allow-internal-toggle-devtools",
     "shell:allow-open",
-    "os:default",
     "allow-startup-failure",
     "allow-set-aside-unreadable-file",
     "allow-restart-app",

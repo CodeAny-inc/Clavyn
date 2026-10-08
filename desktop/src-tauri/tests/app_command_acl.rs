@@ -69,16 +69,22 @@ fn capability() -> serde_json::Value {
         .expect("capabilities/default.json")
 }
 
-/// App permissions the capability grants. Plugin permissions carry a
-/// `plugin:` prefix; app permissions have none.
-fn granted_app_permissions() -> Vec<String> {
+fn granted_permissions() -> Vec<String> {
     capability()["permissions"]
         .as_array()
         .expect("a permissions list")
         .iter()
         .map(|p| p.as_str().expect("permissions are plain identifiers"))
-        .filter(|p| !p.contains(':'))
         .map(str::to_string)
+        .collect()
+}
+
+/// App permissions the capability grants. Plugin permissions are prefixed
+/// with the plugin's name (`shell:`, `core:event:`); app permissions are not.
+fn granted_app_permissions() -> Vec<String> {
+    granted_permissions()
+        .into_iter()
+        .filter(|p| !p.contains(':'))
         .collect()
 }
 
@@ -145,4 +151,30 @@ fn the_capability_is_limited_to_the_main_window_and_local_pages() {
     assert!(capability.get("webviews").is_none());
     assert!(capability.get("remote").is_none());
     assert_ne!(capability.get("local"), Some(&serde_json::json!(false)));
+}
+
+/// Plugin commands are granted one by one, for what the frontend calls. A
+/// plugin's `default` set is wider than its name suggests: `core:default`
+/// alone lets the page replace the app and window menus and resolve the
+/// user's home and data directories.
+#[test]
+fn plugin_permissions_are_the_ones_the_frontend_uses() {
+    let plugin: Vec<String> = granted_permissions()
+        .into_iter()
+        .filter(|p| p.contains(':'))
+        .collect();
+    assert_eq!(
+        plugin,
+        [
+            // `listen` in src/api.ts, and the unlisten it returns.
+            "core:event:allow-listen",
+            "core:event:allow-unlisten",
+            // The devtools hotkey Tauri injects into debug builds. Release
+            // builds do not register the command, so the grant is inert there.
+            "core:webview:allow-internal-toggle-devtools",
+            // `open` from @tauri-apps/plugin-shell, scoped in tauri.conf.json to
+            // the project's GitHub page and its releases.
+            "shell:allow-open",
+        ]
+    );
 }
