@@ -51,7 +51,9 @@ fn window(app: &App<MockRuntime>, label: &str) -> WebviewWindow<MockRuntime> {
 fn only_the_main_window_on_a_local_page_reaches_app_commands() {
     let app = mock_builder()
         .invoke_handler(tauri::generate_handler![get_app_info])
-        .build(tauri::generate_context!())
+        // `test = true` leaves out the macOS Info.plist embed, a fixed
+        // symbol that `main`'s own context already defines in this binary.
+        .build(tauri::generate_context!(test = true))
         .unwrap();
     // Test builds are dev builds, where the app's pages are served from devUrl.
     let local = app
