@@ -27,6 +27,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
 const identities = useIdentitiesStore();
@@ -46,6 +47,10 @@ const importKeyText = ref("");
 const importKeyPassphrase = ref("");
 const creatingKey = ref(false);
 const browsingFile = ref(false);
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
+const saving = ref(false);
+const saveError = ref("");
 
 const form = ref({
   label: "",
@@ -104,6 +109,7 @@ function addIdentity() {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  saveError.value = "";
   showForm.value = true;
 }
 
@@ -130,6 +136,7 @@ function editIdentity(id: Identity) {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  saveError.value = "";
   showForm.value = true;
 }
 
@@ -188,11 +195,16 @@ async function ensureKey(): Promise<string | null> {
 }
 
 async function save() {
-  if (!canSave.value) return;
+  if (!canSave.value || saving.value) return;
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
     keyId = await ensureKey();
     if (!keyId) return;
+    // A key created here is in the vault now, whatever happens to the save. If
+    // the save does not go through, saving again picks this key rather than
+    // creating another one.
+    form.value.keyId = keyId;
+    keyMode.value = "select";
   }
   const identity: Identity = {
     id: editing.value?.id ?? crypto.randomUUID(),
@@ -206,6 +218,8 @@ async function save() {
       .filter(Boolean),
     group_id: form.value.groupId || null,
   };
+  saving.value = true;
+  saveError.value = "";
   try {
     if (editing.value) {
       await identities.updateIdentity(identity);
@@ -214,13 +228,20 @@ async function save() {
     }
     showForm.value = false;
   } catch (e) {
-    alert(`Failed to save identity: ${e}`);
+    saveError.value = saveFailure(e);
+  } finally {
+    saving.value = false;
   }
 }
 
 async function deleteIdentity(id: Identity) {
-  if (confirm(`Delete identity "${id.label}"?`)) {
+  if (!confirm(`Delete identity "${id.label}"?`)) return;
+  try {
     await identities.deleteIdentity(id.id);
+  } catch (e) {
+    // Cancelling the native confirmation was the user's answer, and the
+    // identity is still listed, so there is nothing more to say.
+    if (!isDeclinedHostChange(e)) alert(`Failed to delete identity: ${e}`);
   }
 }
 
@@ -557,8 +578,9 @@ function hostsUsingIdentity(identityId: string): number {
       </div>
 
       <template #footer>
+        <p v-if="saveError" role="alert" class="basis-full text-[12px] text-destructive">{{ saveError }}</p>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
-        <Button :disabled="!canSave || creatingKey" @click="save">
+        <Button :disabled="!canSave || creatingKey || saving" @click="save">
           <Loader2 v-if="creatingKey" class="size-3.5 mr-1 animate-spin" :stroke-width="1.75" />
           {{ editing ? "Save changes" : "Add identity" }}
         </Button>
