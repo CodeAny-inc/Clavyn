@@ -25,6 +25,7 @@ pub mod error;
 mod fs_util;
 pub mod host;
 pub mod identity;
+pub mod key_reach;
 pub mod keys;
 pub mod known_hosts;
 pub mod output;
