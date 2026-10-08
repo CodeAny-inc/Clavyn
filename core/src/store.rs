@@ -21,6 +21,49 @@ pub struct StoreData {
     pub active_workspace_id: Option<uuid::Uuid>,
 }
 
+/// The host and identity edits, as plain operations on the data, so a write can
+/// be applied to a copy first to see what it would change.
+impl StoreData {
+    pub fn add_host(&mut self, host: Host) {
+        self.hosts.push(host);
+    }
+
+    pub fn update_host(&mut self, host: Host) {
+        if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
+            *h = host;
+        }
+    }
+
+    pub fn add_identity(&mut self, identity: Identity) {
+        self.identities.push(identity);
+    }
+
+    pub fn update_identity(&mut self, identity: Identity) {
+        if let Some(i) = self.identities.iter_mut().find(|i| i.id == identity.id) {
+            *i = identity;
+        }
+    }
+
+    /// Hosts that linked the identity go back to their own username, auth and
+    /// key.
+    pub fn remove_identity(&mut self, id: uuid::Uuid) {
+        self.identities.retain(|i| i.id != id);
+        self.hosts.iter_mut().for_each(|h| {
+            if h.identity_id == Some(id) {
+                h.identity_id = None;
+            }
+        });
+    }
+
+    /// The identity `host` links to, looked up the way a connection looks it
+    /// up: the first identity with that id. `None` both when the host links
+    /// nothing and when the link points at an identity that is not stored.
+    pub fn linked_identity(&self, host: &Host) -> Option<&Identity> {
+        let id = host.identity_id?;
+        self.identities.iter().find(|i| i.id == id)
+    }
+}
+
 pub struct Store {
     path: PathBuf,
     data: StoreData,
@@ -67,7 +110,7 @@ impl Store {
     /// rejected value would otherwise sit in memory and fail every later save
     /// for the rest of the session, so one bad mutation would take every
     /// unrelated edit down with it.
-    fn commit(&mut self, f: impl FnOnce(&mut StoreData)) -> Result<()> {
+    pub fn commit(&mut self, f: impl FnOnce(&mut StoreData)) -> Result<()> {
         let previous = self.data.clone();
         f(&mut self.data);
         match self.save() {
@@ -81,15 +124,11 @@ impl Store {
 
     // --- hosts ---
     pub fn add_host(&mut self, host: Host) -> Result<()> {
-        self.commit(|data| data.hosts.push(host))
+        self.commit(|data| data.add_host(host))
     }
 
     pub fn update_host(&mut self, host: Host) -> Result<()> {
-        self.commit(|data| {
-            if let Some(h) = data.hosts.iter_mut().find(|h| h.id == host.id) {
-                *h = host;
-            }
-        })
+        self.commit(|data| data.update_host(host))
     }
 
     pub fn remove_host(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -127,27 +166,15 @@ impl Store {
 
     // --- identities ---
     pub fn add_identity(&mut self, identity: Identity) -> Result<()> {
-        self.commit(|data| data.identities.push(identity))
+        self.commit(|data| data.add_identity(identity))
     }
 
     pub fn update_identity(&mut self, identity: Identity) -> Result<()> {
-        self.commit(|data| {
-            if let Some(i) = data.identities.iter_mut().find(|i| i.id == identity.id) {
-                *i = identity;
-            }
-        })
+        self.commit(|data| data.update_identity(identity))
     }
 
     pub fn remove_identity(&mut self, id: uuid::Uuid) -> Result<()> {
-        self.commit(|data| {
-            data.identities.retain(|i| i.id != id);
-            // Unset identity_id on any hosts that referenced it
-            data.hosts.iter_mut().for_each(|h| {
-                if h.identity_id == Some(id) {
-                    h.identity_id = None;
-                }
-            });
-        })
+        self.commit(|data| data.remove_identity(id))
     }
 
     pub fn identities(&self) -> &[Identity] {
