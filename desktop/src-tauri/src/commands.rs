@@ -1,3 +1,4 @@
+use crate::host_change_prompt;
 use crate::host_key_prompt;
 use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
@@ -6,6 +7,7 @@ use clavyn_core::keys::{generate_ed25519, import_openssh_private, parse_openssh_
 use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
 use clavyn_core::output::OutputBatcher;
 use clavyn_core::sftp::SftpEntry;
+use clavyn_core::store::StoreData;
 use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
 use std::time::Instant;
@@ -30,19 +32,53 @@ pub async fn list_hosts(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<Host>>
     Ok(store.hosts().to_vec())
 }
 
+/// Apply a host or identity write from the page. One that would let a vault key
+/// sign in somewhere no saved host lets it yet is confirmed first in a native
+/// dialog, and declining it writes nothing; see `host_change_prompt`.
+async fn write_hosts(
+    app: AppHandle,
+    state: &Arc<AppState>,
+    edit: impl Fn(&mut StoreData),
+) -> ApiResult<()> {
+    let prompt = state.clone();
+    host_change_prompt::write_confirmed(&state.store, edit, move |reaches| async move {
+        let keys = vault_keys(&prompt).await;
+        host_change_prompt::confirm(&app, &prompt.host_change_prompt, &reaches, keys.as_deref())
+            .await
+    })
+    .await
+}
+
+/// Key metadata the vault itself vouches for, so the dialog can name a key by
+/// the label and fingerprint the user knows it by. `None` while the vault is
+/// locked: the header of a locked vault is not authenticated, and a name read
+/// from it would be whatever the file says.
+async fn vault_keys(state: &AppState) -> Option<Vec<KeyMeta>> {
+    let (key, vault) = state.unlocked_vault().await.ok()?;
+    vault.authenticated_keys_meta(&key).ok()
+}
+
 #[tauri::command]
-pub async fn add_host(state: State<'_, Arc<AppState>>, host: Host) -> ApiResult<Host> {
-    let mut store = state.store.lock().await;
-    store.add_host(host.clone()).map_err(err)?;
+pub async fn add_host(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    host: Host,
+) -> ApiResult<Host> {
+    write_hosts(app, state.inner(), |data| data.add_host(host.clone())).await?;
     Ok(host)
 }
 
 #[tauri::command]
-pub async fn update_host(state: State<'_, Arc<AppState>>, host: Host) -> ApiResult<Host> {
-    let mut store = state.store.lock().await;
-    store.update_host(host.clone()).map_err(err)?;
+pub async fn update_host(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    host: Host,
+) -> ApiResult<Host> {
+    write_hosts(app, state.inner(), |data| data.update_host(host.clone())).await?;
     Ok(host)
 }
+
+/// Removing hosts takes reach away and never adds it, so it asks nothing.
 
 #[tauri::command]
 pub async fn delete_host(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
@@ -84,30 +120,46 @@ pub async fn list_identities(state: State<'_, Arc<AppState>>) -> ApiResult<Vec<I
     Ok(store.identities().to_vec())
 }
 
+/// A new identity reaches nothing on its own, but a saved host may already name
+/// its id, and storing it is what gives that host a key.
 #[tauri::command]
 pub async fn add_identity(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     identity: Identity,
 ) -> ApiResult<Identity> {
-    let mut store = state.store.lock().await;
-    store.add_identity(identity.clone()).map_err(err)?;
+    write_hosts(app, state.inner(), |data| {
+        data.add_identity(identity.clone())
+    })
+    .await?;
     Ok(identity)
 }
 
+/// Checked on every host that links the identity, since they all sign in with
+/// whatever it holds.
 #[tauri::command]
 pub async fn update_identity(
+    app: AppHandle,
     state: State<'_, Arc<AppState>>,
     identity: Identity,
 ) -> ApiResult<Identity> {
-    let mut store = state.store.lock().await;
-    store.update_identity(identity.clone()).map_err(err)?;
+    write_hosts(app, state.inner(), |data| {
+        data.update_identity(identity.clone())
+    })
+    .await?;
     Ok(identity)
 }
 
+/// Hosts that linked the identity fall back to their own username, auth and
+/// key, which can be a key they did not use while linked, so this is checked
+/// like any other write.
 #[tauri::command]
-pub async fn delete_identity(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
-    let mut store = state.store.lock().await;
-    store.remove_identity(id).map_err(err)
+pub async fn delete_identity(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    id: Uuid,
+) -> ApiResult<()> {
+    write_hosts(app, state.inner(), |data| data.remove_identity(id)).await
 }
 
 // ============================================================
@@ -486,32 +538,29 @@ pub struct SshConnectionInfo {
 /// `connection::connect` refuses that rather than falling back to the host's
 /// own credentials.
 ///
-/// That is the whole of the guarantee: connection details are the saved ones.
-/// It is not a guarantee about what the page can reach, because the page can
-/// also write the store — `add_host`, `update_host` and `update_identity` take
-/// a whole `Host`/`Identity`, and `Store` neither validates them nor asks the
-/// user. Two calls still point a stored key at a server of the caller's
-/// choosing: add a host, then connect to it, and a first-seen host key is
-/// accepted without a prompt. Closing that needs a native confirmation on
-/// writes that introduce or change `hostname`, `port`, `key_id`, `identity_id`
-/// or `startup_command`.
+/// What the saved store holds is in turn bounded by the user. The page can
+/// write hosts and identities, but a write that would let a vault key sign in
+/// as an account, at an address or on a port no saved host already uses it
+/// for, or run a startup command there that no saved host runs, waits for a
+/// native confirmation the page cannot answer (`host_change_prompt`). Writes
+/// are compared with what the store already allows, so a vault key reaches a
+/// destination the user confirmed or one the store file already held.
+///
+/// That is the whole of the guarantee. It says nothing about hosts that sign in
+/// without a vault key: a password is typed into the page at connect time, so
+/// the page sees it whatever the store says. It does not protect a user who
+/// reads the dialog and allows the change, which is theirs to decide. And it
+/// does not limit what the page does with a session to a saved destination
+/// once one is open.
 async fn saved_host(state: &AppState, host_id: Uuid) -> ApiResult<(Host, Option<Identity>)> {
     let store = state.store.lock().await;
     let host = store
         .hosts()
         .iter()
         .find(|h| h.id == host_id)
-        .cloned()
         .ok_or("Host not found. Check the saved host configuration.")?;
-    let identity = host.identity_id.and_then(|identity_id| {
-        store
-            .data()
-            .identities
-            .iter()
-            .find(|i| i.id == identity_id)
-            .cloned()
-    });
-    Ok((host, identity))
+    let identity = store.data().linked_identity(host).cloned();
+    Ok((host.clone(), identity))
 }
 
 fn ssh_connection_info(
@@ -1840,6 +1889,42 @@ mod connect_lock_tests {
             )
             .await;
         assert_eq!(list_keys(app.state()).await.expect("unlocked").len(), 1);
+    }
+
+    /// The dialog names a key only from metadata the unlocked vault vouches
+    /// for; a locked vault yields nothing, and the dialog shows the id instead.
+    #[tokio::test]
+    async fn key_names_come_from_the_unlocked_vault_only() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+
+        let (private, _public) = generate_ed25519().expect("generate");
+        let (mut meta, _) = parse_openssh_private(&private, None).expect("parse");
+        meta.label = "work laptop".into();
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            vault.add_key(&master, meta, &private).expect("add key");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        assert!(vault_keys(&state).await.is_none());
+
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+        let keys = vault_keys(&state).await.expect("unlocked");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].label, "work laptop");
     }
 }
 

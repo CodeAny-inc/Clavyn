@@ -5,6 +5,9 @@
 //! never renders it. An OS-drawn message dialog is, because the page can
 //! neither read it, click it nor dismiss it, and because the fingerprint it
 //! prints comes from the store rather than from the caller's arguments.
+//!
+//! The gate and the dialog are not specific to host keys: `host_change_prompt`
+//! asks its own question through them, behind a gate of its own.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -20,8 +23,8 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 /// fair trade for an action taken this rarely.
 const DECLINE_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// Marks the error raised when the user answered the dialog with Cancel, so the
-/// view can tell "you said no" apart from a failure worth showing in red.
+/// Marks the error raised when the user answered a host key dialog with Cancel,
+/// so the view can tell "you said no" apart from a failure worth showing in red.
 ///
 /// Only a real answer carries this tag. A dialog that could not be shown is
 /// refused too, but it is a failure the user has to be told about: silently
@@ -39,12 +42,16 @@ pub enum Answer {
     Unavailable,
 }
 
-/// Serializes the host-key confirmations and remembers a refusal.
+/// Serializes one kind of confirmation and remembers a refusal.
 ///
 /// The cooldown is deliberately global rather than per host: a caller that
 /// walks the host list would otherwise get a fresh dialog for every entry.
 pub struct PromptGate {
     state: Mutex<GateState>,
+    /// What the dialogs behind this gate ask about, for the refusals it gives.
+    subject: &'static str,
+    /// The tag a cancelled dialog's error carries; see `DECLINED`.
+    declined: &'static str,
 }
 
 #[derive(Default)]
@@ -54,9 +61,18 @@ struct GateState {
 }
 
 impl PromptGate {
+    /// The gate for the host key dialogs.
     pub fn new() -> Self {
+        Self::for_subject("host key", DECLINED)
+    }
+
+    /// A gate of its own for another kind of question, so that refusing one
+    /// kind does not silence the other, and a view can tell which was refused.
+    pub fn for_subject(subject: &'static str, declined: &'static str) -> Self {
         Self {
             state: Mutex::new(GateState::default()),
+            subject,
+            declined,
         }
     }
 
@@ -80,17 +96,18 @@ impl PromptGate {
     }
 
     fn open_at(&self, now: Instant) -> Result<(), String> {
+        let subject = self.subject;
         let mut state = self.lock();
         if state.open {
-            return Err(
-                "a host key confirmation is already open; answer that one first".to_string(),
-            );
+            return Err(format!(
+                "a {subject} confirmation is already open; answer that one first"
+            ));
         }
         if let Some(until) = state.declined_until {
             if now < until {
                 let seconds = (until - now).as_secs() + 1;
                 return Err(format!(
-                    "a host key confirmation was declined; no further host key changes will be \
+                    "a {subject} confirmation was declined; no further {subject} confirmations will be \
                      offered for {seconds}s"
                 ));
             }
@@ -152,9 +169,9 @@ impl Drop for Claim<'_> {
 ///
 /// `Ok(())` means the user pressed the confirm button. Everything else is an
 /// error, so the caller fails closed — but the errors are told apart: a
-/// cancellation carries `DECLINED` because it is an answer, while a dialog that
-/// could not be shown does not, because nothing was asked and the user has to
-/// be told that the button they pressed did nothing.
+/// cancellation carries the gate's tag because it is an answer, while a dialog
+/// that could not be shown does not, because nothing was asked and the user has
+/// to be told that the button they pressed did nothing.
 pub async fn confirm(
     app: &AppHandle,
     gate: &PromptGate,
@@ -167,7 +184,7 @@ pub async fn confirm(
     claim.answered(answer);
     match answer {
         Answer::Confirmed => Ok(()),
-        Answer::Declined => Err(format!("{DECLINED} {title}: cancelled")),
+        Answer::Declined => Err(format!("{} {title}: cancelled", gate.declined)),
         Answer::Unavailable => Err(format!(
             "{title}: the confirmation dialog could not be shown, so nothing was changed"
         )),
@@ -304,6 +321,28 @@ mod tests {
         // user is supposed to be seeing.
         gate.open_at(now)
             .expect("a dialog that never appeared left a cooldown");
+    }
+
+    #[test]
+    fn a_refusal_behind_one_gate_does_not_silence_another() {
+        let host_keys = PromptGate::new();
+        let other = PromptGate::for_subject("host change", "[other-declined]");
+        let now = Instant::now();
+        host_keys.open_at(now).expect("first prompt");
+        host_keys.close_at(Answer::Declined, now);
+        host_keys
+            .open_at(now)
+            .expect_err("a refusal left no cooldown, so this test proves nothing");
+
+        other.open_at(now).expect("the other gate was silenced");
+        other.close_at(Answer::Declined, now);
+        let refusal = other
+            .open_at(now)
+            .expect_err("the other gate kept no cooldown");
+        assert!(
+            refusal.contains("host change confirmation was declined"),
+            "unexpected refusal: {refusal}"
+        );
     }
 
     #[test]

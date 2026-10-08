@@ -55,6 +55,12 @@ shell.
   (`Zeroizing<String>`, cleared on lock).
 - `commands` — Tauri `#[command]`s: `list_hosts`, `add_host`, `list_keys`,
   `generate_key`, `import_key`, `initialize_vault`, `connect_ssh`.
+  `connect_ssh` and `sftp_connect` take a saved host's id, never connection
+  details. The host and identity writes compare the store before and after
+  (`core::key_reach`), and one that would let a vault key sign in as an
+  account, at an address or with a startup command no saved host already
+  allows waits for a native dialog (`host_change_prompt.rs`) naming the
+  host, `user@hostname:port`, the key and the command.
 - Frontend (`desktop/src`) — minimal HTML/JS now; upgrade to a real
   framework (React/Svelte/Solid) once the command surface is stable.
 
@@ -75,6 +81,7 @@ shell.
 | Memory scrape after lock       | `Zeroize` on drop for keys & passphrase           |
 | Supply-chain (deps)            | Pinned versions, minimal surface, audit russh     |
 | XSS in renderer                | Strict CSP in `tauri.conf.json`; no remote code   |
+| Renderer script aims a vault key at its own server | Connects by saved host id only; a store write that lets a key reach somewhere new needs a native confirmation |
 | Logging secrets                | No tracing of payloads/passphrases; redact keys   |
 
 ## Open design questions (to resolve before MVP)
