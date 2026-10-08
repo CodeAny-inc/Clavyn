@@ -252,13 +252,46 @@ fn rsa_hash_for(advertised: Option<Option<HashAlg>>) -> HashAlg {
     }
 }
 
-/// Open an authenticated SSH session and return the handle.
-/// The caller is responsible for opening a channel and starting the shell.
+/// The account, method and vault key a host signs in with.
+pub struct Credentials<'a> {
+    pub username: &'a str,
+    pub auth: &'a AuthMethod,
+    pub key_id: Option<uuid::Uuid>,
+}
+
+/// Resolve the credentials `connect` uses for `host`.
 ///
 /// If the host has an `identity_id`, the identity must resolve and is used to
 /// resolve the username, auth method, and key — overriding the host's own
 /// fields. A broken linked-identity reference fails closed instead of silently
 /// falling back to stale host credentials.
+///
+/// Anything that has to know which key a saved host would use asks this rather
+/// than reading the fields itself, so its answer cannot drift from what a
+/// connection actually does.
+pub fn credentials<'a>(host: &'a Host, identity: Option<&'a Identity>) -> Result<Credentials<'a>> {
+    if host.identity_id.is_some() && identity.is_none() {
+        return Err(CoreError::InvalidInput(
+            "linked SSH identity not found; repair the host configuration before reconnecting".into(),
+        ));
+    }
+    Ok(match identity {
+        Some(id) => Credentials {
+            username: &id.username,
+            auth: &id.auth,
+            key_id: id.key_id,
+        },
+        None => Credentials {
+            username: &host.username,
+            auth: &host.auth,
+            key_id: host.key_id,
+        },
+    })
+}
+
+/// Open an authenticated SSH session and return the handle.
+/// The caller is responsible for opening a channel and starting the shell.
+/// The credentials come from `credentials`.
 pub async fn connect(
     host: &Host,
     identity: Option<&Identity>,
@@ -267,17 +300,11 @@ pub async fn connect(
     passphrase: Option<&str>,
     password: Option<&str>,
 ) -> Result<Handle<SshHandler>> {
-    if host.identity_id.is_some() && identity.is_none() {
-        return Err(CoreError::InvalidInput(
-            "linked SSH identity not found; repair the host configuration before reconnecting".into(),
-        ));
-    }
-
-    // Resolve effective username, auth, and key from identity if present.
-    let (username, auth, key_id) = match identity {
-        Some(id) => (&id.username, &id.auth, id.key_id),
-        None => (&host.username, &host.auth, host.key_id),
-    };
+    let Credentials {
+        username,
+        auth,
+        key_id,
+    } = credentials(host, identity)?;
 
     // Agent used to masquerade as empty-password auth here, which could make
     // mocked UI tests look successful while native SSH always behaved differently.
