@@ -766,7 +766,7 @@ pub async fn create_local_terminal(
     let terminal = LocalTerminal {
         writer,
         master,
-        child,
+        child: crate::state::LocalShell::new(child),
         owns_session_id: owns_session_id.clone(),
     };
     let refused = {

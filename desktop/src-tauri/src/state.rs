@@ -356,9 +356,9 @@ pub struct LocalTerminal {
     /// which take the same lock to admit a session id.
     pub writer: Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
-    /// Kept alive so the shell is not reaped, and polled with `try_wait` to
-    /// tell a live terminal from one whose shell has already exited.
-    pub child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// Polled with `try_wait` to tell a live terminal from one whose shell
+    /// has already exited. Dropping the terminal ends and reaps the shell.
+    pub child: LocalShell,
     /// Cleared when this terminal stops holding its session id.
     ///
     /// The thread draining the PTY outlives the map entry: it is detached, and
@@ -369,6 +369,56 @@ pub struct LocalTerminal {
     /// receive the old shell's output and then be disconnected by its
     /// `session-closed`. The reader checks this before it emits.
     pub owns_session_id: Arc<AtomicBool>,
+}
+
+/// The shell process behind a local terminal.
+///
+/// Dropping it ends the shell — SIGHUP on Unix, as closing a terminal window
+/// does, and process termination on Windows — and reaps it on a thread of its
+/// own, so a closed tab leaves neither a running shell nor a zombie behind.
+/// Background jobs the user detached from the shell are not touched.
+pub struct LocalShell {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Set once `try_wait` has collected the exit status. The process id may
+    /// belong to an unrelated process from then on, so it is never signalled.
+    reaped: bool,
+}
+
+impl LocalShell {
+    pub fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self {
+            child: Some(child),
+            reaped: false,
+        }
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
+    }
+}
+
+impl Drop for LocalShell {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        if self.reaped {
+            return;
+        }
+        let _ = child.kill();
+        // `wait` blocks until the shell is gone, which a shell that ignores
+        // SIGHUP may never be; a thread of its own keeps that off the caller.
+        let _ = std::thread::Builder::new()
+            .name("local-shell-reaper".into())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+    }
 }
 
 impl LocalTerminal {
@@ -527,7 +577,7 @@ mod local_terminal_ownership_tests {
             LocalTerminal {
                 writer,
                 master: pair.master,
-                child,
+                child: LocalShell::new(child),
                 owns_session_id: owns_session_id.clone(),
             },
             owns_session_id,
@@ -549,9 +599,25 @@ mod local_terminal_ownership_tests {
 
         // The id is free for reuse from here, so the reader still draining the
         // old shell must stop addressing it.
-        let mut closed = locals.remove("local-0").expect("the terminal was live");
+        let _closed = locals.remove("local-0").expect("the terminal was live");
         assert!(!owns.load(Ordering::Acquire));
-        let _ = closed.child.kill();
+    }
+
+    /// Closing a tab ends its shell and collects it, rather than leaving a
+    /// running shell or a zombie for as long as the app runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_a_terminal_ends_and_reaps_its_shell() {
+        let (terminal, _) = terminal();
+        let pid = terminal.child.child.as_ref().and_then(|c| c.process_id()).expect("pid");
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        assert!(proc_entry.exists());
+        drop(terminal);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while proc_entry.exists() {
+            assert!(std::time::Instant::now() < deadline, "the shell is still around");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -562,9 +628,6 @@ mod local_terminal_ownership_tests {
         let reaped = locals.reap_exited(|_| true);
         assert_eq!(reaped.len(), 1);
         assert!(!owns.load(Ordering::Acquire));
-        for mut terminal in reaped {
-            let _ = terminal.child.kill();
-        }
     }
 
     #[test]
@@ -576,8 +639,7 @@ mod local_terminal_ownership_tests {
         assert!(locals.remove("other").is_none());
         assert!(owns.load(Ordering::Acquire));
 
-        let mut open = locals.remove("local-0").expect("the terminal was live");
-        let _ = open.child.kill();
+        let _open = locals.remove("local-0").expect("the terminal was live");
     }
 
     /// The window the token closes: a close drops the first open's
@@ -597,10 +659,9 @@ mod local_terminal_ownership_tests {
 
         // And its fulfil installs nothing — the caller tears the shell down.
         let (stale_terminal, _) = terminal();
-        let mut refused = locals
+        let _refused = locals
             .fulfil("local-0", stale, stale_terminal)
             .expect_err("the reservation is no longer the first request's");
-        let _ = refused.child.kill();
         assert!(locals.contains("local-0"));
         assert!(locals.get_live("local-0").is_none());
 
@@ -608,8 +669,7 @@ mod local_terminal_ownership_tests {
         assert!(locals.fulfil("local-0", current, live_terminal).is_ok());
         assert!(owns.load(Ordering::Acquire));
 
-        let mut open = locals.remove("local-0").expect("the terminal is live");
-        let _ = open.child.kill();
+        let _open = locals.remove("local-0").expect("the terminal is live");
     }
 }
 
