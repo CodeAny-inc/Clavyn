@@ -111,6 +111,7 @@
         return;
       }
       if (command === "session_resize") return;
+      if (command === "session_output_ack") return;
       if (command === "session_write") {
         const text = new TextDecoder().decode(new Uint8Array(args.data));
         state.writes.push({ id: args.sessionId, text });
