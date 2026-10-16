@@ -19,6 +19,12 @@ fn err(e: impl std::fmt::Display) -> String {
 /// outbound SMB — and NTLM — attempt. So the name is taken after both
 /// separators, the characters no Windows file name may hold are replaced, and
 /// anything that does not name a file falls back to `download`.
+///
+/// The name is also what the user reads before clicking Save, so characters
+/// that change how it reads are replaced too: bidirectional controls would let
+/// `report\u{202E}fdp.exe` display as `reportexe.pdf`. Trailing dots and
+/// spaces, which Windows strips, and device names such as `CON` or `aux.txt`,
+/// which Windows opens as the device, are neutralised the same way.
 fn remote_file_name(remote_path: &str) -> String {
     let last = remote_path
         .rsplit(['/', '\\'])
@@ -29,12 +35,36 @@ fn remote_file_name(remote_path: &str) -> String {
         .map(|c| match c {
             ':' | '*' | '?' | '"' | '<' | '>' | '|' | '/' | '\\' => '_',
             c if c.is_control() => '_',
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}' => '_',
             c => c,
         })
         .collect();
-    match cleaned.as_str() {
+    let cleaned = cleaned.trim_end_matches(['.', ' ']);
+    match cleaned {
         "" | "." | ".." => "download".to_string(),
-        _ => cleaned,
+        name if is_windows_device_name(name) => format!("_{name}"),
+        name => name.to_string(),
+    }
+}
+
+/// Whether Windows treats `name` as a device rather than a file. The check
+/// applies to the part before the first dot, in any letter case, and the
+/// superscript digits count as digits for `COM` and `LPT`.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => {
+            let Some(rest) = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT")) else {
+                return false;
+            };
+            let mut digits = rest.chars();
+            matches!(
+                (digits.next(), digits.next()),
+                (Some('0'..='9' | '\u{00B9}' | '\u{00B2}' | '\u{00B3}'), None)
+            )
+        }
     }
 }
 
@@ -115,5 +145,24 @@ mod tests {
         assert_eq!(remote_file_name("/srv/.."), "download");
         assert_eq!(remote_file_name("/srv/."), "download");
         assert_eq!(remote_file_name(r"\"), "download");
+    }
+
+    #[test]
+    fn a_name_cannot_disguise_what_it_is() {
+        assert_eq!(remote_file_name("report\u{202E}fdp.exe"), "report_fdp.exe");
+        assert_eq!(remote_file_name("a\u{2066}b\u{2069}c\u{200F}.txt"), "a_b_c_.txt");
+        assert_eq!(remote_file_name("invoice.pdf.exe. . "), "invoice.pdf.exe");
+        assert_eq!(remote_file_name("..."), "download");
+    }
+
+    #[test]
+    fn a_windows_device_name_is_saved_as_a_file() {
+        assert_eq!(remote_file_name("CON"), "_CON");
+        assert_eq!(remote_file_name("aux.txt"), "_aux.txt");
+        assert_eq!(remote_file_name("com1.log"), "_com1.log");
+        assert_eq!(remote_file_name("LPT\u{00B9}"), "_LPT\u{00B9}");
+        assert_eq!(remote_file_name("console.log"), "console.log");
+        assert_eq!(remote_file_name("com10.txt"), "com10.txt");
+        assert_eq!(remote_file_name("nullable.rs"), "nullable.rs");
     }
 }
