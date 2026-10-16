@@ -77,6 +77,8 @@ impl russh_sftp::server::Handler for EndlessDirectory {
 #[derive(Clone, Default)]
 struct TestServer {
     channels: Arc<std::sync::Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// Stop reading once the first input arrives, the way a hung peer does.
+    stall_on_input: bool,
 }
 
 impl server::Handler for TestServer {
@@ -104,15 +106,31 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
-    /// The shell says one line and exits.
+    /// The shell says one line and exits, unless this server stalls on input,
+    /// in which case it stays open.
     async fn shell_request(
         &mut self,
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.stall_on_input {
+            return Ok(());
+        }
         session.data(channel, b"bye\r\n".to_vec())?;
         session.eof(channel)?;
         session.close(channel)?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        _channel: ChannelId,
+        _data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if self.stall_on_input {
+            std::future::pending::<()>().await;
+        }
         Ok(())
     }
 
@@ -135,6 +153,10 @@ impl server::Handler for TestServer {
 }
 
 async fn start_server() -> u16 {
+    serve(TestServer::default()).await
+}
+
+async fn serve(handler: TestServer) -> u16 {
     let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
     let host_key = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
     let config = Arc::new(server::Config {
@@ -148,10 +170,9 @@ async fn start_server() -> u16 {
     tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let config = config.clone();
+            let handler = handler.clone();
             tokio::spawn(async move {
-                if let Ok(running) =
-                    server::run_stream(config, stream, TestServer::default()).await
-                {
+                if let Ok(running) = server::run_stream(config, stream, handler.clone()).await {
                     let _ = running.await;
                 }
             });
@@ -214,8 +235,8 @@ async fn a_listing_that_never_ends_holds_up_no_other_sftp_session() {
     assert_eq!(closed, 2);
     assert!(manager.list().await.is_empty());
 
-    // Closing the channel ends the listing rather than leaving it running.
-    let result = tokio::time::timeout(Duration::from_secs(15), listing)
+    // Closing the session ends the listing rather than leaving it running.
+    let result = tokio::time::timeout(Duration::from_secs(2), listing)
         .await
         .expect("the listing outlived its session")
         .expect("listing task");
@@ -243,9 +264,11 @@ async fn closing_one_sftp_session_does_not_wait_on_its_listing() {
         .expect("close waited on the listing")
         .expect("close");
     assert!(manager.list().await.is_empty());
-    let _ = tokio::time::timeout(Duration::from_secs(15), listing)
+    let result = tokio::time::timeout(Duration::from_secs(2), listing)
         .await
-        .expect("the listing outlived its session");
+        .expect("the listing outlived its session")
+        .expect("listing task");
+    assert!(result.is_err());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -288,4 +311,61 @@ async fn a_shell_that_exits_leaves_no_session_behind() {
         .await
         .expect("a session whose shell exited stayed registered");
     assert!(sessions.write("shell", b"ls\n").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_write_stuck_behind_a_peer_that_stopped_reading_ends_with_the_close() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = serve(TestServer {
+        stall_on_input: true,
+        ..TestServer::default()
+    })
+    .await;
+    let sessions = Arc::new(SessionManager::new(Arc::new(|_, _| {}), Arc::new(|_, _| {})));
+    let claim = sessions.claim("stuck").expect("claim");
+    sessions
+        .create_ssh_session(&claim, &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
+        .await
+        .expect("ssh session");
+    drop(claim);
+
+    // Keep writing until the peer's window and the socket buffers are full
+    // and a write stops returning.
+    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let writer = tokio::spawn({
+        let sessions = sessions.clone();
+        let written = written.clone();
+        async move {
+            loop {
+                sessions.write("stuck", &[b'x'; 64 * 1024]).await?;
+                written.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), clavyn_core::CoreError>(())
+        }
+    });
+    let stuck = async {
+        loop {
+            let before = written.load(std::sync::atomic::Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if before > 0 && written.load(std::sync::atomic::Ordering::Relaxed) == before {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), stuck)
+        .await
+        .expect("writes never stalled");
+    assert!(!writer.is_finished());
+
+    tokio::time::timeout(Duration::from_secs(10), sessions.close("stuck"))
+        .await
+        .expect("close waited on the stuck write")
+        .expect("close");
+    let result = tokio::time::timeout(Duration::from_secs(2), writer)
+        .await
+        .expect("the stuck write outlived the close")
+        .expect("writer task");
+    assert!(result.is_err());
+    assert!(!sessions.contains("stuck").await);
 }

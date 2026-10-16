@@ -48,13 +48,32 @@ pub struct SftpManager {
 struct SftpConnection {
     handle: Handle<connection::SshHandler>,
     sftp: SftpSession,
+    /// Flipped once the connection is closed. Listings and transfers watch it
+    /// and stop, so one that is stuck behind a peer that stopped reading, or
+    /// simply still running, cannot outlive the close.
+    closed: tokio::sync::watch::Sender<bool>,
 }
 
 impl SftpConnection {
-    /// End the SFTP channel, which fails every request still in flight on it,
-    /// then the connection. Bounded, so an unresponsive peer cannot hold the
-    /// caller.
+    /// Run `operation` until it finishes or the connection is closed.
+    async fn until_closed<T>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let mut closed = self.closed.subscribe();
+        tokio::select! {
+            result = operation => result,
+            _ = closed.wait_for(|closed| *closed) => {
+                Err(CoreError::Ssh("the SFTP session was closed".into()))
+            }
+        }
+    }
+
+    /// Stop every listing and transfer on this connection, end the SFTP
+    /// channel, then the connection. Bounded, so an unresponsive peer cannot
+    /// hold the caller.
     async fn close(&self) {
+        self.closed.send_replace(true);
         let _ = tokio::time::timeout(CLOSE_GRACE, async {
             let _ = self.sftp.close().await;
             let _ = self
@@ -118,7 +137,11 @@ impl SftpManager {
             .await
             .map_err(|e| CoreError::Ssh(format!("sftp init: {e}")))?;
 
-        let conn = Arc::new(SftpConnection { handle, sftp });
+        let conn = Arc::new(SftpConnection {
+            handle,
+            sftp,
+            closed: tokio::sync::watch::Sender::new(false),
+        });
         // The check at the top ran before a connect that takes seconds, so a
         // second connect on the same id may have finished in the meantime. The
         // session already published keeps the id; this one is dropped rather
@@ -150,15 +173,19 @@ impl SftpManager {
         let conn = self.get(session_id).await?;
 
         let mut entries = Vec::new();
-        let mut dir = tokio::time::timeout(LIST_DIR_DEADLINE, conn.sftp.read_dir(path))
-            .await
-            .map_err(|_| {
-                CoreError::Ssh(format!(
-                    "read_dir: the listing took longer than {}s",
-                    LIST_DIR_DEADLINE.as_secs()
-                ))
-            })?
-            .map_err(|e| CoreError::Ssh(format!("read_dir: {e}")))?;
+        let mut dir = conn
+            .until_closed(async {
+                tokio::time::timeout(LIST_DIR_DEADLINE, conn.sftp.read_dir(path))
+                    .await
+                    .map_err(|_| {
+                        CoreError::Ssh(format!(
+                            "read_dir: the listing took longer than {}s",
+                            LIST_DIR_DEADLINE.as_secs()
+                        ))
+                    })?
+                    .map_err(|e| CoreError::Ssh(format!("read_dir: {e}")))
+            })
+            .await?;
 
         // ReadDir is a plain Iterator (not async)
         for entry in dir.by_ref() {
@@ -241,16 +268,19 @@ impl SftpManager {
     ) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        let mut remote = conn
-            .sftp
-            .open(remote_path)
-            .await
-            .map_err(|e| CoreError::Ssh(format!("open remote file: {e}")))?;
-        let mut local = open_download_target(local_path, overwrite).await?;
+        conn.until_closed(async {
+            let mut remote = conn
+                .sftp
+                .open(remote_path)
+                .await
+                .map_err(|e| CoreError::Ssh(format!("open remote file: {e}")))?;
+            let mut local = open_download_target(local_path, overwrite).await?;
 
-        tokio::io::copy(&mut remote, &mut local).await?;
-        local.flush().await?;
-        Ok(())
+            tokio::io::copy(&mut remote, &mut local).await?;
+            local.flush().await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Stream a local file directly to the remote host. Existing remote files
@@ -264,29 +294,32 @@ impl SftpManager {
     ) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        if !overwrite
-            && conn
+        conn.until_closed(async {
+            if !overwrite
+                && conn
+                    .sftp
+                    .try_exists(remote_path)
+                    .await
+                    .map_err(|e| CoreError::Ssh(format!("check remote file: {e}")))?
+            {
+                return Err(CoreError::InvalidInput(format!(
+                    "remote file already exists: {remote_path}"
+                )));
+            }
+
+            let mut local = tokio::fs::File::open(local_path).await?;
+            let mut remote = conn
                 .sftp
-                .try_exists(remote_path)
+                .create(remote_path)
                 .await
-                .map_err(|e| CoreError::Ssh(format!("check remote file: {e}")))?
-        {
-            return Err(CoreError::InvalidInput(format!(
-                "remote file already exists: {remote_path}"
-            )));
-        }
+                .map_err(|e| CoreError::Ssh(format!("create remote file: {e}")))?;
 
-        let mut local = tokio::fs::File::open(local_path).await?;
-        let mut remote = conn
-            .sftp
-            .create(remote_path)
-            .await
-            .map_err(|e| CoreError::Ssh(format!("create remote file: {e}")))?;
-
-        tokio::io::copy(&mut local, &mut remote).await?;
-        remote.flush().await?;
-        remote.shutdown().await?;
-        Ok(())
+            tokio::io::copy(&mut local, &mut remote).await?;
+            remote.flush().await?;
+            remote.shutdown().await?;
+            Ok(())
+        })
+        .await
     }
 
     /// Create a directory.
