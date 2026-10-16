@@ -217,15 +217,16 @@ if [[ "$DRY_RUN" == "false" ]]; then
   # The key reaches the signer through its environment for this one command,
   # never as an argument, where any local user could read it from `ps`. The
   # password is always set, empty included: with none at all the signer
-  # prompts for one, which fails without a tty.
+  # prompts for one, which fails without a tty. `--app-version` records the
+  # version in the signed trusted comment, which the app requires.
   cd desktop
   if [[ -n "$SIGNING_KEY" ]]; then
     TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY" \
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD" \
-      npx @tauri-apps/cli signer sign "$TARBALL" 2>/dev/null
+      npx @tauri-apps/cli signer sign --app-version "$VERSION" "$TARBALL" 2>/dev/null
   else
     TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD" \
-      npx @tauri-apps/cli signer sign --private-key-path "$SIGNING_KEY_PATH" "$TARBALL" 2>/dev/null
+      npx @tauri-apps/cli signer sign --app-version "$VERSION" --private-key-path "$SIGNING_KEY_PATH" "$TARBALL" 2>/dev/null
   fi
   cd "$ROOT"
   ok "Signed: $(basename "$SIG_FILE")"
