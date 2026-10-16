@@ -39,6 +39,7 @@ jobs:
   windows-nsis-smoke:
     name: Windows NSIS smoke test
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,7 +75,9 @@ jobs:
           # bash passes the single-quoted JSON through verbatim. Under PowerShell,
           # how embedded quotes reach npx depends on which npx shim it resolves
           # (.cmd or .ps1), so no one escaping works everywhere.
-          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # Everything after `--` goes to cargo; `--locked` builds against the
+          # committed Cargo.lock and fails if it is out of date.
+          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
       - name: Verify NSIS installer was produced
         shell: pwsh
         run: |

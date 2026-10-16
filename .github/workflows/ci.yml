@@ -14,6 +14,12 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run in progress for it. Pushes
+# to main are never cancelled, so every commit there keeps a complete run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   # GitHub-hosted runners are the default.
   # To switch to self-hosted fallback (e.g. during GitHub infrastructure
@@ -36,6 +42,7 @@ jobs:
   # repository, so a deleted fork also stays GitHub-hosted.
   rust-check:
     runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -88,14 +95,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libssl-dev
       - name: Cargo check
-        run: cargo check --workspace
+        run: cargo check --workspace --locked
       - name: Cargo test (core)
-        run: cargo test -p clavyn-core
+        run: cargo test -p clavyn-core --locked
       - name: Cargo test (desktop backend)
-        run: cargo test -p clavyn-desktop
+        run: cargo test -p clavyn-desktop --locked
 
   macos-rust-build:
     runs-on: macos-14
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -113,14 +121,15 @@ jobs:
           # feature sets are built in this one job, and cargo's fingerprints
           # already keep their artifacts apart inside the target directory.
       - name: Cargo build (macOS shipping defaults)
-        run: cargo build --workspace
+        run: cargo build --workspace --locked
       - name: Cargo build (macOS biometric implementation)
-        run: cargo build -p clavyn-desktop --features macos-biometric
+        run: cargo build -p clavyn-desktop --features macos-biometric --locked
       - name: Cargo test (macOS biometric implementation)
-        run: cargo test -p clavyn-desktop --features macos-biometric
+        run: cargo test -p clavyn-desktop --features macos-biometric --locked
 
   security-audit:
     runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-22.04"') || '"ubuntu-22.04"') }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -141,7 +150,9 @@ jobs:
       - name: Install cargo-audit
         # Pinned: an unpinned `cargo install` builds whatever version the index
         # offers on the day the job runs, which is its own supply-chain surface.
-        run: cargo install cargo-audit --locked --version 0.22.2
+        # `--force` rebuilds even when the runner image already ships a
+        # cargo-audit binary, which `cargo install` would otherwise keep.
+        run: cargo install cargo-audit --locked --force --version 0.22.2
       - name: Check cargo audit suppression expiry
         run: node scripts/verify/check-audit-expiry.mjs --pretty
       - name: Audit Rust dependencies
@@ -172,6 +183,7 @@ jobs:
 
   frontend-build:
     runs-on: ${{ fromJSON((!github.event.pull_request.number || github.event.pull_request.head.repo.full_name == github.repository) && (vars.CI_RUNNER_LABELS || '"ubuntu-latest"') || '"ubuntu-latest"') }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
