@@ -20,6 +20,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
     this.textarea.className = "xterm-helper-textarea"; root.append(this.textarea); container.append(root);
   }
   onData() { return { dispose() {} }; }
+  onBinary() { return { dispose() {} }; }
   focus() { this.textarea.focus(); }
   write(_data: string | Uint8Array, callback?: () => void) { callback?.(); }
   reset() {}

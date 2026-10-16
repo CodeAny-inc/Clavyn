@@ -38,6 +38,7 @@ vi.mock("@xterm/xterm", () => ({
       container.append(root);
     }
     onData() {}
+    onBinary() {}
     focus() {}
     write(_data: unknown, callback?: () => void) { callback?.(); }
     reset() {}
