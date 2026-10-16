@@ -69,9 +69,9 @@ export const useUpdateStore = defineStore("update", () => {
         if (e.content_length && e.content_length > 0) {
           progress.value = Math.min(
             100,
-            (e.chunk_length / e.content_length) * 100,
+            (e.downloaded / e.content_length) * 100,
           );
-        } else if (e.chunk_length > 0) {
+        } else if (e.downloaded > 0) {
           // Incremental progress when content_length is unknown
           progress.value = Math.min(99, progress.value + 1);
         }
