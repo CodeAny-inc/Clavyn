@@ -242,6 +242,26 @@ describe("terminal resize", () => {
     expect(resizes()).toEqual([[oldId, 100, 30], [pane.sessionId, 120, 40]]);
   });
 
+  it("sends one resize at a time and then only the latest size", async () => {
+    const { pane } = await begin();
+    const pending: Array<() => void> = [];
+    setInvokeHandler("session_resize", () => new Promise<void>(resolve => { pending.push(resolve); }));
+    resizeTo(100, 30);
+    await flushPromises();
+    resizeTo(110, 35);
+    resizeTo(120, 40);
+    await flushPromises();
+    expect(resizes()).toEqual([[pane.sessionId, 100, 30]]);
+    pending[0]();
+    await flushPromises();
+    expect(resizes()).toEqual([[pane.sessionId, 100, 30], [pane.sessionId, 120, 40]]);
+    pending[1]();
+    await flushPromises();
+    resizeTo(120, 40);
+    await flushPromises();
+    expect(resizes()).toHaveLength(2);
+  });
+
   it("retries a size whose resize failed", async () => {
     const { pane } = await begin();
     setInvokeHandler("session_resize", () => Promise.reject(new Error("fixture failure")));

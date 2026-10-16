@@ -125,17 +125,34 @@ function fit() {
 // Every resize reaches the remote as a window-change and the shell redraws, so
 // only a size the session does not already have is sent. Session creation
 // records the size it opened with; a failed resize forgets it so the next fit
-// retries.
+// retries. Like writes, resizes go out one at a time: two in flight could land
+// in either order and leave the remote at the older size. While one is in
+// flight only the most recent size is kept, and it follows once the first
+// settles.
 let sentSize: { sessionId: string; cols: number; rows: number } | null = null;
+let resizingSession: string | null = null;
+let wantedSize: { sessionId: string; cols: number; rows: number } | null = null;
 function recordSize(sessionId: string, cols: number, rows: number) {
   sentSize = { sessionId, cols, rows };
 }
 function sendSize(sessionId: string, cols: number, rows: number) {
+  if (resizingSession === sessionId) {
+    wantedSize = { sessionId, cols, rows };
+    return;
+  }
   if (sentSize?.sessionId === sessionId && sentSize.cols === cols && sentSize.rows === rows) return;
   const sent = { sessionId, cols, rows };
   sentSize = sent;
+  resizingSession = sessionId;
+  wantedSize = null;
   void api.sessionResize(sessionId, cols, rows).catch(() => {
     if (sentSize === sent) sentSize = null;
+  }).finally(() => {
+    if (resizingSession !== sessionId) return;
+    resizingSession = null;
+    const next = wantedSize;
+    wantedSize = null;
+    if (next && currentSessionId === sessionId) sendSize(next.sessionId, next.cols, next.rows);
   });
 }
 // Tauri runs each command as its own task, so two writes in flight at once can
