@@ -8,7 +8,7 @@ use russh::keys::{
     decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg,
     PublicKeyOrCertificate,
 };
-use russh::{mac, Preferred};
+use russh::{mac, Channel, Preferred};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, PoisonError};
@@ -169,6 +169,96 @@ impl client::Handler for SshHandler {
         }
         kh.verify(&self.host, self.port, server_public_key, self.host_key_hash)
     }
+
+    // Clavyn never requests agent or X11 forwarding, remote port forwards or
+    // anything else a server could legitimately open a channel back for, so
+    // every server-initiated channel is refused. russh's defaults accept them,
+    // and an accepted channel nobody reads stays in the connection's channel
+    // table for as long as the session lives, so a server could keep opening
+    // them for free.
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _connected_address: &str,
+        _connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_session(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+}
+
+/// Decline a channel the server tried to open.
+async fn refuse(reply: client::ChannelOpenHandle) -> Result<()> {
+    reply
+        .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+        .await;
+    Ok(())
 }
 
 /// Extra context for a key-exchange failure, which russh surfaces as the bare

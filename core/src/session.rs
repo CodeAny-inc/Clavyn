@@ -232,13 +232,16 @@ impl SessionManager {
             .await
             .map_err(|e| CoreError::Ssh(format!("request shell: {e}")))?;
 
-        // Run startup command if set
+        // The startup command is typed into the shell that was just started.
+        // A channel takes only one shell, exec or subsystem request, and
+        // OpenSSH ignores an exec that arrives after the shell, so it cannot
+        // be sent as a request of its own.
         if let Some(cmd) = &host.startup_command {
             if !cmd.is_empty() {
                 channel
-                    .exec(false, cmd.clone())
+                    .data(format!("{cmd}\r").as_bytes())
                     .await
-                    .map_err(|e| CoreError::Ssh(format!("startup exec: {e}")))?;
+                    .map_err(|e| CoreError::Ssh(format!("startup command: {e}")))?;
             }
         }
 
