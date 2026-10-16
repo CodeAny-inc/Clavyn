@@ -371,12 +371,21 @@ pub struct LocalTerminal {
     pub owns_session_id: Arc<AtomicBool>,
 }
 
+/// How long a closed tab's shell gets to exit on its own after the terminal
+/// hangs up, before it is signalled.
+const SHELL_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// The shell process behind a local terminal.
 ///
-/// Dropping it ends the shell — SIGHUP on Unix, as closing a terminal window
-/// does, and process termination on Windows — and reaps it on a thread of its
-/// own, so a closed tab leaves neither a running shell nor a zombie behind.
-/// Background jobs the user detached from the shell are not touched.
+/// Dropping it ends the shell and reaps it, so a closed tab leaves neither a
+/// running shell nor a zombie behind. All of that happens on a thread of its
+/// own, because a terminal is dropped under the terminal map's lock and the
+/// shutdown can take seconds. Dropping the PTY hangs the terminal up, which
+/// ends an ordinary shell, so the shell first gets [`SHELL_EXIT_GRACE`] to
+/// finish whatever it does on hangup. Only then is it signalled: SIGHUP with
+/// portable-pty's short grace and a forced kill after it on Unix, process
+/// termination on Windows. Background jobs the user detached from the shell
+/// are not touched.
 pub struct LocalShell {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// Set once `try_wait` has collected the exit status. The process id may
@@ -402,22 +411,48 @@ impl LocalShell {
     }
 }
 
+/// End `child` and collect its exit status, blocking until it is gone.
+fn end_shell(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+    let deadline = std::time::Instant::now() + SHELL_EXIT_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            _ => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Drop for LocalShell {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let Some(child) = self.child.take() else {
             return;
         };
         if self.reaped {
             return;
         }
-        let _ = child.kill();
-        // `wait` blocks until the shell is gone, which a shell that ignores
-        // SIGHUP may never be; a thread of its own keeps that off the caller.
-        let _ = std::thread::Builder::new()
+        // The slot lets this thread take the child back if no reaper thread
+        // can be started, and end it here rather than leave a zombie.
+        let slot = Arc::new(std::sync::Mutex::new(Some(child)));
+        let reaper_slot = slot.clone();
+        let spawned = std::thread::Builder::new()
             .name("local-shell-reaper".into())
             .spawn(move || {
-                let _ = child.wait();
+                let child = reaper_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(child) = child {
+                    end_shell(child);
+                }
             });
+        if spawned.is_err() {
+            let child = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(child) = child {
+                end_shell(child);
+            }
+        }
     }
 }
 
@@ -617,6 +652,47 @@ mod local_terminal_ownership_tests {
         while proc_entry.exists() {
             assert!(std::time::Instant::now() < deadline, "the shell is still around");
             std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A shell that ignores the hangup is still ended, after its grace period,
+    /// and the drop that starts all this returns at once: it runs under the
+    /// terminal map's lock.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shell_that_ignores_the_hangup_is_ended_without_blocking_the_drop() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap '' HUP; sleep 60"]);
+        let child = pair.slave.spawn_command(command).expect("a shell can be spawned");
+        let pid = child.process_id().expect("pid");
+        let terminal = LocalTerminal {
+            writer: Arc::new(std::sync::Mutex::new(
+                pair.master.take_writer().expect("the master has a writer"),
+            )),
+            master: pair.master,
+            child: LocalShell::new(child),
+            owns_session_id: Arc::new(AtomicBool::new(true)),
+        };
+        // Let the trap take effect before the hangup arrives.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let started = std::time::Instant::now();
+        drop(terminal);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while proc_entry.exists() {
+            assert!(std::time::Instant::now() < deadline, "the shell is still around");
+            std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
 
