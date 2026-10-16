@@ -134,6 +134,38 @@ impl Drop for SecretText {
     }
 }
 
+/// Where a payload is serialized before it is sealed.
+///
+/// `serde_json::to_vec` grows a plain `Vec` by reallocation, and every buffer
+/// it outgrows is freed with the private keys it already held still in it, so
+/// one save would scatter copies of every key across freed memory. Growing
+/// here copies into a fresh `Zeroizing` buffer and lets the outgrown one wipe
+/// itself, spare capacity included, before it is freed.
+struct WipingBuffer(Zeroizing<Vec<u8>>);
+
+impl WipingBuffer {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::with_capacity(4096)))
+    }
+}
+
+impl std::io::Write for WipingBuffer {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let needed = self.0.len() + data.len();
+        if needed > self.0.capacity() {
+            let mut grown = Zeroizing::new(Vec::with_capacity(needed.max(self.0.capacity() * 2)));
+            grown.extend_from_slice(&self.0);
+            self.0 = grown;
+        }
+        self.0.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Vault {
     pub fn open(path: PathBuf) -> Result<Self> {
         let file = if path.exists() {
@@ -426,7 +458,9 @@ impl Vault {
     ) -> Result<()> {
         self.ensure_writable()?;
 
-        let plaintext = Zeroizing::new(serde_json::to_vec(payload)?);
+        let mut plaintext = WipingBuffer::new();
+        serde_json::to_writer(&mut plaintext, payload)?;
+        let plaintext = plaintext.0;
         // The header is built first and the tag computed from that exact value,
         // so what is authenticated and what is written cannot drift apart. The
         // two fields left empty here are filled in below; neither belongs in the
@@ -647,6 +681,34 @@ fn migrated_keys_meta(legacy: &[KeyMeta], payload: &VaultPayload) -> Result<Vec<
         });
     }
     Ok(migrated)
+}
+
+#[cfg(test)]
+mod wiping_buffer_tests {
+    use super::WipingBuffer;
+    use std::io::Write;
+
+    #[test]
+    fn it_holds_exactly_what_was_written_across_growth() {
+        let mut buffer = WipingBuffer::new();
+        let initial = buffer.0.capacity();
+        let chunk = [0x5au8; 1000];
+        let mut expected = Vec::new();
+        for _ in 0..20 {
+            buffer.write_all(&chunk).expect("write");
+            expected.extend_from_slice(&chunk);
+        }
+        assert!(buffer.0.capacity() > initial, "the buffer never had to grow");
+        assert_eq!(buffer.0.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn a_payload_serializes_to_the_same_bytes_as_to_vec() {
+        let value = serde_json::json!({"keys": [["id", "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"]]});
+        let mut buffer = WipingBuffer::new();
+        serde_json::to_writer(&mut buffer, &value).expect("serialize");
+        assert_eq!(buffer.0.as_slice(), serde_json::to_vec(&value).expect("to_vec").as_slice());
+    }
 }
 
 #[cfg(test)]
