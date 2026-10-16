@@ -14,10 +14,12 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request supersedes the run in progress for it. Pushes
-# to main are never cancelled, so every commit there keeps a complete run.
+# A newer push to a pull request supersedes the run in progress for it. Any
+# other run gets a group of its own: GitHub keeps one pending run per group
+# and cancels it when another arrives, so a shared group for pushes to main
+# would drop the checks of every commit that landed while a run was queued.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
