@@ -1,0 +1,10 @@
+# Paths that decide what CI runs, what ships in a release and what the app is
+# allowed to do. Changes to them need a code owner's review.
+/.github/                               @computerbox124 @Sadykhzadeh
+/scripts/                               @computerbox124 @Sadykhzadeh
+/.cargo/audit.toml                      @computerbox124 @Sadykhzadeh
+/Cargo.lock                             @computerbox124 @Sadykhzadeh
+/desktop/package-lock.json              @computerbox124 @Sadykhzadeh
+/desktop/e2e/package-lock.json          @computerbox124 @Sadykhzadeh
+/desktop/src-tauri/tauri.conf.json      @computerbox124 @Sadykhzadeh
+/desktop/src-tauri/capabilities/        @computerbox124 @Sadykhzadeh
