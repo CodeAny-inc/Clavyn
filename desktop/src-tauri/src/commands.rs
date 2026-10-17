@@ -550,8 +550,8 @@ pub async fn connect_ssh(
     let password = password.map(zeroize::Zeroizing::new);
     // Bounded like `session_resize`, before anything else, so a zero-width or
     // absurd terminal size is refused rather than requested from the server.
-    let cols = u32::from(pty_dimension("cols", cols.unwrap_or(80))?);
-    let rows = u32::from(pty_dimension("rows", rows.unwrap_or(24))?);
+    let (cols, rows) = pty_geometry(cols, rows)?;
+    let (cols, rows) = (u32::from(cols), u32::from(rows));
     let passphrase = state.vault_session.passphrase().await;
     let (host, identity) = saved_host(&state, host_id).await?;
     let info = ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
@@ -676,8 +676,7 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
-    let rows = pty_dimension("rows", rows.unwrap_or(24))?;
-    let cols = pty_dimension("cols", cols.unwrap_or(80))?;
+    let (cols, rows) = pty_geometry(cols, rows)?;
 
     let (dead, admission) = {
         let mut locals = state.local_terminals.lock().await;
@@ -916,6 +915,16 @@ fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
             "{name} out of range: {value} (expected 1..={MAX_PTY_DIMENSION})"
         )),
     }
+}
+
+/// The geometry a new terminal opens with: 80x24 for a dimension the caller
+/// leaves out, and the same bounds as a resize for one it supplies, so the
+/// first size a session gets is checked exactly like every later one.
+fn pty_geometry(cols: Option<u32>, rows: Option<u32>) -> ApiResult<(u16, u16)> {
+    Ok((
+        pty_dimension("cols", cols.unwrap_or(80))?,
+        pty_dimension("rows", rows.unwrap_or(24))?,
+    ))
 }
 
 #[tauri::command]
@@ -1511,7 +1520,7 @@ mod ssh_connection_info_tests {
 
 #[cfg(test)]
 mod pty_dimension_tests {
-    use super::pty_dimension;
+    use super::{pty_dimension, pty_geometry};
 
     #[test]
     fn accepts_ordinary_terminal_geometry() {
@@ -1534,20 +1543,17 @@ mod pty_dimension_tests {
         assert!(pty_dimension("rows", 10_001).is_err());
     }
 
-    // `create_local_terminal` defaults a missing dimension to 80x24 and then
-    // runs the supplied one through the same helper, so the geometry a PTY is
-    // opened with is bounded the same way a later resize is. Before this the
-    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    // `create_local_terminal` and `connect_ssh` open terminals through
+    // `pty_geometry`, so a missing dimension defaults to 80x24 and a supplied
+    // one is bounded the same way a later resize is. A plain `as` cast there
+    // would turn 65536 into a 0-column PTY.
     #[test]
     fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
-        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
-        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
-        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_geometry(None, None).unwrap(), (80, 24));
+        assert_eq!(pty_geometry(Some(132), Some(43)).unwrap(), (132, 43));
         for value in [0_u32, 10_001, 65_536, u32::MAX] {
-            assert!(
-                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
-                "creation accepted {value}"
-            );
+            assert!(pty_geometry(Some(value), None).is_err(), "creation accepted {value} columns");
+            assert!(pty_geometry(None, Some(value)).is_err(), "creation accepted {value} rows");
         }
     }
 

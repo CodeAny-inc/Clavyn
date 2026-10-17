@@ -279,10 +279,9 @@ pub async fn connect(
         None => (&host.username, &host.auth, host.key_id),
     };
 
-    // Agent used to masquerade as empty-password auth here, which could make
-    // mocked UI tests look successful while native SSH always behaved differently.
-    // Until a real agent transport/signer is implemented for every supported OS,
-    // reject it explicitly before opening a network connection.
+    // Agent auth has no transport or signer behind it on any platform, so it
+    // is refused before a connection is opened rather than attempted as
+    // something it is not, such as an empty-password login.
     if matches!(auth, AuthMethod::Agent) {
         return Err(CoreError::InvalidInput(
             "SSH agent authentication is not supported yet; choose Password or SSH Key".into(),

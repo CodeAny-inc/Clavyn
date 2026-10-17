@@ -10,8 +10,9 @@
 //     auto-spawning one if no session is found. This makes single commands
 //     self-contained yet composable.
 //   - The renderer is loaded from the Vite dev server (http://127.0.0.1:1420)
-//     with the same tauri-fixture.js used by the existing e2e suite, so the
-//     full Tauri IPC surface is mocked and deterministic. A real Tauri build
+//     with the same tauri-fixture.js used by the existing e2e suite, which
+//     mocks the IPC the terminal, SFTP and vault-status flows use and throws
+//     `Unhandled test IPC` for anything else. A real Tauri build
 //     can also be driven by pointing CLAVYN_URL at its webview via CDP.
 //
 // Output contract: every command prints a single JSON object on stdout

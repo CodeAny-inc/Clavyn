@@ -6,7 +6,7 @@ members = ["core", "desktop/src-tauri"]
 version = "0.1.2-alpha.6"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/your-org/clavyn"
+repository = "https://github.com/CodeAny-inc/Clavyn"
 authors = ["Clavyn Contributors"]
 
 [workspace.dependencies]
