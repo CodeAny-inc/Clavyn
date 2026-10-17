@@ -542,7 +542,7 @@ HEALTH & LIFECYCLE
 
 INSPECTION
   info                   App version/platform + current view.
-  snapshot               Accessibility tree of the live UI (JSON).
+  snapshot               ARIA snapshot of the live UI as YAML text in the snapshot field.
   screenshot [path]      Save a PNG (default ./screenshot-<ts>.png).
   components             List key regions/controls (data-*, roles, labels).
   eval "<expr>"          Evaluate JS in the page, return JSON.
