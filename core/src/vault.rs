@@ -211,33 +211,44 @@ impl Vault {
     /// The passphrase must be at least eight characters. The UI checks the same
     /// rule, but this is the check every caller goes through.
     ///
-    /// Refuses whenever a file already sits at the vault path, or whether one
-    /// does cannot be determined: the new vault is renamed over that path, and
-    /// a vault there holds keys that exist nowhere else. Replacing a vault goes
-    /// through [`Vault::reset`] first, which deletes the file.
+    /// Refuses whenever anything sits at the vault path, a dangling symlink
+    /// included, or whether that can be determined is unknown: a vault there
+    /// holds keys that exist nowhere else. Replacing a vault goes through
+    /// [`Vault::reset`] first, which deletes the file.
+    ///
+    /// Runs the same checks as [`Vault::check_can_initialize`], then publishes
+    /// the file so that it is never written over an existing name.
     pub async fn initialize(&mut self, passphrase: &str) -> Result<VaultKey> {
+        self.check_can_initialize(passphrase)?;
+        let mut salt = [0u8; 16];
+        random_bytes(&mut salt)?;
+        let key = derive_key_off_thread(passphrase, salt.to_vec()).await?;
+        let payload = VaultPayload { keys: Vec::new() };
+        let candidate = seal_file(&key, base64(salt), 1, Vec::new(), &payload)?;
+        create_file(&self.path, &candidate)?;
+        self.file = candidate;
+        Ok(key)
+    }
+
+    /// Run the checks [`Vault::initialize`] starts with, without deriving a key
+    /// or touching the disk, so a caller can refuse a creation before it clears
+    /// anything that belongs to the vault that is already there.
+    ///
+    /// The path is examined with `symlink_metadata`, which sees a dangling
+    /// symlink as present. `exists` and `try_exists` follow the link and would
+    /// read it as absent.
+    pub fn check_can_initialize(&self, passphrase: &str) -> Result<()> {
         self.ensure_writable()?;
         if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
             return Err(CoreError::InvalidInput(format!(
                 "vault passphrase must be at least {MIN_PASSPHRASE_CHARS} characters"
             )));
         }
-        match self.path.try_exists() {
-            Ok(false) => {}
-            Ok(true) => {
-                return Err(CoreError::Vault(format!(
-                    "{} already exists; reset the vault before creating a new one",
-                    self.path.display()
-                )))
-            }
-            Err(e) => return Err(crate::fs_util::unreadable_state(&self.path, e)),
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(_) => Err(already_exists(&self.path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(crate::fs_util::unreadable_state(&self.path, e)),
         }
-        let mut salt = [0u8; 16];
-        random_bytes(&mut salt)?;
-        let key = derive_key_off_thread(passphrase, salt.to_vec()).await?;
-        let payload = VaultPayload { keys: Vec::new() };
-        self.seal_and_persist(&key, base64(salt), 1, Vec::new(), &payload)?;
-        Ok(key)
     }
 
     /// Verify a passphrase and hand back the master key it derives, so a caller
@@ -449,25 +460,7 @@ impl Vault {
         payload: &VaultPayload,
     ) -> Result<()> {
         self.ensure_writable()?;
-
-        let plaintext = Zeroizing::new(serde_json::to_vec(payload)?);
-        // The header is built first and the tag computed from that exact value,
-        // so what is authenticated and what is written cannot drift apart. The
-        // two fields left empty here are filled in below; neither belongs in the
-        // associated data.
-        let mut candidate = VaultFile {
-            version: VAULT_FORMAT_VERSION,
-            salt,
-            nonce: String::new(),
-            epoch,
-            keys_meta,
-            ciphertext: String::new(),
-        };
-        let aad = associated_data(&candidate)?;
-        let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
-        candidate.nonce = base64(nonce);
-        candidate.ciphertext = base64(ciphertext);
-
+        let candidate = seal_file(key, salt, epoch, keys_meta, payload)?;
         persist(&self.path, &candidate)?;
         self.file = candidate;
         Ok(())
@@ -494,7 +487,34 @@ impl Vault {
     }
 }
 
-fn persist(path: &Path, file: &VaultFile) -> Result<()> {
+fn seal_file(
+    key: &VaultKey,
+    salt: String,
+    epoch: u64,
+    keys_meta: Vec<KeyMeta>,
+    payload: &VaultPayload,
+) -> Result<VaultFile> {
+    let plaintext = Zeroizing::new(serde_json::to_vec(payload)?);
+    // The header is built first and the tag computed from that exact value,
+    // so what is authenticated and what is written cannot drift apart. The
+    // two fields left empty here are filled in below; neither belongs in the
+    // associated data.
+    let mut candidate = VaultFile {
+        version: VAULT_FORMAT_VERSION,
+        salt,
+        nonce: String::new(),
+        epoch,
+        keys_meta,
+        ciphertext: String::new(),
+    };
+    let aad = associated_data(&candidate)?;
+    let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
+    candidate.nonce = base64(nonce);
+    candidate.ciphertext = base64(ciphertext);
+    Ok(candidate)
+}
+
+fn encode_file(path: &Path, file: &VaultFile) -> Result<String> {
     let data = serde_json::to_string_pretty(file)?;
     // Never write a vault this same build could not open again: `open` fails
     // closed, so an unreadable vault file would stop the app from starting.
@@ -502,7 +522,31 @@ fn persist(path: &Path, file: &VaultFile) -> Result<()> {
         path: path.display().to_string(),
         reason: e.to_string(),
     })?;
+    Ok(data)
+}
+
+fn persist(path: &Path, file: &VaultFile) -> Result<()> {
+    let data = encode_file(path, file)?;
     crate::fs_util::write_private(path, &data)
+}
+
+/// Publish a brand-new vault file. Fails with the same error as the
+/// up-front check when something has appeared at the path since then.
+fn create_file(path: &Path, file: &VaultFile) -> Result<()> {
+    let data = encode_file(path, file)?;
+    crate::fs_util::create_private_bytes(path, data.as_bytes()).map_err(|e| match e {
+        CoreError::Io(ref io) if io.kind() == std::io::ErrorKind::AlreadyExists => {
+            already_exists(path)
+        }
+        other => other,
+    })
+}
+
+fn already_exists(path: &Path) -> CoreError {
+    CoreError::Vault(format!(
+        "{} already exists; reset the vault before creating a new one",
+        path.display()
+    ))
 }
 
 async fn derive_key_off_thread(passphrase: &str, salt: Vec<u8>) -> Result<VaultKey> {
@@ -1807,5 +1851,49 @@ mod tests {
             .await
             .expect("eight characters");
         assert!(vault.verify_passphrase(&passphrase).await.is_ok());
+    }
+
+    /// A dangling symlink at the vault path reads as absent to `try_exists`,
+    /// so initialization must look at the link itself and leave it alone.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn initialize_refuses_a_dangling_symlink_at_the_vault_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let target = dir.path().join("vault-on-removable-disk.json");
+        std::os::unix::fs::symlink(&target, &path).expect("link to a missing target");
+        let mut vault = Vault::open(path.clone()).expect("open");
+
+        assert!(vault
+            .initialize("correct horse battery staple")
+            .await
+            .is_err());
+        assert!(!vault.is_initialized());
+        assert!(!target.exists(), "the link target was created");
+        let meta = std::fs::symlink_metadata(&path).expect("the link is still there");
+        assert!(meta.file_type().is_symlink());
+    }
+
+    #[test]
+    fn check_can_initialize_refuses_without_touching_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let vault = Vault::open(path.clone()).expect("open");
+
+        assert!(matches!(
+            vault.check_can_initialize("short"),
+            Err(crate::CoreError::InvalidInput(_))
+        ));
+        vault
+            .check_can_initialize("correct horse battery staple")
+            .expect("free path and long passphrase");
+        assert!(!path.exists(), "the check created the vault file");
+
+        std::fs::write(&path, b"existing vault").expect("seed");
+        assert!(matches!(
+            vault.check_can_initialize("correct horse battery staple"),
+            Err(crate::CoreError::Vault(_))
+        ));
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing vault");
     }
 }
