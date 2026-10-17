@@ -128,7 +128,8 @@ pub fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
 /// The bytes are staged and synced exactly as `write_private_bytes` does, but
 /// the file is published with a hard link instead of a rename. Linking fails
 /// when the name is taken, so a file that appears after the caller looked and
-/// found nothing is never replaced.
+/// found nothing is never replaced. On a volume without hard links the file is
+/// created in place with `create_new`, which refuses an existing name too.
 pub fn create_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| save_failed(path, e))?;
@@ -137,6 +138,26 @@ pub fn create_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let tmp = temp_path(path);
     let published = write_temp(&tmp, contents).and_then(|()| std::fs::hard_link(&tmp, path));
     let _ = std::fs::remove_file(&tmp);
+    let published = match published {
+        // Some volumes have no hard links (FAT and exFAT, some network
+        // shares). Creating the file in place with `create_new` is just as
+        // unwilling to replace an existing one; what it gives up is that a
+        // crash mid-write can leave a partial file, which then loads as
+        // unreadable state rather than as no vault.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            write_temp(path, contents).inspect_err(|e| {
+                if e.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_file(path);
+                }
+            })
+        }
+        other => other,
+    };
     published.map_err(|e| save_failed(path, e))?;
     if let Err(e) = sync_parent_directory(path) {
         tracing::warn!("created {} but could not sync its directory: {e}", path.display());
