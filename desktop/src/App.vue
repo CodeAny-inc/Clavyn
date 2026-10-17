@@ -55,7 +55,8 @@ function handleKeydown(e: KeyboardEvent) {
   }
   const cmd = e.metaKey || e.ctrlKey;
   if (cmd && e.key === "k") {
-    e.preventDefault(); commandPaletteOpen.value = !commandPaletteOpen.value;
+    e.preventDefault();
+    if (!document.querySelector('[aria-modal="true"]')) commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
     e.preventDefault(); activeView.value = "terminal"; tabs.newTab();
   } else if (cmd && e.key === "u") {

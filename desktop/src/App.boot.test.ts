@@ -6,6 +6,7 @@ import { getInvokeMock, setInvokeHandler } from "./test/setup";
 import { useHostsStore } from "./stores/hosts";
 import { useIdentitiesStore } from "./stores/identities";
 import { useKeysStore } from "./stores/keys";
+import { useUiStore } from "./stores/ui";
 import { useUpdateStore } from "./stores/update";
 import { useVaultStore } from "./stores/vault";
 import { useWorkspacesStore } from "./stores/workspaces";
@@ -155,6 +156,27 @@ describe("App boot", () => {
     expect(dispatched.indexOf("biometric_available")).toBeGreaterThan(
       dispatched.indexOf("is_vault_unlocked"),
     );
+  });
+
+  it("does not open the command palette over a modal dialog", async () => {
+    mountApp();
+    await flushPromises();
+    const ui = useUiStore();
+
+    const modal = document.createElement("div");
+    modal.setAttribute("aria-modal", "true");
+    document.body.appendChild(modal);
+    try {
+      document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+      await flushPromises();
+      expect(ui.commandPaletteOpen).toBe(false);
+    } finally {
+      modal.remove();
+    }
+
+    document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+    await flushPromises();
+    expect(ui.commandPaletteOpen).toBe(true);
   });
 
   it("keeps the update check off the awaited boot path", async () => {
