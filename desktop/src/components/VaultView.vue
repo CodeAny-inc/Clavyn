@@ -75,7 +75,8 @@ async function setup() {
     error.value = "Passphrases do not match";
     return;
   }
-  if (passphrase.value.length < 8) {
+  // Counted in code points, matching the core, which counts characters.
+  if ([...passphrase.value].length < 8) {
     error.value = "Passphrase must be at least 8 characters";
     return;
   }
