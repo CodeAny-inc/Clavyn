@@ -20,7 +20,7 @@ import {
 import { sftpCanonicalize, sftpPickUploadFile, type SftpEntry } from "../api";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
-import { useSftpStore } from "../stores/sftp";
+import { joinPath, useSftpStore, type SftpEntryRef } from "../stores/sftp";
 import {
   configuredSshEndpoint,
   effectiveSshIdentity,
@@ -45,8 +45,8 @@ const showNewDirDialog = ref(false);
 const showRenameDialog = ref(false);
 const newDirName = ref("");
 const renameValue = ref("");
-const renamingEntry = ref<SftpEntry | null>(null);
-const contextMenuEntry = ref<SftpEntry | null>(null);
+const renamingTarget = ref<SftpEntryRef | null>(null);
+const contextMenuTarget = ref<SftpEntryRef | null>(null);
 const showContextMenu = ref(false);
 const contextMenuX = ref(0);
 const contextMenuY = ref(0);
@@ -184,15 +184,24 @@ function selectEntry(entry: SftpEntry) {
   sftp.selectedEntry = entry;
 }
 
-async function openEntry(entry: SftpEntry) {
-  if (entry.is_dir) {
-    await sftp.navigateToDir(entry.name);
+// The listed entries always belong to the published directory, so an entry is
+// pinned to that directory and session the moment the user picks it.
+function entryRef(entry: SftpEntry): SftpEntryRef | null {
+  if (!sftp.sessionId) return null;
+  return { sessionId: sftp.sessionId, dir: sftp.currentPath, entry };
+}
+
+async function openEntry(target: SftpEntryRef | null) {
+  if (target?.entry.is_dir) {
+    await sftp.navigateToDir(target);
   }
 }
 
 function onEntryContextmenu(event: MouseEvent, entry: SftpEntry) {
   event.preventDefault();
-  contextMenuEntry.value = entry;
+  const target = entryRef(entry);
+  if (!target) return;
+  contextMenuTarget.value = target;
   sftp.selectedEntry = entry;
   showContextMenu.value = true;
   contextMenuX.value = event.clientX;
@@ -201,8 +210,21 @@ function onEntryContextmenu(event: MouseEvent, entry: SftpEntry) {
 
 function closeContextMenu() {
   showContextMenu.value = false;
-  contextMenuEntry.value = null;
+  contextMenuTarget.value = null;
 }
+
+function closeRenameDialog() {
+  showRenameDialog.value = false;
+  renamingTarget.value = null;
+  renameValue.value = "";
+}
+
+// A menu or dialog opened on one listing must not stay usable once another
+// directory or session is shown underneath it.
+watch([() => sftp.currentPath, () => sftp.sessionId], () => {
+  closeContextMenu();
+  closeRenameDialog();
+}, { flush: "sync" });
 
 function onGlobalClick() {
   if (showContextMenu.value) closeContextMenu();
@@ -259,44 +281,42 @@ async function createDir() {
   }
 }
 
-function startRename(entry: SftpEntry) {
-  renamingEntry.value = entry;
-  renameValue.value = entry.name;
-  showRenameDialog.value = true;
+function startRename(target: SftpEntryRef) {
   closeContextMenu();
+  renamingTarget.value = target;
+  renameValue.value = target.entry.name;
+  showRenameDialog.value = true;
 }
 
 async function confirmRename() {
-  const entry = renamingEntry.value;
+  const target = renamingTarget.value;
   const nextName = renameValue.value.trim();
-  if (!entry || !nextName || nextName === entry.name) return;
+  if (!target || !nextName || nextName === target.entry.name) return;
 
   try {
-    await sftp.renameEntry(entry, nextName);
-    showRenameDialog.value = false;
-    renamingEntry.value = null;
-    renameValue.value = "";
+    await sftp.renameEntry(target, nextName);
+    closeRenameDialog();
   } catch {
     // Store exposes the error.
   }
 }
 
-async function deleteEntry(entry: SftpEntry) {
+async function deleteEntry(target: SftpEntryRef) {
   closeContextMenu();
-  if (!confirm(`Delete "${entry.name}"?`)) return;
+  if (!confirm(`Delete "${joinPath(target.dir, target.entry.name)}"?`)) return;
   try {
-    await sftp.deleteEntry(entry);
+    await sftp.deleteEntry(target);
   } catch {
     // Store exposes the error.
   }
 }
 
-async function downloadEntry(entry: SftpEntry) {
+async function downloadEntry(target: SftpEntryRef) {
   closeContextMenu();
-  if (entry.is_dir) return;
+  if (target.entry.is_dir) return;
 
   try {
-    await sftp.downloadFile(entry);
+    await sftp.downloadFile(target);
   } catch {
     // Store exposes the error.
   }
@@ -536,7 +556,7 @@ async function upload() {
                   : 'hover:bg-muted/50'
               "
               @click.stop="selectEntry(entry)"
-              @dblclick="openEntry(entry)"
+              @dblclick="openEntry(entryRef(entry))"
               @contextmenu="onEntryContextmenu($event, entry)"
             >
               <td class="px-3 py-1.5">
@@ -628,15 +648,15 @@ async function upload() {
     </div>
 
     <div
-      v-if="showContextMenu && contextMenuEntry"
+      v-if="showContextMenu && contextMenuTarget"
       class="fixed z-50 min-w-[160px] rounded-md border border-border bg-popover py-1 shadow-lg"
       :style="{ left: `${contextMenuX}px`, top: `${contextMenuY}px` }"
       @click.stop
     >
       <button
-        v-if="contextMenuEntry.is_dir"
+        v-if="contextMenuTarget.entry.is_dir"
         class="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-muted"
-        @click="openEntry(contextMenuEntry); closeContextMenu()"
+        @click="openEntry(contextMenuTarget); closeContextMenu()"
       >
         <Folder class="size-3.5" />
         Open
@@ -644,14 +664,14 @@ async function upload() {
       <button
         v-else
         class="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-muted"
-        @click="downloadEntry(contextMenuEntry)"
+        @click="downloadEntry(contextMenuTarget)"
       >
         <Download class="size-3.5" />
         Download
       </button>
       <button
         class="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] hover:bg-muted"
-        @click="startRename(contextMenuEntry)"
+        @click="startRename(contextMenuTarget)"
       >
         <Pencil class="size-3.5" />
         Rename
@@ -659,7 +679,7 @@ async function upload() {
       <div class="my-1 h-px bg-border" />
       <button
         class="flex w-full items-center gap-2 px-3 py-1.5 text-[12px] text-destructive hover:bg-destructive/10"
-        @click="deleteEntry(contextMenuEntry)"
+        @click="deleteEntry(contextMenuTarget)"
       >
         <Trash2 class="size-3.5" />
         Delete

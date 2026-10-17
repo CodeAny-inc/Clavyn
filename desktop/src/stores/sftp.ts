@@ -4,6 +4,18 @@ import * as api from "../api";
 import type { SftpEntry } from "../api";
 import type { Host } from "../types";
 
+/** An entry together with the directory and session it was listed from. */
+export interface SftpEntryRef {
+  sessionId: string;
+  dir: string;
+  entry: SftpEntry;
+}
+
+export function joinPath(base: string, name: string): string {
+  if (base.endsWith("/")) return base + name;
+  return base + "/" + name;
+}
+
 export const useSftpStore = defineStore("sftp", () => {
   const sessionId = ref<string | null>(null);
   const connectedHost = ref<Host | null>(null);
@@ -85,6 +97,7 @@ export const useSftpStore = defineStore("sftp", () => {
         sessionId.value = id;
         connectedHost.value = host;
         currentPath.value = home;
+        destinationPath = home;
         entries.value = initialEntries;
         selectedEntry.value = null;
         // A rejected attempt to switch hosts while this task was pending may
@@ -129,26 +142,67 @@ export const useSftpStore = defineStore("sftp", () => {
     return task;
   }
 
+  // Listings can finish out of order, so only the most recent request may
+  // publish its entries or end the spinner. `destinationPath` is the directory
+  // the browser shows, or is loading to show once that request lands.
+  let listGeneration = 0;
+  let listPending = false;
+  let destinationPath = "/";
+  let transfers = 0;
+
+  function settleLoading() {
+    loading.value = listPending || transfers > 0;
+  }
+
   async function listDir(path: string) {
-    if (!sessionId.value) return;
+    const id = sessionId.value;
+    if (!id) return;
+    const request = ++listGeneration;
+    listPending = true;
+    destinationPath = path;
     error.value = null;
     loading.value = true;
     try {
-      entries.value = await api.sftpListDir(sessionId.value, path);
+      const listed = await api.sftpListDir(id, path);
+      if (request !== listGeneration || id !== sessionId.value) return;
+      entries.value = listed;
       currentPath.value = path;
       selectedEntry.value = null;
     } catch (e) {
+      if (request !== listGeneration || id !== sessionId.value) return;
+      destinationPath = currentPath.value;
       error.value = String(e);
       throw e;
     } finally {
-      loading.value = false;
+      if (request === listGeneration) {
+        listPending = false;
+        settleLoading();
+      }
     }
   }
 
-  async function navigateToDir(name: string) {
-    if (!sessionId.value) return;
-    const newPath = joinPath(currentPath.value, name);
-    await listDir(newPath);
+  // A change re-lists its directory only while the browser is still there;
+  // once the user has navigated elsewhere the refresh would undo that.
+  async function refreshAfterChange(id: string, dir: string) {
+    if (sessionId.value === id && destinationPath === dir) await listDir(dir);
+  }
+
+  // Per-entry actions resolve against the directory and session the entry was
+  // listed from, never against whatever the browser shows when the action
+  // runs, so a navigation that lands in between cannot retarget them.
+  function requireTarget(target: SftpEntryRef): string {
+    if (!sessionId.value) throw new Error("Not connected");
+    if (target.sessionId !== sessionId.value) {
+      const message = "This entry belongs to an SFTP session that is no longer open.";
+      error.value = message;
+      throw new Error(message);
+    }
+    return target.sessionId;
+  }
+
+  async function navigateToDir(target: SftpEntryRef) {
+    requireTarget(target);
+    await listDir(joinPath(target.dir, target.entry.name));
   }
 
   async function goUp() {
@@ -164,43 +218,46 @@ export const useSftpStore = defineStore("sftp", () => {
   }
 
   async function createDir(name: string) {
-    if (!sessionId.value) return;
-    const newPath = joinPath(currentPath.value, name);
-    await api.sftpCreateDir(sessionId.value, newPath);
-    await refresh();
+    const id = sessionId.value;
+    if (!id) return;
+    const dir = currentPath.value;
+    await api.sftpCreateDir(id, joinPath(dir, name));
+    await refreshAfterChange(id, dir);
   }
 
-  async function deleteEntry(entry: SftpEntry) {
-    if (!sessionId.value) return;
-    const fullPath = joinPath(currentPath.value, entry.name);
-    if (entry.is_dir) {
-      await api.sftpRemoveDir(sessionId.value, fullPath);
+  async function deleteEntry(target: SftpEntryRef) {
+    const id = requireTarget(target);
+    const fullPath = joinPath(target.dir, target.entry.name);
+    if (target.entry.is_dir) {
+      await api.sftpRemoveDir(id, fullPath);
     } else {
-      await api.sftpRemoveFile(sessionId.value, fullPath);
+      await api.sftpRemoveFile(id, fullPath);
     }
-    await refresh();
+    await refreshAfterChange(id, target.dir);
   }
 
-  async function renameEntry(entry: SftpEntry, newName: string) {
-    if (!sessionId.value) return;
-    const oldPath = joinPath(currentPath.value, entry.name);
-    const newPath = joinPath(currentPath.value, newName);
-    await api.sftpRename(sessionId.value, oldPath, newPath);
-    await refresh();
+  async function renameEntry(target: SftpEntryRef, newName: string) {
+    const id = requireTarget(target);
+    const oldPath = joinPath(target.dir, target.entry.name);
+    const newPath = joinPath(target.dir, newName);
+    await api.sftpRename(id, oldPath, newPath);
+    await refreshAfterChange(id, target.dir);
   }
 
-  async function downloadFile(entry: SftpEntry) {
-    if (!sessionId.value) throw new Error("Not connected");
-    const fullPath = joinPath(currentPath.value, entry.name);
+  async function downloadFile(target: SftpEntryRef) {
+    const id = requireTarget(target);
+    const fullPath = joinPath(target.dir, target.entry.name);
     error.value = null;
+    transfers += 1;
     loading.value = true;
     try {
-      await api.sftpDownloadToLocal(sessionId.value, fullPath);
+      await api.sftpDownloadToLocal(id, fullPath);
     } catch (e) {
       error.value = String(e);
       throw e;
     } finally {
-      loading.value = false;
+      transfers -= 1;
+      if (id === sessionId.value) settleLoading();
     }
   }
 
@@ -209,25 +266,27 @@ export const useSftpStore = defineStore("sftp", () => {
     uploadToken: string,
     overwrite = false,
   ) {
-    if (!sessionId.value) throw new Error("Not connected");
-    const fullPath = joinPath(currentPath.value, name);
+    const id = sessionId.value;
+    if (!id) throw new Error("Not connected");
+    const dir = currentPath.value;
     error.value = null;
+    transfers += 1;
     loading.value = true;
     try {
       await api.sftpUploadFromLocal(
-        sessionId.value,
+        id,
         uploadToken,
-        fullPath,
+        joinPath(dir, name),
         overwrite,
       );
-      entries.value = await api.sftpListDir(sessionId.value, currentPath.value);
-      selectedEntry.value = null;
     } catch (e) {
       error.value = String(e);
       throw e;
     } finally {
-      loading.value = false;
+      transfers -= 1;
+      if (id === sessionId.value) settleLoading();
     }
+    await refreshAfterChange(id, dir);
   }
 
   async function disconnect() {
@@ -236,6 +295,8 @@ export const useSftpStore = defineStore("sftp", () => {
     connectGeneration += 1;
     connectPending = null;
     connectPendingKey = null;
+    listGeneration += 1;
+    listPending = false;
     loading.value = false;
     const id = sessionId.value;
     try {
@@ -246,11 +307,6 @@ export const useSftpStore = defineStore("sftp", () => {
       clearPublishedConnection();
       error.value = null;
     }
-  }
-
-  function joinPath(base: string, name: string): string {
-    if (base.endsWith("/")) return base + name;
-    return base + "/" + name;
   }
 
   return {

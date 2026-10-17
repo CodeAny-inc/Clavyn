@@ -36,7 +36,8 @@ beforeEach(async () => {
 describe("SFTP transfers", () => {
   it("downloads by remote path alone", async () => {
     setInvokeHandler("sftp_download_to_local", () => true);
-    await useSftpStore().downloadFile(file);
+    const sftp = useSftpStore();
+    await sftp.downloadFile({ sessionId: sftp.sessionId!, dir: "/home/deploy", entry: file });
 
     const [[, args]] = calls("sftp_download_to_local");
     expect(args).toEqual({ sessionId: expect.any(String), remotePath: "/home/deploy/report.txt" });
