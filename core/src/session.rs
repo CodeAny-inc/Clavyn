@@ -232,19 +232,6 @@ impl SessionManager {
             .await
             .map_err(|e| CoreError::Ssh(format!("request shell: {e}")))?;
 
-        // The startup command is typed into the shell that was just started.
-        // A channel takes only one shell, exec or subsystem request, and
-        // OpenSSH ignores an exec that arrives after the shell, so it cannot
-        // be sent as a request of its own.
-        if let Some(cmd) = &host.startup_command {
-            if !cmd.is_empty() {
-                channel
-                    .data(format!("{cmd}\r").as_bytes())
-                    .await
-                    .map_err(|e| CoreError::Ssh(format!("startup command: {e}")))?;
-            }
-        }
-
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
         let held = claim.commit();
@@ -325,6 +312,18 @@ impl SessionManager {
                 }
             }
         });
+
+        // The startup command is typed into the shell once the reader is
+        // running, so whatever the remote echoes back is drained while it is
+        // sent. A channel takes only one shell, exec or subsystem request, and
+        // OpenSSH ignores an exec that arrives after the shell, so it cannot be
+        // sent as a request of its own. The session is usable either way, so a
+        // command that cannot be sent does not fail the connect.
+        if let Some(cmd) = host.startup_command.as_deref().filter(|cmd| !cmd.is_empty()) {
+            if let Err(error) = self.write(&session_id, format!("{cmd}\r").as_bytes()).await {
+                tracing::warn!("startup command for session {session_id} was not sent: {error}");
+            }
+        }
 
         Ok(())
     }
