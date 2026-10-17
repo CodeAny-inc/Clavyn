@@ -36,6 +36,18 @@ describe("accessible names", () => {
     expect(unnamed(document, '[role="switch"], select')).toEqual([]);
   });
 
+  it("gives every button in Settings an accessible name", async () => {
+    wrapper = mount(SettingsView, { attachTo: document.body });
+    await flushPromises();
+    const nameless = [...document.querySelectorAll<HTMLElement>("button")].filter((el) => {
+      if (el.getAttribute("aria-label")?.trim()) return false;
+      const visible = el.cloneNode(true) as HTMLElement;
+      visible.querySelectorAll(".hidden").forEach((hidden) => hidden.remove());
+      return !visible.textContent?.trim();
+    });
+    expect(nameless.map((el) => el.outerHTML)).toEqual([]);
+  });
+
   it("links the host form's authentication method select to its label", async () => {
     wrapper = mount(HostForm, { props: { host: null }, attachTo: document.body });
     await flushPromises();

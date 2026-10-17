@@ -105,6 +105,7 @@ function openReleases() {
           <div class="flex flex-wrap items-center gap-2 pt-3 border-t border-border">
             <button
               class="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted-foreground hover:bg-muted transition-colors duration-100"
+              aria-label="GitHub"
               @click="openGitHub"
             >
               <Github class="size-3.5" :stroke-width="1.75" />
@@ -113,6 +114,7 @@ function openReleases() {
             </button>
             <button
               class="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted-foreground hover:bg-muted transition-colors duration-100"
+              aria-label="Releases"
               @click="openReleases"
             >
               <Download class="size-3.5" :stroke-width="1.75" />
