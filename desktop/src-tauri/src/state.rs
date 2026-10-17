@@ -380,12 +380,11 @@ const SHELL_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Dropping it ends the shell and reaps it, so a closed tab leaves neither a
 /// running shell nor a zombie behind. All of that happens on a thread of its
 /// own, because a terminal is dropped under the terminal map's lock and the
-/// shutdown can take seconds. Dropping the PTY hangs the terminal up, which
-/// ends an ordinary shell, so the shell first gets [`SHELL_EXIT_GRACE`] to
-/// finish whatever it does on hangup. Only then is it signalled: SIGHUP with
-/// portable-pty's short grace and a forced kill after it on Unix, process
-/// termination on Windows. Background jobs the user detached from the shell
-/// are not touched.
+/// shutdown can take seconds. On Unix the shell is sent SIGHUP, as closing a
+/// terminal window does, and gets [`SHELL_EXIT_GRACE`] to finish whatever it
+/// does on hangup. Only then is it forced: portable-pty's kill, which ends in
+/// SIGKILL on Unix and process termination on Windows. Background jobs the
+/// user detached from the shell are not touched.
 pub struct LocalShell {
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
     /// Set once `try_wait` has collected the exit status. The process id may
@@ -413,6 +412,17 @@ impl LocalShell {
 
 /// End `child` and collect its exit status, blocking until it is gone.
 fn end_shell(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+    // The PTY hangup only reaches the shell once every copy of the master is
+    // closed, and the output reader holds one until it next wakes up, so the
+    // shell is sent SIGHUP directly. It has not been waited on yet, so its
+    // pid still names it.
+    #[cfg(unix)]
+    if let Some(pid) = child.process_id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: kill(2) takes plain integers and has no memory effects.
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+    }
     let deadline = std::time::Instant::now() + SHELL_EXIT_GRACE;
     loop {
         match child.try_wait() {
@@ -694,6 +704,48 @@ mod local_terminal_ownership_tests {
             assert!(std::time::Instant::now() < deadline, "the shell is still around");
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
+    }
+
+    /// The output reader keeps its own copy of the PTY master, so closing the
+    /// terminal does not hang the tty up while the reader is blocked. The shell
+    /// still hears about the close at once rather than after the grace period.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_busy_shell_gets_the_hangup_without_waiting_for_the_reader() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap 'exit 0' HUP; while :; do sleep 0.05; done"]);
+        let child = pair.slave.spawn_command(command).expect("a shell can be spawned");
+        let pid = child.process_id().expect("pid");
+        let reader = pair.master.try_clone_reader().expect("a reader");
+        let terminal = LocalTerminal {
+            writer: Arc::new(std::sync::Mutex::new(
+                pair.master.take_writer().expect("the master has a writer"),
+            )),
+            master: pair.master,
+            child: LocalShell::new(child),
+            owns_session_id: Arc::new(AtomicBool::new(true)),
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        drop(terminal);
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while proc_entry.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell did not get the hangup while the reader held the master"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(reader);
     }
 
     #[test]

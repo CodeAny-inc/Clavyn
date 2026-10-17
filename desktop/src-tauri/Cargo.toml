@@ -39,6 +39,11 @@ tauri = { version = "2", features = ["test"] }
 # the known hosts store takes; the workspace pin keeps it the same russh.
 russh = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# Sends a closed tab's shell SIGHUP directly; already in the tree through
+# portable-pty and tokio.
+libc = "0.2"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 # Resolves the D-Bus session address before the single-instance plugin does,
 # because the plugin resolves it with `unwrap` and `panic = "abort"` turns that
