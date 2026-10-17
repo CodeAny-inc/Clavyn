@@ -210,3 +210,31 @@ describe("KeyManager while the vault is locked", () => {
     expect(keys.keys).toHaveLength(0);
   });
 });
+
+describe("KeyManager while the vault status is unknown", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    setInvokeHandler("list_keys", () => []);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("offers a retry instead of the empty key list", async () => {
+    const vault = useVaultStore();
+    vault.initialized = true;
+    vault.statusUnavailable = true;
+    const checkStatus = vi.spyOn(vault, "checkStatus").mockResolvedValue();
+    const wrapper = mount(KeyManager, { global: { stubs: { Teleport: true } } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Vault status unknown");
+    expect(wrapper.text()).not.toContain("No SSH keys yet");
+    const retry = wrapper.findAll("button").find((b) => b.text() === "Retry");
+    expect(retry).toBeDefined();
+    await retry!.trigger("click");
+    expect(checkStatus).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+});

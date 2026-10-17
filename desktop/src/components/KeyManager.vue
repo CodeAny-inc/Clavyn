@@ -203,6 +203,14 @@ async function browseForKeyFile() {
           </p>
         </div>
       </div>
+      <div v-else-if="vault.statusUnavailable" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-status-unknown">
+        <Lock class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">Vault status unknown</p>
+          <p class="text-[12px] text-muted-foreground mt-1">The vault could not be checked, so keys cannot be shown.</p>
+        </div>
+        <Button size="sm" variant="outline" @click="vault.checkStatus()">Retry</Button>
+      </div>
       <div v-else-if="keys.keys.length" class="flex flex-col gap-1.5">
         <div
           v-for="key in keys.keys"

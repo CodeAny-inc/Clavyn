@@ -29,8 +29,11 @@ export const useVaultStore = defineStore("vault", () => {
   const sftpStore = useSftpStore();
 
   const needsSetup = computed(() => !initialized.value && !statusUnavailable.value);
+  // A failed probe leaves `initialized` and `unlocked` at their last answers,
+  // which may be stale, so neither setup nor unlock is offered until a probe
+  // succeeds again.
   const needsUnlock = computed(
-    () => initialized.value && !unlocked.value,
+    () => initialized.value && !unlocked.value && !statusUnavailable.value,
   );
 
   // Key metadata comes from the vault header and is only authenticated when the
@@ -111,7 +114,14 @@ export const useVaultStore = defineStore("vault", () => {
     }
   }
 
+  // Identifies the most recent status probe. Probes can overlap, and only the
+  // latest one may publish, so an older probe settling late cannot overwrite
+  // the answer the user is looking at.
+  let statusRequest = 0;
+
   async function checkStatus() {
+    const request = ++statusRequest;
+    const isCurrent = () => request === statusRequest;
     error.value = null;
     // Both probes are independent backend reads. Publishing them as one
     // snapshot also keeps needsSetup/needsUnlock from observing a half-applied
@@ -125,10 +135,12 @@ export const useVaultStore = defineStore("vault", () => {
         api.isVaultUnlocked(),
       ]);
     } catch (e) {
+      if (!isCurrent()) return;
       statusUnavailable.value = true;
       error.value = String(e);
       return;
     }
+    if (!isCurrent()) return;
     statusUnavailable.value = false;
     initialized.value = vaultInitialized;
     unlocked.value = vaultUnlocked;
@@ -139,6 +151,7 @@ export const useVaultStore = defineStore("vault", () => {
       // change at runtime without changing whether the credential is enrolled.
       await refreshBiometricState();
     } catch (e) {
+      if (!isCurrent()) return;
       error.value = String(e);
     }
   }
