@@ -501,10 +501,10 @@ async fn write_download<R: AsyncRead + Unpin + ?Sized>(
     let Some(existing) = existing else {
         let mut file = open_download_target(&target, false).await?;
         let written = copy_until(source, &mut file, closed).await;
-        drop(file);
         if written.is_err() {
-            discard(&target).await;
+            discard_if_still(&target, &file).await;
         }
+        drop(file);
         return written.map_err(Into::into);
     };
 
@@ -588,6 +588,32 @@ async fn discard(path: &Path) {
     }
 }
 
+/// Remove an incomplete download at `path`, but only while `path` still names
+/// the file this download created. Another download that chose to overwrite
+/// can have renamed its finished file there in the meantime, and that one
+/// must survive this failure.
+///
+/// Only Unix exposes a file's identity on stable Rust; elsewhere the path is
+/// removed as before.
+async fn discard_if_still(path: &Path, file: &tokio::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let (Ok(ours), Ok(there)) = (
+            file.metadata().await,
+            tokio::fs::symlink_metadata(path).await,
+        ) else {
+            return;
+        };
+        if (ours.dev(), ours.ino()) != (there.dev(), there.ino()) {
+            return;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = file;
+    discard(path).await;
+}
+
 /// Open the local file a download writes into. Without `overwrite` an existing
 /// file is refused; `create_new` checks and creates in one step, so a file that
 /// appears between a check and the open is refused too.
@@ -667,6 +693,40 @@ mod download_target_tests {
             .is_err());
         assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
         assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// Fails after another download has renamed its finished file over the
+    /// path this one was writing.
+    struct ReplacedThenBroken(std::path::PathBuf);
+
+    impl AsyncRead for ReplacedThenBroken {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let other = self.0.with_extension("other");
+            std::fs::write(&other, "finished by another download").expect("write");
+            std::fs::rename(&other, &self.0).expect("rename");
+            Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_new_download_spares_a_file_that_replaced_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+
+        assert!(
+            write_download(&mut ReplacedThenBroken(path.clone()), &path, false, never())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the other download's file"),
+            "finished by another download"
+        );
     }
 
     #[tokio::test]
