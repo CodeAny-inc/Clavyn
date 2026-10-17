@@ -265,7 +265,7 @@ async function connectSession() {
   // never reach the emulator even before its session is torn down. Bytes keep
   // being accepted until the sink itself reports the end of the stream: the
   // close notification does not travel with them and can arrive first.
-  const outputSink = api.sessionOutput(data => {
+  const outputSink = api.sessionOutput(sessionId, data => {
     if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
     if (sessionEnded) tailOutput?.push(data);
     else if (pendingOutput) pendingOutput.push(data);

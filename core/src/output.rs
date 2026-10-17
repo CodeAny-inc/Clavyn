@@ -4,8 +4,14 @@
 //! to a full 32 KiB window. Delivering every chunk separately makes the fixed
 //! per-message cost of the UI transport dominate bulk output, so chunks are
 //! accumulated into batches instead.
+//!
+//! Delivered batches are also metered: [`OutputCredit`] counts the bytes the UI
+//! layer has not yet acknowledged, so a reader can stop pulling from the
+//! connection while the UI is behind.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 
 /// Longest a partially filled batch waits before delivery. Bounds the delay
 /// added to output that arrives while a batch is already in flight.
@@ -111,6 +117,98 @@ impl OutputBatcher {
         } else {
             Some(now)
         };
+    }
+}
+
+/// Unacknowledged output a session may have in flight before its reader stops
+/// pulling from the connection.
+///
+/// Large enough for many full [`MAX_BATCH`] batches to be on their way at once,
+/// so bulk output is not throttled to one round trip to the UI layer and back
+/// per batch; small enough that a UI that stops consuming, or a peer that
+/// produces faster than the UI can, holds a few megabytes per session rather
+/// than whatever the peer chooses to send.
+pub const OUTPUT_WINDOW: u64 = 2 * 1024 * 1024;
+
+/// Count of delivered output bytes the UI layer has not acknowledged yet.
+///
+/// The reader spends what it delivers and stops reading the connection while
+/// the count is at or above [`OUTPUT_WINDOW`]; the UI refunds what it has
+/// received. Pausing the reader is what bounds memory: the SSH library hands
+/// channel data over through a bounded queue and waits when it is full, so an
+/// idle reader stalls the connection and, through the SSH window and TCP, the
+/// peer itself.
+///
+/// The window is a threshold rather than a hard cap: a batch already due is
+/// still delivered, so the count can run past the window by up to one batch
+/// and one protocol packet.
+pub struct OutputCredit {
+    outstanding: AtomicU64,
+    /// Set once the session is closing, after which output is never held back.
+    lifted: AtomicBool,
+    room: Notify,
+}
+
+impl OutputCredit {
+    pub fn new() -> Self {
+        Self {
+            outstanding: AtomicU64::new(0),
+            lifted: AtomicBool::new(false),
+            room: Notify::new(),
+        }
+    }
+
+    /// Records `bytes` delivered to the UI layer.
+    pub fn spend(&self, bytes: usize) {
+        self.outstanding.fetch_add(bytes as u64, Ordering::AcqRel);
+    }
+
+    /// Records `bytes` the UI layer has received.
+    ///
+    /// Saturates at zero: the amount comes from the UI layer, and acknowledging
+    /// more than was delivered must not bank credit for output not yet sent.
+    pub fn refund(&self, bytes: u64) {
+        let _ = self
+            .outstanding
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |outstanding| {
+                Some(outstanding.saturating_sub(bytes))
+            });
+        self.room.notify_one();
+    }
+
+    /// Stops holding output back for good.
+    ///
+    /// A closing session must still reach the end of its stream, which is
+    /// where the reader flushes the trailing output and announces the close.
+    /// Nothing is obliged to keep acknowledging by then, so a reader left
+    /// waiting for credit might never get there.
+    pub fn lift(&self) {
+        self.lifted.store(true, Ordering::Release);
+        self.room.notify_one();
+    }
+
+    /// Whether the reader may pull more output from the connection.
+    pub fn has_room(&self) -> bool {
+        self.lifted.load(Ordering::Acquire)
+            || self.outstanding.load(Ordering::Acquire) < OUTPUT_WINDOW
+    }
+
+    /// Resolves once [`has_room`](Self::has_room) holds.
+    ///
+    /// Meant for a single waiter, the session's reader. `refund` and `lift`
+    /// wake it with `notify_one`, which leaves a permit behind when nobody is
+    /// waiting yet, so a refund that lands between the check and the wait is
+    /// not lost: the wait completes at once and the loop checks again.
+    pub async fn room(&self) {
+        while !self.has_room() {
+            self.room.notified().await;
+        }
+    }
+}
+
+impl Default for OutputCredit {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -314,5 +412,96 @@ mod tests {
         assert!(!batcher.push(b"", now));
         assert!(batcher.is_empty());
         assert_eq!(batcher.deadline(), None);
+    }
+
+    #[test]
+    fn credit_runs_out_at_the_window_and_returns_with_a_refund() {
+        let credit = OutputCredit::new();
+        assert!(credit.has_room());
+        credit.spend(OUTPUT_WINDOW as usize - 1);
+        assert!(credit.has_room());
+        credit.spend(1);
+        assert!(!credit.has_room());
+        credit.refund(1);
+        assert!(credit.has_room());
+    }
+
+    #[test]
+    fn an_over_acknowledgement_banks_no_credit() {
+        let credit = OutputCredit::new();
+        credit.spend(MAX_BATCH);
+        credit.refund(u64::MAX);
+        // Had the excess carried over, this would still leave room.
+        credit.spend(OUTPUT_WINDOW as usize);
+        assert!(!credit.has_room());
+    }
+
+    #[test]
+    fn lifting_the_limit_leaves_room_whatever_is_outstanding() {
+        let credit = OutputCredit::new();
+        credit.spend(OUTPUT_WINDOW as usize * 4);
+        assert!(!credit.has_room());
+        credit.lift();
+        assert!(credit.has_room());
+        credit.spend(OUTPUT_WINDOW as usize);
+        assert!(credit.has_room());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_room_returns_at_once_when_there_is_some() {
+        let credit = OutputCredit::new();
+        tokio::time::timeout(Duration::from_secs(1), credit.room())
+            .await
+            .expect("room was available");
+    }
+
+    #[tokio::test]
+    async fn a_refund_wakes_a_waiting_reader() {
+        let credit = std::sync::Arc::new(OutputCredit::new());
+        credit.spend(OUTPUT_WINDOW as usize);
+        let waiter = tokio::spawn({
+            let credit = credit.clone();
+            async move { credit.room().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        // A refund that leaves the count at the window wakes the reader, which
+        // must check again and keep waiting.
+        credit.refund(0);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+
+        credit.refund(MAX_BATCH as u64);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("the refund did not wake the reader")
+            .expect("waiter");
+    }
+
+    #[tokio::test]
+    async fn a_refund_before_the_wait_starts_is_not_missed() {
+        let credit = OutputCredit::new();
+        credit.spend(OUTPUT_WINDOW as usize);
+        credit.refund(1);
+        tokio::time::timeout(Duration::from_secs(1), credit.room())
+            .await
+            .expect("the earlier refund was lost");
+    }
+
+    #[tokio::test]
+    async fn lifting_the_limit_wakes_a_waiting_reader() {
+        let credit = std::sync::Arc::new(OutputCredit::new());
+        credit.spend(OUTPUT_WINDOW as usize);
+        let waiter = tokio::spawn({
+            let credit = credit.clone();
+            async move { credit.room().await }
+        });
+        tokio::task::yield_now().await;
+        credit.lift();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("lifting did not wake the reader")
+            .expect("waiter");
     }
 }

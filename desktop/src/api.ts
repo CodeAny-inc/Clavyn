@@ -66,6 +66,22 @@ export const pickKeyFile = () => invoke<string | null>("pick_key_file");
  */
 export type SessionOutput = Channel<ArrayBuffer>;
 
+/** Received output that is acknowledged at once rather than on the timer. */
+export const OUTPUT_ACK_THRESHOLD = 256 * 1024;
+/** Longest received output waits to be acknowledged below the threshold. */
+export const OUTPUT_ACK_DELAY_MS = 30;
+/** Longest wait between retries of an acknowledgement that failed. */
+export const OUTPUT_ACK_MAX_RETRY_MS = 2000;
+
+/**
+ * Reports output bytes as received. An SSH session stops reading from its
+ * connection while too much of its output is unacknowledged, so a webview that
+ * falls behind slows the remote end down rather than letting undelivered
+ * output pile up in the IPC layer. Local terminals ignore it.
+ */
+export const sessionOutputAck = (sessionId: string, bytes: number) =>
+  invoke<void>("session_output_ack", { sessionId, bytes });
+
 /**
  * Opens a sink for one session.
  *
@@ -75,13 +91,66 @@ export type SessionOutput = Channel<ArrayBuffer>;
  * to take the asynchronous transport route. `onEnd` is therefore the only
  * signal that says no more output is coming; the `session-closed` event carries
  * no index and can overtake output that is still in flight.
+ *
+ * Every batch is acknowledged on receipt, whether or not the pane still wants
+ * it: the backend meters what the IPC layer holds, not what the emulator
+ * renders. Acknowledgements are coalesced, going out once
+ * `OUTPUT_ACK_THRESHOLD` bytes are pending or `OUTPUT_ACK_DELAY_MS` after the
+ * first unacknowledged batch, so a trickle of output never leaves credit
+ * stranded. Nothing is acknowledged once the stream has ended; the session is
+ * gone by then.
  */
-export function sessionOutput(onData: (bytes: Uint8Array) => void, onEnd: () => void): SessionOutput {
+export function sessionOutput(
+  sessionId: string,
+  onData: (bytes: Uint8Array) => void,
+  onEnd: () => void,
+): SessionOutput {
   const channel: SessionOutput = new Channel();
+  let pending = 0;
+  let failures = 0;
+  let ended = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const stopTimer = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+  const acknowledge = () => {
+    stopTimer();
+    const bytes = pending;
+    pending = 0;
+    if (bytes === 0) return;
+    sessionOutputAck(sessionId, bytes).then(
+      () => {
+        failures = 0;
+      },
+      () => {
+        // Credit that never reaches the backend is never handed back, and a
+        // reader that has run out waits for an acknowledgement no further
+        // output will trigger. The bytes go back into the count and are
+        // retried, backing off to OUTPUT_ACK_MAX_RETRY_MS, for as long as the
+        // stream is open: giving up at any point would leave the session
+        // paused for good.
+        if (ended) return;
+        pending += bytes;
+        failures += 1;
+        stopTimer();
+        timer = setTimeout(acknowledge, Math.min(OUTPUT_ACK_DELAY_MS * 2 ** failures, OUTPUT_ACK_MAX_RETRY_MS));
+      },
+    );
+  };
   channel.onmessage = (message) => {
     const bytes = new Uint8Array(message);
-    if (bytes.length === 0) onEnd();
-    else onData(bytes);
+    if (bytes.length === 0) {
+      ended = true;
+      stopTimer();
+      pending = 0;
+      onEnd();
+      return;
+    }
+    pending += bytes.length;
+    if (pending >= OUTPUT_ACK_THRESHOLD) acknowledge();
+    else if (timer === null) timer = setTimeout(acknowledge, OUTPUT_ACK_DELAY_MS);
+    onData(bytes);
   };
   return channel;
 }

@@ -1,7 +1,7 @@
 use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
-use crate::output::OutputBatcher;
+use crate::output::{OutputBatcher, OutputCredit};
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
@@ -129,6 +129,9 @@ struct SshSession {
     /// its own input.
     writes: Mutex<()>,
     resize_tx: mpsc::Sender<(u32, u32)>,
+    /// Output delivered to the UI layer and not yet acknowledged, shared with
+    /// the reader task, which stops reading the channel while it is spent.
+    credit: Arc<OutputCredit>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
     claim: Arc<ClaimedId>,
@@ -144,8 +147,13 @@ impl SshSession {
     /// Mark the session closed and say goodbye to the peer. The goodbye holds
     /// only the connection handle, so the id is released as soon as the map
     /// entry and the reader are gone, however long the peer takes.
+    ///
+    /// The output limit is lifted as well: a reader stalled on unacknowledged
+    /// output has to keep reading to reach the end of the channel, flush the
+    /// tail and announce the close.
     fn retire(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         self.closed.send_replace(true);
+        self.credit.lift();
         let handle = self.handle.clone();
         async move { disconnect(&handle).await }
     }
@@ -243,6 +251,7 @@ impl SessionManager {
         }
 
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
+        let credit = Arc::new(OutputCredit::new());
 
         let held = claim.commit();
         let session = Arc::new(SshSession {
@@ -251,6 +260,7 @@ impl SessionManager {
             channel_id,
             writes: Mutex::new(()),
             resize_tx,
+            credit: credit.clone(),
             claim: held.clone(),
         });
 
@@ -271,7 +281,12 @@ impl SessionManager {
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
-                    data_cb(&sid, batcher.batch());
+                    let batch = batcher.batch();
+                    // Spent before the batch is handed over, so an
+                    // acknowledgement can never arrive ahead of the spend
+                    // it pays back.
+                    credit.spend(batch.len());
+                    data_cb(&sid, batch);
                     batcher.mark_flushed(Instant::now());
                 }
             };
@@ -279,8 +294,15 @@ impl SessionManager {
                 // Read the deadline before the select so no branch borrows the
                 // batcher while another branch's handler mutates it.
                 let flush_at = batcher.deadline();
+                // While the UI layer is a window behind, the channel is left
+                // unread, which backs the stall up to the peer. Resizes and a
+                // batch already due are still handled meanwhile; the end of the
+                // stream is seen once credit returns or the session is closed,
+                // which lifts the limit.
+                let reading = credit.has_room();
                 tokio::select! {
-                    msg = channel.wait() => {
+                    () = credit.room(), if !reading => {}
+                    msg = channel.wait(), if reading => {
                         match msg {
                             Some(ChannelMsg::Data { data })
                             | Some(ChannelMsg::ExtendedData { data, .. }) => {
@@ -373,13 +395,26 @@ impl SessionManager {
     /// The entry leaves the map before the disconnect is sent, so the session
     /// stops being addressable at once even if the peer never answers. The
     /// entry's share of the id goes with it; the reader task still holds one
-    /// until it has flushed and announced the close.
+    /// until it has flushed and announced the close. Output credit is lifted
+    /// first, so a reader waiting on the UI layer goes on to the end of the
+    /// stream instead of waiting on acknowledgements that may never come.
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let removed = self.sessions.lock().await.remove(session_id);
         if let Some(session) = removed {
             session.retire().await;
         }
         Ok(())
+    }
+
+    /// Return `bytes` of output credit to a session once the UI layer has
+    /// received them, letting a reader that ran out resume.
+    ///
+    /// An id with no live session is not an error: acknowledgements trail the
+    /// output they cover and can arrive after the session has closed.
+    pub async fn ack(&self, session_id: &str, bytes: u64) {
+        if let Ok(session) = self.get(session_id).await {
+            session.credit.refund(bytes);
+        }
     }
 
     /// List active session ids.

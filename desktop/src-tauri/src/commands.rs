@@ -952,6 +952,23 @@ pub async fn session_resize(
     Err("session not found".into())
 }
 
+/// Acknowledge `bytes` of a session's output as received by the webview.
+///
+/// An SSH session stops reading from its connection once a window of output is
+/// unacknowledged, so a webview that falls behind slows the peer down instead
+/// of letting undelivered output pile up in the IPC layer. Local terminals are
+/// not metered, and an id with no live SSH session — a local terminal, or a
+/// session that has just closed — is accepted and ignored.
+#[tauri::command]
+pub async fn session_output_ack(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    bytes: u64,
+) -> ApiResult<()> {
+    state.sessions.ack(&session_id, bytes).await;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn close_session(state: State<'_, Arc<AppState>>, session_id: String) -> ApiResult<()> {
     // The sink stays registered: tearing the session down makes its task reach

@@ -194,6 +194,7 @@ fn main() {
             commands::create_local_terminal,
             commands::session_write,
             commands::session_resize,
+            commands::session_output_ack,
             commands::close_session,
             commands::list_sessions,
             commands::sftp_connect,
