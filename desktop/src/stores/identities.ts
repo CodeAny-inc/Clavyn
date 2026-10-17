@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
 import type { Identity } from "../types";
+import { useHostsStore } from "./hosts";
 
 export const useIdentitiesStore = defineStore("identities", () => {
   const identities = ref<Identity[]>([]);
@@ -70,6 +71,14 @@ export const useIdentitiesStore = defineStore("identities", () => {
   async function deleteIdentity(id: string) {
     await api.deleteIdentity(id);
     identities.value = identities.value.filter((i) => i.id !== id);
+    useHostsStore().unlinkIdentity(id);
+  }
+
+  // Called when a group is deleted: the backend ungroups its identities too.
+  function ungroup(groupId: string) {
+    identities.value.forEach((i) => {
+      if (i.group_id === groupId) i.group_id = null;
+    });
   }
 
   return {
@@ -81,5 +90,6 @@ export const useIdentitiesStore = defineStore("identities", () => {
     addIdentity,
     updateIdentity,
     deleteIdentity,
+    ungroup,
   };
 });

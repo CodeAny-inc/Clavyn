@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useIdentitiesStore } from "./identities";
+import { useHostsStore } from "./hosts";
 import type { Identity } from "../types";
 
 const mockIdentity: Identity = {
@@ -87,6 +88,25 @@ describe("identities store", () => {
       await store.deleteIdentity("id-1");
       expect(store.identities).toHaveLength(1);
       expect(store.identities.find((i) => i.id === "id-1")).toBeUndefined();
+    });
+
+    it("unlinks hosts that used the identity, as the backend does", async () => {
+      const store = useIdentitiesStore();
+      const hosts = useHostsStore();
+      const host = {
+        label: "Server", hostname: "example.com", port: 22, username: "root",
+        group_id: null, key_id: null, auth: "publickey" as const, tags: [],
+      };
+      hosts.hosts = [
+        { ...host, id: "linked", identity_id: "id-1" },
+        { ...host, id: "other", identity_id: "id-2" },
+      ];
+      await store.load();
+
+      await store.deleteIdentity("id-1");
+
+      expect(hosts.hosts.find((h) => h.id === "linked")?.identity_id).toBeNull();
+      expect(hosts.hosts.find((h) => h.id === "other")?.identity_id).toBe("id-2");
     });
   });
 });
