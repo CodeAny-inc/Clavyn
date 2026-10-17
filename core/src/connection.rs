@@ -101,17 +101,31 @@ const MAC_ALGORITHMS: &[mac::Name] = &[
 ];
 
 /// Opens a TCP connection to the first of `addrs` that answers, trying them in
-/// resolver order, each for at most [`DIAL_ATTEMPT_TIMEOUT`]. On failure the
-/// error names every address with its own reason.
+/// resolver order. Every address but the last gets at most
+/// [`DIAL_ATTEMPT_TIMEOUT`]; the last has nothing left to fall back to, so it
+/// keeps whatever remains of the caller's own timeout, as a single-address host
+/// always did. On failure the error names every address with its own reason.
 ///
 /// The stream has `TCP_NODELAY` set, as OpenSSH does for interactive sessions:
 /// with Nagle's algorithm on, a keystroke sent while the previous one is still
 /// unacknowledged waits for the server's delayed ACK, which adds tens to
 /// hundreds of milliseconds of lag on a high-latency link.
 async fn dial(addrs: &[SocketAddr]) -> std::result::Result<TcpStream, String> {
+    dial_with(addrs, DIAL_ATTEMPT_TIMEOUT).await
+}
+
+async fn dial_with(
+    addrs: &[SocketAddr],
+    attempt_timeout: Duration,
+) -> std::result::Result<TcpStream, String> {
     let mut failures = Vec::with_capacity(addrs.len());
-    for addr in addrs {
-        match tokio::time::timeout(DIAL_ATTEMPT_TIMEOUT, TcpStream::connect(addr)).await {
+    for (index, addr) in addrs.iter().enumerate() {
+        let attempt = if index + 1 == addrs.len() {
+            Ok(TcpStream::connect(addr).await)
+        } else {
+            tokio::time::timeout(attempt_timeout, TcpStream::connect(addr)).await
+        };
+        match attempt {
             Ok(Ok(stream)) => {
                 if let Err(e) = stream.set_nodelay(true) {
                     tracing::warn!("set_nodelay on {addr} failed: {e}");
@@ -121,7 +135,7 @@ async fn dial(addrs: &[SocketAddr]) -> std::result::Result<TcpStream, String> {
             Ok(Err(e)) => failures.push(format!("{addr}: {e}")),
             Err(_) => failures.push(format!(
                 "{addr}: timed out after {}s",
-                DIAL_ATTEMPT_TIMEOUT.as_secs()
+                attempt_timeout.as_secs()
             )),
         }
     }
@@ -425,7 +439,9 @@ fn rejection(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let reason = if partial_success {
+    let reason = if remaining.is_empty() && !partial_success {
+        "the server refused and named no sign-in method it would accept".to_owned()
+    } else if partial_success {
         format!(
             "the server accepted this step but requires another: {accepted}; Clavyn cannot \
              complete multi-step sign-in yet"
@@ -727,6 +743,32 @@ mod tests {
             .expect("the dead address used up the connect timeout")
             .expect("dial the live address");
         assert_eq!(stream.peer_addr().unwrap(), live);
+    }
+
+    #[test]
+    fn a_server_naming_no_methods_is_not_said_to_reject_the_credential() {
+        let error = rejection(
+            &MethodSet::from(&[][..]),
+            false,
+            &[MethodKind::Password, MethodKind::KeyboardInteractive],
+            "password",
+            "password",
+        )
+        .to_string();
+        assert!(!error.contains("rejected the password"), "{error}");
+        assert!(error.contains("named no sign-in method"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_last_address_is_not_cut_short() {
+        // With nothing after it, a slow address keeps the caller's whole
+        // budget: the outer timeout must be what ends this dial.
+        let outcome = tokio::time::timeout(
+            Duration::from_millis(500),
+            dial_with(&[BLACK_HOLE.parse().unwrap()], Duration::from_millis(50)),
+        )
+        .await;
+        assert!(outcome.is_err(), "dial gave up on its own: {outcome:?}");
     }
 
     #[tokio::test]
