@@ -66,6 +66,17 @@ describe("Dialog keyboard and dismissal", () => {
     expect(panel().contains(document.activeElement)).toBe(true);
   });
 
+  it("keeps Shift+Tab inside when the panel itself holds focus", async () => {
+    mountForm();
+    document.getElementById("opener")!.click();
+    await flushPromises();
+    panel().focus();
+    const back = new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true });
+    panel().dispatchEvent(back);
+    expect(back.defaultPrevented).toBe(true);
+    expect(panel().contains(document.activeElement)).toBe(true);
+  });
+
   it("returns focus to the control that opened it", async () => {
     mountForm();
     const opener = document.getElementById("opener")!;

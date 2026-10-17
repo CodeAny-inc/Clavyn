@@ -50,7 +50,9 @@ export function useModalFocus(
     const first = fields[0];
     const last = fields[fields.length - 1];
     const focused = document.activeElement;
-    const inside = !!focused && element.contains(focused);
+    // The panel itself holds focus while every control in it is disabled; it
+    // is outside the control list, so it counts as a boundary both ways.
+    const inside = !!focused && focused !== element && element.contains(focused);
     if (event.shiftKey && (focused === first || !inside)) {
       event.preventDefault();
       last.focus();
