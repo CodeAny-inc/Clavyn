@@ -487,12 +487,12 @@ const colorOptions = [
             </div>
             <button
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="form.autoConnect ? 'bg-primary' : 'bg-muted'"
+              :class="form.autoConnect ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="form.autoConnect = !form.autoConnect"
             >
               <div
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="form.autoConnect ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="form.autoConnect ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>

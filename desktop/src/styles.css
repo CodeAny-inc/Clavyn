@@ -56,7 +56,8 @@
   --muted-foreground: 0 0% 61%;
   --accent: 0 0% 18%;
   --accent-foreground: 0 0% 94%;
-  --destructive: 0 63% 48%;
+  /* Lifted from the light value so red text clears 4.5:1 on the dark surfaces. */
+  --destructive: 0 70% 60%;
   --destructive-foreground: 0 0% 98%;
   --border: 0 0% 22%;
   --input: 0 0% 24%;

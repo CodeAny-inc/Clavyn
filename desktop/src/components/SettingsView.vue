@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from "vue";
 import * as api from "../api";
 import { useUpdateStore } from "../stores/update";
 import { useSettingsStore } from "../stores/settings";
+import type { Appearance } from "../lib/appearance";
 import Button from "./ui/Button.vue";
 import Badge from "./ui/Badge.vue";
 import {
@@ -17,6 +18,7 @@ import {
   ExternalLink,
   Info,
   Shield,
+  Palette,
   Lock,
   Clock,
   EyeOff,
@@ -26,6 +28,12 @@ import {
 const update = useUpdateStore();
 const settings = useSettingsStore();
 const appInfo = ref<api.AppInfo | null>(null);
+
+const appearanceOptions: { value: Appearance; label: string }[] = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
 
 const autoLockOptions = [
   { value: 0, label: "Never" },
@@ -123,6 +131,35 @@ function openReleases() {
         </section>
 
         <section class="rounded-lg border border-border bg-card p-4 sm:p-5">
+          <h3 id="appearance-heading" class="text-[14px] font-semibold mb-4 flex items-center gap-2">
+            <Palette class="size-4 text-muted-foreground" :stroke-width="1.75" />
+            Appearance
+          </h3>
+          <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium">Theme</div>
+              <div class="text-[11px] text-muted-foreground mt-0.5">
+                System follows your operating system, including when it switches on its own. Terminals keep their own dark surface either way.
+              </div>
+            </div>
+            <div class="flex gap-1 p-1 rounded-md bg-muted shrink-0" role="radiogroup" aria-labelledby="appearance-heading">
+              <button
+                v-for="option in appearanceOptions"
+                :key="option.value"
+                type="button"
+                role="radio"
+                :aria-checked="settings.appearance === option.value"
+                class="h-7 rounded px-3 text-[12px] font-medium transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :class="settings.appearance === option.value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="settings.setAppearance(option.value)"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="rounded-lg border border-border bg-card p-4 sm:p-5">
           <h3 class="text-[14px] font-semibold mb-4 flex items-center gap-2">
             <Shield class="size-4 text-muted-foreground" :stroke-width="1.75" />
             Security
@@ -164,12 +201,12 @@ function openReleases() {
               role="switch"
               :aria-checked="settings.lockOnSleep"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.lockOnSleep ? 'bg-primary' : 'bg-muted'"
+              :class="settings.lockOnSleep ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setLockOnSleep(!settings.lockOnSleep)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.lockOnSleep ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.lockOnSleep ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>
@@ -189,12 +226,12 @@ function openReleases() {
               role="switch"
               :aria-checked="settings.maskAddresses"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted'"
+              :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setMaskAddresses(!settings.maskAddresses)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.maskAddresses ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.maskAddresses ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>
@@ -221,12 +258,12 @@ function openReleases() {
               role="switch"
               :aria-checked="settings.screenReaderMode"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted'"
+              :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setScreenReaderMode(!settings.screenReaderMode)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.screenReaderMode ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.screenReaderMode ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>
