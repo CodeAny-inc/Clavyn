@@ -70,8 +70,8 @@ export type SessionOutput = Channel<ArrayBuffer>;
 export const OUTPUT_ACK_THRESHOLD = 256 * 1024;
 /** Longest received output waits to be acknowledged below the threshold. */
 export const OUTPUT_ACK_DELAY_MS = 30;
-/** How many times one failed acknowledgement is retried before giving up. */
-export const OUTPUT_ACK_MAX_RETRIES = 8;
+/** Longest wait between retries of an acknowledgement that failed. */
+export const OUTPUT_ACK_MAX_RETRY_MS = 2000;
 
 /**
  * Reports output bytes as received. An SSH session stops reading from its
@@ -127,13 +127,14 @@ export function sessionOutput(
         // Credit that never reaches the backend is never handed back, and a
         // reader that has run out waits for an acknowledgement no further
         // output will trigger. The bytes go back into the count and are
-        // retried, backing off, until the stream ends.
+        // retried, backing off to OUTPUT_ACK_MAX_RETRY_MS, for as long as the
+        // stream is open: giving up at any point would leave the session
+        // paused for good.
         if (ended) return;
         pending += bytes;
         failures += 1;
-        if (failures > OUTPUT_ACK_MAX_RETRIES) return;
         stopTimer();
-        timer = setTimeout(acknowledge, Math.min(OUTPUT_ACK_DELAY_MS * 2 ** failures, 2000));
+        timer = setTimeout(acknowledge, Math.min(OUTPUT_ACK_DELAY_MS * 2 ** failures, OUTPUT_ACK_MAX_RETRY_MS));
       },
     );
   };

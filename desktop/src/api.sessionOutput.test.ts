@@ -76,6 +76,25 @@ describe("session output acknowledgement", () => {
     ]);
   });
 
+  it("keeps retrying through a long outage", async () => {
+    let fail = true;
+    setInvokeHandler("session_output_ack", () => {
+      if (fail) throw new Error("ipc unavailable");
+    });
+    const { deliver } = open();
+    deliver(OUTPUT_ACK_THRESHOLD);
+    await vi.advanceTimersByTimeAsync(60_000);
+    const attempts = acks().length;
+    expect(attempts).toBeGreaterThan(10);
+
+    fail = false;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(acks().length).toBe(attempts + 1);
+    // Once it went through nothing is left to send.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(acks().length).toBe(attempts + 1);
+  });
+
   it("stops retrying once the stream has ended", async () => {
     setInvokeHandler("session_output_ack", () => {
       throw new Error("session closed");
@@ -118,8 +137,8 @@ describe("session output acknowledgement", () => {
     const { onData, deliver } = open();
     deliver(OUTPUT_ACK_THRESHOLD);
     expect(acks()).toHaveLength(1);
-    // Let the rejection settle; an unhandled one fails the run.
-    await vi.runAllTimersAsync();
+    // Let the rejection and a few retries settle; an unhandled one fails the run.
+    await vi.advanceTimersByTimeAsync(5000);
     deliver(1);
     expect(onData).toHaveBeenCalledTimes(2);
   });
