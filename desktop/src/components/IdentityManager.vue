@@ -268,22 +268,27 @@ async function ensureKey(): Promise<string | null> {
 // second identity.
 async function save() {
   if (!canSave.value || saving.value) return;
+  const session = formSession;
   saving.value = true;
   formError.value = "";
   try {
     await saveIdentity();
   } catch (e) {
-    formError.value = `Failed to save identity: ${e}`;
+    if (session === formSession) formError.value = `Failed to save identity: ${e}`;
   } finally {
     saving.value = false;
   }
 }
 
+// A save can outlive the dialog it started in. Once the session changes, the
+// key and fields it holds belong to a closed dialog, so it writes nothing and
+// leaves the current dialog alone.
 async function saveIdentity() {
+  const session = formSession;
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
     keyId = await ensureKey();
-    if (!keyId) return;
+    if (!keyId || session !== formSession) return;
   }
   const identity: Identity = {
     id: editing.value?.id ?? crypto.randomUUID(),
@@ -302,6 +307,7 @@ async function saveIdentity() {
   } else {
     await identities.addIdentity(identity);
   }
+  if (session !== formSession) return;
   showForm.value = false;
 }
 

@@ -244,4 +244,44 @@ describe("IdentityManager key creation across dialog sessions", () => {
     expect(form().keyId).toBe("");
     wrapper.unmount();
   });
+
+  it("does not save an identity for a dialog that closed while its key was being generated", async () => {
+    setActivePinia(createPinia());
+    setInvokeHandler("list_identities", () => []);
+    setInvokeHandler("list_hosts", () => []);
+    setInvokeHandler("list_groups", () => []);
+    setInvokeHandler("list_keys", () => []);
+    let finishKey!: (key: typeof NEW_KEY) => void;
+    setInvokeHandler("generate_key", () => new Promise((resolve) => { finishKey = resolve; }));
+    setInvokeHandler("add_identity", ({ identity }) => identity);
+    const wrapper = mount(IdentityManager, { global: { stubs: { Teleport: true } } });
+    const button = (text: string) => wrapper.findAll("button").find((b) => b.text() === text)!;
+    const form = () => (wrapper.vm as unknown as { form: { label: string; keyId: string } }).form;
+
+    await button("Add Identity").trigger("click");
+    await wrapper.get("#id-label").setValue("Work");
+    await wrapper.get("#id-username").setValue("deploy");
+    const authSelect = wrapper
+      .findAll("select")
+      .find((s) => s.findAll("option").some((o) => o.attributes("value") === "publickey"))!;
+    await authSelect.setValue("publickey");
+    await button("Generate new").trigger("click");
+    await wrapper.get("#gen-key-label").setValue("laptop");
+    await button("Add identity").trigger("click");
+    await flushPromises();
+    expect(calls("generate_key")).toHaveLength(1);
+
+    await button("Cancel").trigger("click");
+    await button("Add Identity").trigger("click");
+    await wrapper.get("#id-label").setValue("Other");
+
+    finishKey(NEW_KEY);
+    await flushPromises();
+
+    expect(calls("add_identity")).toHaveLength(0);
+    expect(form().label).toBe("Other");
+    expect(form().keyId).toBe("");
+    expect(wrapper.find("#id-label").exists()).toBe(true);
+    wrapper.unmount();
+  });
 });
