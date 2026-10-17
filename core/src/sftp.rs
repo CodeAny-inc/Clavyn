@@ -502,9 +502,10 @@ async fn write_download<R: AsyncRead + Unpin + ?Sized>(
         let mut file = open_download_target(&target, false).await?;
         let written = copy_until(source, &mut file, closed).await;
         if written.is_err() {
-            discard_if_still(&target, &file).await;
+            discard_if_still(&target, file).await;
+        } else {
+            drop(file);
         }
-        drop(file);
         return written.map_err(Into::into);
     };
 
@@ -594,8 +595,9 @@ async fn discard(path: &Path) {
 /// must survive this failure.
 ///
 /// Only Unix exposes a file's identity on stable Rust; elsewhere the path is
-/// removed as before.
-async fn discard_if_still(path: &Path, file: &tokio::fs::File) {
+/// removed as before. The handle is closed before the removal either way, so
+/// it never depends on the file having been opened with delete sharing.
+async fn discard_if_still(path: &Path, file: tokio::fs::File) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -609,8 +611,7 @@ async fn discard_if_still(path: &Path, file: &tokio::fs::File) {
             return;
         }
     }
-    #[cfg(not(unix))]
-    let _ = file;
+    drop(file);
     discard(path).await;
 }
 
