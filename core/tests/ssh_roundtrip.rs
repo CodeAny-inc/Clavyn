@@ -432,10 +432,12 @@ impl server::Handler for SignInServer {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        let methods: &[MethodKind] = match self.mode {
+            SignIn::KeyboardInteractive => &[MethodKind::Password, MethodKind::KeyboardInteractive],
+            _ => &[MethodKind::Password, MethodKind::PublicKey],
+        };
         Ok(Auth::Reject {
-            proceed_with_methods: Some(MethodSet::from(
-                &[MethodKind::Password, MethodKind::PublicKey][..],
-            )),
+            proceed_with_methods: Some(MethodSet::from(methods)),
             partial_success: false,
         })
     }
@@ -524,6 +526,23 @@ async fn a_password_is_answered_through_keyboard_interactive() {
     .await
     .expect("keyboard-interactive password auth");
     assert_eq!(*responses.lock().unwrap(), [PASSWORD]);
+}
+
+/// A password rejected through `password` is not tried again through
+/// `keyboard-interactive`, which checks the same credential.
+#[tokio::test]
+async fn a_rejected_password_is_not_sent_a_second_time() {
+    let server = SignInServer::new(SignIn::KeyboardInteractive);
+    let responses = server.responses.clone();
+    let port = start_sign_in_server(
+        &[MethodKind::Password, MethodKind::KeyboardInteractive],
+        server,
+    )
+    .await;
+
+    let error = password_error(port, PASSWORD).await;
+    assert!(error.contains("rejected the password"), "{error}");
+    assert!(responses.lock().unwrap().is_empty());
 }
 
 /// The password is never handed to a round that also asks for something else.

@@ -301,11 +301,14 @@ fn auth_error(e: russh::Error) -> CoreError {
     CoreError::Ssh(format!("auth: {e}"))
 }
 
-/// Signs in with a password the way OpenSSH does: a `none` request first to
-/// learn which methods the server accepts, then `password` if it is offered,
-/// and `keyboard-interactive` if it is offered and `password` is not, or did
-/// not succeed. Servers that leave password checks to PAM often disable
-/// `password` and ask for the password through `keyboard-interactive`.
+/// Signs in with a password: a `none` request first to learn which methods the
+/// server accepts, then `password` if it is offered, otherwise
+/// `keyboard-interactive`. Servers that leave password checks to PAM often
+/// disable `password` and ask for the password through `keyboard-interactive`.
+///
+/// A password the server rejected through `password` is not sent again through
+/// `keyboard-interactive`: both check the same credential, and a second attempt
+/// only counts twice against `MaxAuthTries` and tools such as fail2ban.
 async fn authenticate_with_password(
     session: &mut Handle<SshHandler>,
     username: &str,
@@ -321,27 +324,19 @@ async fn authenticate_with_password(
             remaining_methods, ..
         } => remaining_methods,
     };
-    let mut outcome = AuthResult::Failure {
-        remaining_methods: methods.clone(),
-        partial_success: false,
-    };
     if methods.contains(&MethodKind::Password) {
-        outcome = session
+        return session
             .authenticate_password(username, password)
             .await
-            .map_err(auth_error)?;
-        match &outcome {
-            AuthResult::Failure {
-                remaining_methods,
-                partial_success: false,
-            } if remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
-            _ => return Ok(outcome),
-        }
+            .map_err(auth_error);
     }
     if methods.contains(&MethodKind::KeyboardInteractive) {
-        outcome = keyboard_interactive_password(session, username, password).await?;
+        return keyboard_interactive_password(session, username, password).await;
     }
-    Ok(outcome)
+    Ok(AuthResult::Failure {
+        remaining_methods: methods,
+        partial_success: false,
+    })
 }
 
 /// Answers a keyboard-interactive exchange with the password, as OpenSSH does
