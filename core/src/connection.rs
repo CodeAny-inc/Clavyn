@@ -733,8 +733,25 @@ mod tests {
     /// rather than refused wherever there is a default route.
     const BLACK_HOLE: &str = "10.255.255.1:22";
 
+    /// Whether [`BLACK_HOLE`] really swallows the handshake here. A network
+    /// that rejects it at once would make the dial tests pass or fail for the
+    /// wrong reason, so they skip themselves there.
+    async fn black_hole_is_silent() -> bool {
+        let silent =
+            tokio::time::timeout(Duration::from_millis(300), TcpStream::connect(BLACK_HOLE))
+                .await
+                .is_err();
+        if !silent {
+            eprintln!("skipped: {BLACK_HOLE} does not swallow connections on this network");
+        }
+        silent
+    }
+
     #[tokio::test]
     async fn a_silent_address_does_not_hold_up_the_next_one() {
+        if !black_hole_is_silent().await {
+            return;
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let live = listener.local_addr().unwrap();
         let addrs = [BLACK_HOLE.parse().unwrap(), live];
@@ -761,6 +778,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_last_address_is_not_cut_short() {
+        if !black_hole_is_silent().await {
+            return;
+        }
         // With nothing after it, a slow address keeps the caller's whole
         // budget: the outer timeout must be what ends this dial.
         let outcome = tokio::time::timeout(
