@@ -37,6 +37,19 @@ describe("VaultUnlockModal", () => {
     expect(title.text()).toBe("Unlock Vault");
   });
 
+  it("closes on Escape wherever focus is inside it", async () => {
+    vi.spyOn(useVaultStore(), "refreshBiometricState").mockResolvedValue(undefined);
+    const ui = useUiStore();
+    const request = ui.requestVaultUnlock().catch(() => "cancelled");
+    await flushPromises();
+
+    const cancel = wrapper.findAll("button").find((b) => b.text() === "Cancel")!;
+    await cancel.trigger("keydown", { key: "Escape" });
+    await flushPromises();
+    expect(ui.showVaultUnlockModal).toBe(false);
+    await request;
+  });
+
   it("offers Touch ID for the SSH unlock flow and resolves on success", async () => {
     const vault = useVaultStore();
     const ui = useUiStore();

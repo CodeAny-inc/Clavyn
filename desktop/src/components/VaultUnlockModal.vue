@@ -113,6 +113,7 @@ function cancel() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="vault-unlock-title"
+        @keydown.escape.stop="cancel"
       >
         <div class="flex items-center gap-3 mb-4">
           <div class="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 shrink-0">
@@ -158,7 +159,6 @@ function cancel() {
             placeholder="Enter master passphrase"
             :disabled="loading !== null"
             @keydown.enter="submit()"
-            @keydown.escape="cancel"
           />
         </FormGroup>
 
