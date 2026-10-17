@@ -282,11 +282,8 @@ impl SessionManager {
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
                     let batch = batcher.batch();
-                    // Spent before the batch is handed over, so an
-                    // acknowledgement can never arrive ahead of the spend
-                    // it pays back.
-                    credit.spend(batch.len());
                     data_cb(&sid, batch);
+                    credit.spend(batch.len());
                     batcher.mark_flushed(Instant::now());
                 }
             };

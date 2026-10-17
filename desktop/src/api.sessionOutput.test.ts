@@ -57,6 +57,36 @@ describe("session output acknowledgement", () => {
     ]);
   });
 
+  it("retries an acknowledgement that failed, so the reader is not left waiting", async () => {
+    let fail = true;
+    setInvokeHandler("session_output_ack", () => {
+      if (fail) throw new Error("ipc unavailable");
+    });
+    const { deliver } = open();
+    deliver(OUTPUT_ACK_THRESHOLD);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acks()).toEqual([{ sessionId: "s1", bytes: OUTPUT_ACK_THRESHOLD }]);
+
+    // No further output arrives, so only a retry can hand the credit back.
+    fail = false;
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(acks()).toEqual([
+      { sessionId: "s1", bytes: OUTPUT_ACK_THRESHOLD },
+      { sessionId: "s1", bytes: OUTPUT_ACK_THRESHOLD },
+    ]);
+  });
+
+  it("stops retrying once the stream has ended", async () => {
+    setInvokeHandler("session_output_ack", () => {
+      throw new Error("session closed");
+    });
+    const { deliver } = open();
+    deliver(OUTPUT_ACK_THRESHOLD);
+    deliver(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(acks()).toHaveLength(1);
+  });
+
   it("acknowledges each session's output under its own id", () => {
     const first = open("first");
     const second = open("second");

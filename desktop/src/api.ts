@@ -70,6 +70,8 @@ export type SessionOutput = Channel<ArrayBuffer>;
 export const OUTPUT_ACK_THRESHOLD = 256 * 1024;
 /** Longest received output waits to be acknowledged below the threshold. */
 export const OUTPUT_ACK_DELAY_MS = 30;
+/** How many times one failed acknowledgement is retried before giving up. */
+export const OUTPUT_ACK_MAX_RETRIES = 8;
 
 /**
  * Reports output bytes as received. An SSH session stops reading from its
@@ -105,6 +107,8 @@ export function sessionOutput(
 ): SessionOutput {
   const channel: SessionOutput = new Channel();
   let pending = 0;
+  let failures = 0;
+  let ended = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const stopTimer = () => {
     if (timer !== null) clearTimeout(timer);
@@ -114,14 +118,29 @@ export function sessionOutput(
     stopTimer();
     const bytes = pending;
     pending = 0;
-    // A lost acknowledgement leaves the session paused at worst; it is not
-    // something the pane can act on, so it must not surface as an unhandled
-    // rejection.
-    if (bytes > 0) sessionOutputAck(sessionId, bytes).catch(() => {});
+    if (bytes === 0) return;
+    sessionOutputAck(sessionId, bytes).then(
+      () => {
+        failures = 0;
+      },
+      () => {
+        // Credit that never reaches the backend is never handed back, and a
+        // reader that has run out waits for an acknowledgement no further
+        // output will trigger. The bytes go back into the count and are
+        // retried, backing off, until the stream ends.
+        if (ended) return;
+        pending += bytes;
+        failures += 1;
+        if (failures > OUTPUT_ACK_MAX_RETRIES) return;
+        stopTimer();
+        timer = setTimeout(acknowledge, Math.min(OUTPUT_ACK_DELAY_MS * 2 ** failures, 2000));
+      },
+    );
   };
   channel.onmessage = (message) => {
     const bytes = new Uint8Array(message);
     if (bytes.length === 0) {
+      ended = true;
       stopTimer();
       pending = 0;
       onEnd();

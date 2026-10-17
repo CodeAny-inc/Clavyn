@@ -48,10 +48,9 @@ pub struct SftpManager {
 struct SftpConnection {
     handle: Handle<connection::SshHandler>,
     sftp: SftpSession,
-    /// Flipped once the connection is closed. Every operation watches it and
-    /// stops, so one that is stuck behind a peer that stopped reading, or
-    /// simply still running, cannot outlive the close or report success
-    /// after it.
+    /// Flipped once the connection is closed. Listings and transfers watch it
+    /// and stop, so one that is stuck behind a peer that stopped reading, or
+    /// simply still running, cannot outlive the close.
     closed: tokio::sync::watch::Sender<bool>,
 }
 
@@ -70,8 +69,8 @@ impl SftpConnection {
         }
     }
 
-    /// Stop every request, listing and transfer on this connection, end the
-    /// SFTP channel, then the connection. Bounded, so an unresponsive peer cannot
+    /// Stop every listing and transfer on this connection, end the SFTP
+    /// channel, then the connection. Bounded, so an unresponsive peer cannot
     /// hold the caller.
     async fn close(&self) {
         self.closed.send_replace(true);
@@ -225,13 +224,10 @@ impl SftpManager {
     pub async fn canonicalize(&self, session_id: &str, path: &str) -> Result<String> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .canonicalize(path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("canonicalize: {e}")))
-        })
-        .await
+        conn.sftp
+            .canonicalize(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("canonicalize: {e}")))
     }
 
     /// Read a file's contents into a byte vector.
@@ -241,13 +237,10 @@ impl SftpManager {
     pub async fn read_file(&self, session_id: &str, path: &str) -> Result<Vec<u8>> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .read(path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("read file: {e}")))
-        })
-        .await
+        conn.sftp
+            .read(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("read file: {e}")))
     }
 
     /// Write data to a remote file (creates or overwrites).
@@ -257,13 +250,10 @@ impl SftpManager {
     pub async fn write_file(&self, session_id: &str, path: &str, data: &[u8]) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .write(path, data)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("write file: {e}")))
-        })
-        .await
+        conn.sftp
+            .write(path, data)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("write file: {e}")))
     }
 
     /// Stream a remote file directly to a local path. An existing local file is
@@ -336,39 +326,30 @@ impl SftpManager {
     pub async fn create_dir(&self, session_id: &str, path: &str) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .create_dir(path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("mkdir: {e}")))
-        })
-        .await
+        conn.sftp
+            .create_dir(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("mkdir: {e}")))
     }
 
     /// Remove a file.
     pub async fn remove_file(&self, session_id: &str, path: &str) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .remove_file(path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("remove file: {e}")))
-        })
-        .await
+        conn.sftp
+            .remove_file(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("remove file: {e}")))
     }
 
     /// Remove a directory.
     pub async fn remove_dir(&self, session_id: &str, path: &str) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .remove_dir(path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("remove dir: {e}")))
-        })
-        .await
+        conn.sftp
+            .remove_dir(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("remove dir: {e}")))
     }
 
     /// Rename a file or directory.
@@ -380,13 +361,10 @@ impl SftpManager {
     ) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            conn.sftp
-                .rename(old_path, new_path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("rename: {e}")))
-        })
-        .await
+        conn.sftp
+            .rename(old_path, new_path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("rename: {e}")))
     }
 
     /// Get file metadata (size, permissions, modified time).
@@ -394,13 +372,10 @@ impl SftpManager {
         let conn = self.get(session_id).await?;
 
         let attrs = conn
-            .until_closed(async {
-                conn.sftp
-                    .metadata(path)
-                    .await
-                    .map_err(|e| CoreError::Ssh(format!("stat: {e}")))
-            })
-            .await?;
+            .sftp
+            .metadata(path)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("stat: {e}")))?;
 
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         let modified = attrs
