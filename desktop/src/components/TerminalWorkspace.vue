@@ -125,5 +125,8 @@ onBeforeUnmount(() => {
 /* The 1px gaps between panes show the workspace's seam tone; the divider's
    wider grab area lights up in muted ink rather than the app's accent. */
 .pane-divider { transition: background-color 120ms ease-out; }
-.pane-divider:hover, .pane-divider:focus-visible { background: color-mix(in srgb, var(--terminal-ink-muted) 45%, transparent); }
+.pane-divider:hover { background: color-mix(in srgb, var(--terminal-ink-muted) 45%, transparent); }
+/* A keyboard user resizing by arrow keys needs to see which divider has
+   focus, so it gets a solid ring in full ink, not just the hover tint. */
+.pane-divider:focus-visible { background: color-mix(in srgb, var(--terminal-ink) 55%, transparent); box-shadow: 0 0 0 2px var(--terminal-ink); }
 </style>

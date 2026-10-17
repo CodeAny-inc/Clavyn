@@ -646,7 +646,9 @@ function selectAction(id: string) {
 <style scoped>
 .terminal-pane { background: var(--terminal-background); transition: box-shadow 180ms ease-out, opacity 160ms ease-out; }
 .pane-dragging { opacity: 0.5; }
-.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--workspace-accent) 70%, transparent); }
+/* Drop previews sit on the terminal surface, which is dark in both themes, so
+   they use the terminal's ink rather than the app's theme-dependent accent. */
+.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--terminal-ink) 70%, transparent); }
 /* The header sits on the terminal's own surface; the active pane is told
    apart by tone (a lifted header, full-strength ink) and the others by dimming
    their output, not by a coloured rule. */
@@ -675,17 +677,17 @@ function selectAction(id: string) {
 @keyframes drop-overlay-in { from { opacity: 0; } }
 .drop-zone { @apply absolute flex items-center justify-center opacity-0; transition: opacity 140ms ease-out; }
 .drop-zone::before { content: ""; @apply absolute inset-0; transition: clip-path 160ms cubic-bezier(0.23, 1, 0.32, 1); }
-.drop-zone span { @apply rounded-full bg-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground opacity-0 shadow-lg backdrop-blur-sm; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
+.drop-zone span { @apply rounded-full px-2.5 py-1 text-[11px] font-medium opacity-0; background: var(--terminal-ink); color: var(--terminal-background); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
 .drop-zone-active { @apply opacity-100; }
 .drop-zone-top { @apply left-0 right-0 top-0 h-1/3; }
 .drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3; }
 .drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3; }
 .drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3; }
 .drop-zone-center { @apply inset-1/3; }
-/* Zone previews share the workspace accent used by the active-pane underline
-   and the reorder caret, so every drag affordance reads as one system. */
-.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
-.drop-zone-center::before { background: color-mix(in srgb, var(--workspace-accent) 28%, transparent); border-radius: 8px; }
+/* Zone previews and their labels use the terminal's ink, the one tone that
+   reads on the pane's surface in either app theme. */
+.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--terminal-ink) 16%, transparent); }
+.drop-zone-center::before { background: color-mix(in srgb, var(--terminal-ink) 22%, transparent); border-radius: 8px; }
 .drop-zone-top::before { clip-path: inset(0 0 100% 0); }
 .drop-zone-bottom::before { clip-path: inset(100% 0 0 0); }
 .drop-zone-left::before { clip-path: inset(0 100% 0 0); }
