@@ -307,14 +307,15 @@ const showBiometricButton = computed(
               Unlock
             </Button>
 
-            <!-- Forgot-passphrase escape hatch. Reset only needs the master
-                 passphrase to authorize, so it is reachable without unlocking. -->
+            <!-- Reset is reachable without unlocking, but it still needs the
+                 master passphrase to authorize, so it is not offered as a
+                 forgotten-passphrase recovery. -->
             <button
               type="button"
               class="self-start text-[12px] text-muted-foreground underline-offset-2 hover:underline hover:text-destructive transition-colors"
               @click="resetMode = true"
             >
-              Forgot passphrase? Reset vault
+              Reset vault…
             </button>
           </template>
         </div>

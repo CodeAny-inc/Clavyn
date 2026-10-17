@@ -26,6 +26,11 @@ defineEmits<{
         Resetting the vault <strong class="text-destructive">permanently deletes all stored SSH keys and credentials</strong>
         and closes every open session and terminal.
         This cannot be undone. Enter your master passphrase to confirm.
+        <p class="mt-2">
+          A forgotten passphrase cannot be recovered or bypassed: the vault is
+          encrypted with it alone. To start over without it, quit Clavyn and
+          delete <code class="select-text">vault.json</code> from Clavyn's data folder.
+        </p>
       </div>
     </div>
     <FormGroup>
