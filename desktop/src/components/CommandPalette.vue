@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, useId } from "vue";
 import {
   Server,
   Terminal,
@@ -13,10 +13,16 @@ import {
   Settings,
   RefreshCw,
   ArrowUpCircle,
+  HardDrive,
+  Lock,
 } from "lucide-vue-next";
 import { cn } from "../lib/cn";
 import { useTabsStore } from "../stores/tabs";
 import { useUpdateStore } from "../stores/update";
+import { useHostsStore } from "../stores/hosts";
+import { useVaultStore } from "../stores/vault";
+import { useMaskedAddress } from "../composables/useMaskedAddress";
+import type { Host } from "../types";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{
@@ -26,15 +32,31 @@ const emit = defineEmits<{
 
 const tabs = useTabsStore();
 const update = useUpdateStore();
+const hosts = useHostsStore();
+const vault = useVaultStore();
+const { maskAddress } = useMaskedAddress();
+const listId = useId();
 const query = ref("");
 const selectedIndex = ref(0);
 const inputRef = ref<HTMLInputElement | null>(null);
 
+interface Command {
+  id: string;
+  label: string;
+  icon: unknown;
+  group: string;
+  /** Extra text a search matches but the row does not show. */
+  keywords?: string;
+  detail?: string;
+  host?: Host;
+}
+
 const baseCommands = computed(() => {
-  const cmds = [
+  const cmds: Command[] = [
     { id: "hosts", label: "Go to Hosts", icon: Server, group: "Navigation" },
     { id: "identities", label: "Go to Identities", icon: UserCircle, group: "Navigation" },
     { id: "terminal", label: "Go to Terminal", icon: Terminal, group: "Navigation" },
+    { id: "files", label: "Go to Files", icon: HardDrive, group: "Navigation", keywords: "sftp" },
     { id: "keys", label: "Go to Keys", icon: KeyRound, group: "Navigation" },
     { id: "workspaces", label: "Go to Workspaces", icon: FolderOpen, group: "Navigation" },
     { id: "known-hosts", label: "Go to Known Hosts", icon: ShieldCheck, group: "Navigation" },
@@ -43,6 +65,22 @@ const baseCommands = computed(() => {
     { id: "new-terminal", label: "New Terminal Tab", icon: Plus, group: "Actions" },
     { id: "check-updates", label: "Check for Updates", icon: RefreshCw, group: "Actions" },
   ];
+  if (vault.unlocked) {
+    cmds.push({ id: "lock-vault", label: "Lock Vault", icon: Lock, group: "Actions" });
+  }
+  // Every saved host can be opened from here; the search also matches its
+  // address and tags, which are not shown so a masked address stays masked.
+  for (const host of hosts.hosts) {
+    cmds.push({
+      id: `host:${host.id}`,
+      label: `Connect to ${host.label}`,
+      icon: Server,
+      group: "Hosts",
+      keywords: [host.hostname, ...host.tags].join(" "),
+      detail: maskAddress(host.hostname),
+      host,
+    });
+  }
   if (update.available) {
     cmds.push({
       id: "show-update",
@@ -56,9 +94,16 @@ const baseCommands = computed(() => {
 
 const filteredCommands = computed(() => {
   if (!query.value.trim()) return baseCommands.value;
-  const q = query.value.toLowerCase();
-  return baseCommands.value.filter((c) => c.label.toLowerCase().includes(q));
+  const q = query.value.trim().toLowerCase();
+  return baseCommands.value.filter((c) => `${c.label} ${c.keywords ?? ""}`.toLowerCase().includes(q));
 });
+
+// A new query is a new list, so the highlight starts over at its top.
+watch(query, () => {
+  selectedIndex.value = 0;
+});
+
+const optionId = (index: number) => `${listId}-option-${index}`;
 
 watch(
   () => props.open,
@@ -71,8 +116,14 @@ watch(
   },
 );
 
-function execute(cmd: { id: string }) {
-  if (cmd.id === "new-terminal") {
+function execute(cmd: Command) {
+  if (cmd.host) {
+    tabs.newTab(cmd.host);
+    emit("navigate", "terminal");
+  } else if (cmd.id === "lock-vault") {
+    void vault.lock();
+    emit("close");
+  } else if (cmd.id === "new-terminal") {
     tabs.newTab();
     emit("navigate", "terminal");
   } else if (cmd.id === "check-updates") {
@@ -120,7 +171,13 @@ function handleKeydown(e: KeyboardEvent) {
             <input
               ref="inputRef"
               v-model="query"
-              placeholder="Search commands..."
+              role="combobox"
+              aria-label="Search commands and hosts"
+              aria-autocomplete="list"
+              :aria-expanded="true"
+              :aria-controls="listId"
+              :aria-activedescendant="filteredCommands.length ? optionId(selectedIndex) : undefined"
+              placeholder="Search commands and hosts..."
               class="flex-1 bg-transparent text-[14px] text-foreground placeholder:text-muted-foreground outline-none"
               @keydown="handleKeydown"
             />
@@ -128,10 +185,13 @@ function handleKeydown(e: KeyboardEvent) {
           </div>
 
           <!-- Results -->
-          <div class="max-h-[360px] overflow-y-auto p-1.5">
+          <div :id="listId" role="listbox" aria-label="Commands" class="max-h-[360px] overflow-y-auto p-1.5">
             <div
               v-for="(cmd, i) in filteredCommands"
+              :id="optionId(i)"
               :key="cmd.id"
+              role="option"
+              :aria-selected="i === selectedIndex"
               class="flex h-[49px] items-center gap-2.5 rounded-md px-2.5 cursor-pointer transition-colors duration-100"
               :class="cn(
                 i === selectedIndex ? 'bg-muted' : 'hover:bg-muted/50',
@@ -144,7 +204,8 @@ function handleKeydown(e: KeyboardEvent) {
                 class="size-4 text-muted-foreground shrink-0"
                 :stroke-width="1.75"
               />
-              <span class="flex-1 text-[13px] text-foreground">{{ cmd.label }}</span>
+              <span class="flex-1 min-w-0 truncate text-[13px] text-foreground">{{ cmd.label }}</span>
+              <span v-if="cmd.detail" class="hidden sm:inline font-mono text-[11px] text-muted-foreground">{{ cmd.detail }}</span>
               <span class="text-[11px] text-muted-foreground">{{ cmd.group }}</span>
             </div>
             <div v-if="!filteredCommands.length" class="py-8 text-center text-[13px] text-muted-foreground">

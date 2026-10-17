@@ -56,7 +56,7 @@ function delay(command = "connect_ssh") {
 async function palette() {
   useUiStore().commandPaletteOpen = true;
   await nextTick(); await nextTick();
-  const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[placeholder="Search commands..."]')!);
+  const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[role="combobox"]')!);
   await input.setValue("Go to ");
   expect(document.activeElement).toBe(input.element);
   return input;
