@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import { useSftpStore } from "./sftp";
@@ -54,5 +54,24 @@ describe("SFTP transfers", () => {
       remotePath: "/home/deploy/report.txt",
       overwrite: true,
     });
+  });
+
+  it("clears the spinner when a download from a replaced session settles", async () => {
+    let finishDownload!: () => void;
+    setInvokeHandler("sftp_download_to_local", () => new Promise<boolean>(resolve => {
+      finishDownload = () => resolve(true);
+    }));
+    const sftp = useSftpStore();
+    const download = sftp.downloadFile({ sessionId: sftp.sessionId!, dir: "/home/deploy", entry: file });
+    await vi.waitFor(() => expect(calls("sftp_download_to_local")).toHaveLength(1));
+
+    await sftp.disconnect();
+    await sftp.connect(host, "SECRET", "deploy");
+    await sftp.listDir("/home/deploy");
+    expect(sftp.loading).toBe(false);
+
+    finishDownload();
+    await download;
+    expect(sftp.loading).toBe(false);
   });
 });

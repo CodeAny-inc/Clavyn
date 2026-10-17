@@ -112,6 +112,16 @@ describe("per-entry actions keep the directory the entry was listed from", () =>
     await expect(sftp.deleteEntry(captured)).rejects.toThrow("no longer open");
     expect(calls("sftp_remove_file")).toHaveLength(0);
   });
+
+  it("reports an action on a closed session through the store error", async () => {
+    const sftp = await connect();
+    const captured = refOf(sftp, notes);
+    await sftp.disconnect();
+
+    await expect(sftp.deleteEntry(captured)).rejects.toThrow("Not connected");
+    expect(sftp.error).toBe("Not connected");
+    expect(calls("sftp_remove_file")).toHaveLength(0);
+  });
 });
 
 describe("only the latest listing publishes", () => {
@@ -167,6 +177,31 @@ describe("only the latest listing publishes", () => {
     await stale;
     expect(sftp.currentPath).toBe("/home/u");
     expect(sftp.entries.map(e => e.name)).toEqual(["docs", "notes.txt"]);
+    expect(sftp.loading).toBe(false);
+  });
+
+  it("re-lists the browsed directory when a navigation away from it fails after a change", async () => {
+    const sftp = await connect();
+    let failNavigation!: (reason: Error) => void;
+    setInvokeHandler("sftp_list_dir", ({ path }: { path: string }) => {
+      if (path === "/home/u/docs") {
+        return new Promise<SftpEntry[]>((_, reject) => { failNavigation = reject; });
+      }
+      return listings[path] ?? [];
+    });
+
+    const navigation = sftp.listDir("/home/u/docs");
+    listings["/home/u"] = [docs];
+    await sftp.deleteEntry(refOf(sftp, notes));
+    const listingsBefore = calls("sftp_list_dir").length;
+
+    failNavigation(new Error("permission denied"));
+    await expect(navigation).rejects.toThrow("permission denied");
+    await vi.waitFor(() => expect(sftp.entries.map(e => e.name)).toEqual(["docs"]));
+
+    expect(calls("sftp_list_dir").slice(listingsBefore).map(([, args]) => args.path)).toEqual(["/home/u"]);
+    expect(sftp.currentPath).toBe("/home/u");
+    expect(sftp.error).toContain("permission denied");
     expect(sftp.loading).toBe(false);
   });
 

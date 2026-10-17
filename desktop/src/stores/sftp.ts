@@ -148,10 +148,27 @@ export const useSftpStore = defineStore("sftp", () => {
   let listGeneration = 0;
   let listPending = false;
   let destinationPath = "/";
-  let transfers = 0;
+  // Active transfers per session. A transfer that outlives its session must not
+  // keep the spinner on for the session that replaced it.
+  const transfers = new Map<string, number>();
+  // A directory whose refresh was skipped because a navigation was in flight, and
+  // whose listing may therefore be stale if that navigation fails.
+  let staleDir: string | null = null;
 
   function settleLoading() {
-    loading.value = listPending || transfers > 0;
+    loading.value = listPending || (transfers.get(sessionId.value ?? "") ?? 0) > 0;
+  }
+
+  function beginTransfer(id: string) {
+    transfers.set(id, (transfers.get(id) ?? 0) + 1);
+    loading.value = true;
+  }
+
+  function endTransfer(id: string) {
+    const remaining = (transfers.get(id) ?? 1) - 1;
+    if (remaining > 0) transfers.set(id, remaining);
+    else transfers.delete(id);
+    settleLoading();
   }
 
   async function listDir(path: string) {
@@ -168,10 +185,18 @@ export const useSftpStore = defineStore("sftp", () => {
       entries.value = listed;
       currentPath.value = path;
       selectedEntry.value = null;
+      if (staleDir === path) staleDir = null;
     } catch (e) {
       if (request !== listGeneration || id !== sessionId.value) return;
       destinationPath = currentPath.value;
       error.value = String(e);
+      if (staleDir === currentPath.value) {
+        staleDir = null;
+        // The relisting clears `error`, so the navigation's failure is restored
+        // right after it starts.
+        void listDir(currentPath.value).catch(() => {});
+        error.value = String(e);
+      }
       throw e;
     } finally {
       if (request === listGeneration) {
@@ -184,14 +209,22 @@ export const useSftpStore = defineStore("sftp", () => {
   // A change re-lists its directory only while the browser is still there;
   // once the user has navigated elsewhere the refresh would undo that.
   async function refreshAfterChange(id: string, dir: string) {
-    if (sessionId.value === id && destinationPath === dir) await listDir(dir);
+    if (sessionId.value !== id) return;
+    if (destinationPath === dir) {
+      await listDir(dir);
+    } else if (currentPath.value === dir) {
+      staleDir = dir;
+    }
   }
 
   // Per-entry actions resolve against the directory and session the entry was
   // listed from, never against whatever the browser shows when the action
   // runs, so a navigation that lands in between cannot retarget them.
   function requireTarget(target: SftpEntryRef): string {
-    if (!sessionId.value) throw new Error("Not connected");
+    if (!sessionId.value) {
+      error.value = "Not connected";
+      throw new Error("Not connected");
+    }
     if (target.sessionId !== sessionId.value) {
       const message = "This entry belongs to an SFTP session that is no longer open.";
       error.value = message;
@@ -248,16 +281,14 @@ export const useSftpStore = defineStore("sftp", () => {
     const id = requireTarget(target);
     const fullPath = joinPath(target.dir, target.entry.name);
     error.value = null;
-    transfers += 1;
-    loading.value = true;
+    beginTransfer(id);
     try {
       await api.sftpDownloadToLocal(id, fullPath);
     } catch (e) {
       error.value = String(e);
       throw e;
     } finally {
-      transfers -= 1;
-      if (id === sessionId.value) settleLoading();
+      endTransfer(id);
     }
   }
 
@@ -270,8 +301,7 @@ export const useSftpStore = defineStore("sftp", () => {
     if (!id) throw new Error("Not connected");
     const dir = currentPath.value;
     error.value = null;
-    transfers += 1;
-    loading.value = true;
+    beginTransfer(id);
     try {
       await api.sftpUploadFromLocal(
         id,
@@ -283,8 +313,7 @@ export const useSftpStore = defineStore("sftp", () => {
       error.value = String(e);
       throw e;
     } finally {
-      transfers -= 1;
-      if (id === sessionId.value) settleLoading();
+      endTransfer(id);
     }
     await refreshAfterChange(id, dir);
   }
