@@ -32,7 +32,7 @@ const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
 const settings = useSettingsStore();
-const { maskAddress } = useMaskedAddress();
+const { maskAddress, maskHostsIn } = useMaskedAddress();
 const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
@@ -520,7 +520,8 @@ async function connectSession() {
     }
     fit();
   } catch (cause) {
-    if (!disposed) writeError(`Connection failed: ${String(cause)}`);
+    // Backend errors can name the host; keep it masked like the header.
+    if (!disposed) writeError(maskHostsIn(`Connection failed: ${String(cause)}`, [hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname]));
   } finally {
     releaseOutput(pendingOutput);
     pendingOutput = null;

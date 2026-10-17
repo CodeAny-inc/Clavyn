@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed, watch } from "vue";
 import * as api from "../api";
 import { useKeysStore } from "./keys";
+import { useSftpStore } from "./sftp";
 
 const RESET_DURABILITY_ERROR_MARKER = "[vault-reset-durability]";
 const ROLLBACK_ERROR_MARKER = "[vault-rollback]";
@@ -21,9 +22,13 @@ export const useVaultStore = defineStore("vault", () => {
   const error = ref<string | null>(null);
   const biometricAvailable = ref(false);
   const biometricEnabled = ref(false);
+  // The last status probe failed, so `initialized` is not an answer. Setup is
+  // never offered in that state: a vault may exist that the probe could not see.
+  const statusUnavailable = ref(false);
   const keysStore = useKeysStore();
+  const sftpStore = useSftpStore();
 
-  const needsSetup = computed(() => !initialized.value);
+  const needsSetup = computed(() => !initialized.value && !statusUnavailable.value);
   const needsUnlock = computed(
     () => initialized.value && !unlocked.value,
   );
@@ -45,12 +50,15 @@ export const useVaultStore = defineStore("vault", () => {
   function publishDestroyedVaultState() {
     ++biometricStateRevision;
     initialized.value = false;
+    statusUnavailable.value = false;
     unlocked.value = false;
     biometricEnabled.value = false;
     // Key metadata is derived from the encrypted vault. Once reset crosses the
     // destructive boundary, retaining it would let host/identity forms offer
     // key IDs that no longer exist in the backend.
     keysStore.clear();
+    // Reset has already closed every SFTP session in the backend.
+    sftpStore.forgetConnection();
   }
 
   function mutateBiometricState(operation: () => Promise<void>): Promise<void> {
@@ -109,10 +117,19 @@ export const useVaultStore = defineStore("vault", () => {
     // snapshot also keeps needsSetup/needsUnlock from observing a half-applied
     // status where `initialized` has moved but `unlocked` still holds the
     // answer from the previous check.
-    const [vaultInitialized, vaultUnlocked] = await Promise.all([
-      api.vaultIsInitialized(),
-      api.isVaultUnlocked(),
-    ]);
+    let vaultInitialized: boolean;
+    let vaultUnlocked: boolean;
+    try {
+      [vaultInitialized, vaultUnlocked] = await Promise.all([
+        api.vaultIsInitialized(),
+        api.isVaultUnlocked(),
+      ]);
+    } catch (e) {
+      statusUnavailable.value = true;
+      error.value = String(e);
+      return;
+    }
+    statusUnavailable.value = false;
     initialized.value = vaultInitialized;
     unlocked.value = vaultUnlocked;
 
@@ -274,6 +291,7 @@ export const useVaultStore = defineStore("vault", () => {
     error,
     biometricAvailable,
     biometricEnabled,
+    statusUnavailable,
     needsSetup,
     needsUnlock,
     checkStatus,

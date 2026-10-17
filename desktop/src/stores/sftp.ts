@@ -340,6 +340,18 @@ export const useSftpStore = defineStore("sftp", () => {
     }
   }
 
+  // Drops the published session and invalidates any pending attempt without a
+  // backend call. Vault reset closes every SFTP session in the backend itself,
+  // so there is nothing left to close.
+  function forgetConnection() {
+    connectGeneration += 1;
+    connectPending = null;
+    connectPendingKey = null;
+    loading.value = false;
+    clearPublishedConnection();
+    error.value = null;
+  }
+
   return {
     sessionId,
     connectedHost,
@@ -359,5 +371,6 @@ export const useSftpStore = defineStore("sftp", () => {
     downloadFile,
     uploadFile,
     disconnect,
+    forgetConnection,
   };
 });

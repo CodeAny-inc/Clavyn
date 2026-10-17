@@ -83,3 +83,18 @@ export function maskAddress(address: string): string {
   const maskedHost = maskHostname(host);
   return user + (bracketed ? `[${maskedHost}]` : maskedHost) + port;
 }
+
+/**
+ * Mask every occurrence of the given hostnames inside free text such as a
+ * backend error message, which can embed the host anywhere (`host key for
+ * {host} changed`, `{host}:{port}: connection refused`). Longer names go
+ * first so a hostname that contains another is masked as a whole.
+ */
+export function maskHostnamesIn(text: string, hostnames: readonly (string | null | undefined)[]): string {
+  if (!text) return text;
+  const known = [...new Set(hostnames.filter((name): name is string => !!name))]
+    .sort((a, b) => b.length - a.length);
+  let masked = text;
+  for (const hostname of known) masked = masked.split(hostname).join(maskHostname(hostname));
+  return masked;
+}
