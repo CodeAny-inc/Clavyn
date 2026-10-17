@@ -163,11 +163,19 @@ pub async fn import_key(
     // every exit from this command.
     let openssh_private = zeroize::Zeroizing::new(openssh_private);
     let key_passphrase = key_passphrase.map(zeroize::Zeroizing::new);
-    let key_passphrase = key_passphrase.as_ref().map(|p| p.as_str());
     // The vault is what protects stored keys, and connecting reads a stored key
     // without a passphrase, so a key's own passphrase is removed before storing.
-    let (mut meta, stored) =
-        import_openssh_private(&openssh_private, key_passphrase).map_err(err)?;
+    // Removing it runs the key's KDF, which can take seconds of CPU, so it runs
+    // on the blocking pool and before the vault mutex is taken.
+    let (mut meta, stored) = tokio::task::spawn_blocking(move || {
+        import_openssh_private(
+            &openssh_private,
+            key_passphrase.as_deref().map(String::as_str),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
@@ -1840,6 +1848,80 @@ mod connect_lock_tests {
             )
             .await;
         assert_eq!(list_keys(app.state()).await.expect("unlocked").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod key_store_off_lock_tests {
+    use super::*;
+    use crate::state::VaultSession;
+    use russh::keys::ssh_key;
+    use std::future::Future;
+    use tauri::Manager;
+
+    async fn unlock(state: &AppState) {
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+    }
+
+    /// Removing a key's own passphrase runs its KDF, which must not run on the
+    /// async worker polling the command: every other task on that worker would
+    /// wait for it. Polled once, the command has to hand the KDF off and return
+    /// before the key is decrypted and stored.
+    #[tokio::test]
+    async fn importing_a_protected_key_hands_its_kdf_to_the_blocking_pool() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        unlock(&state).await;
+        app.manage(state);
+        let (plain, _) = generate_ed25519().expect("generate");
+        // `ssh-keygen`'s default protection: aes256-ctr under 16 bcrypt rounds.
+        let kdf = ssh_key::Kdf::Bcrypt {
+            salt: vec![7; 16],
+            rounds: 16,
+        };
+        let protected = ssh_key::PrivateKey::from_openssh(&*plain)
+            .expect("read")
+            .encrypt_with(ssh_key::Cipher::Aes256Ctr, kdf, 0, "key passphrase")
+            .expect("encrypt")
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("serialize")
+            .to_string();
+
+        let mut importing = std::pin::pin!(import_key(
+            app.state(),
+            "k".into(),
+            protected,
+            Some("key passphrase".into())
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(importing.as_mut().poll(&mut cx).is_pending());
+        let decrypted_inline = match app.state::<Arc<AppState>>().vault.try_lock() {
+            Ok(vault) => !vault.keys_meta().is_empty(),
+            Err(_) => true,
+        };
+        importing.await.expect("import");
+
+        assert!(
+            !decrypted_inline,
+            "the first poll ran the KDF on the async worker"
+        );
     }
 }
 
