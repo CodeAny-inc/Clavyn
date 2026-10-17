@@ -213,10 +213,10 @@ const showBiometricButton = computed(
           </div>
           <div class="flex-1">
             <div class="text-[14px] font-medium">
-              {{ vault.unlocked ? "Vault unlocked" : "Vault locked" }}
+              {{ vault.unlocked ? "Vault unlocked" : vault.statusUnavailable ? "Vault status unknown" : "Vault locked" }}
             </div>
             <div class="text-[12px] text-muted-foreground">
-              {{ vault.initialized ? "Encrypted storage is active" : vault.statusUnavailable ? "Vault status unavailable" : "No vault configured" }}
+              {{ vault.initialized ? "Encrypted storage is active" : vault.statusUnavailable ? "The vault file could not be checked" : "No vault configured" }}
             </div>
           </div>
           <Button v-if="vault.unlocked" variant="outline" size="sm" @click="lock">

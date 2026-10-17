@@ -21,6 +21,8 @@ describe("VaultView status", () => {
     expect(wrapper.text()).toContain("Retry");
     expect(wrapper.text()).not.toContain("Create Vault");
     expect(wrapper.text()).not.toContain("Your vault is unlocked");
+    expect(wrapper.text()).toContain("Vault status unknown");
+    expect(wrapper.text()).not.toContain("Vault locked");
 
     wrapper.unmount();
   });
