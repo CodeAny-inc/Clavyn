@@ -42,7 +42,10 @@ pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Re
                         "it is a symbolic link to a file that does not exist",
                     ),
                 )),
-                Err(_) => Ok(None),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                // The second look failed for another reason, so whether the
+                // file is there is unknown again.
+                Err(e) => Err(unreadable_state(path, e)),
             };
         }
         Err(e) => return Err(unreadable_state(path, e)),
