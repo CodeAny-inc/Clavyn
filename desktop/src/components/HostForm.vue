@@ -23,6 +23,8 @@ const identities = useIdentitiesStore();
 
 const showInlineGroup = ref(false);
 const inlineGroupName = ref("");
+const saving = ref(false);
+const error = ref("");
 
 const form = ref({
   label: "",
@@ -95,11 +97,17 @@ watch(
   },
 );
 
+// The backend stores the port as a u16. An empty number input binds as "".
+const portValid = computed(() => {
+  const port = form.value.port;
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+});
+
 const isValid = computed(() => {
   return (
     form.value.label.trim() &&
     form.value.hostname.trim() &&
-    form.value.port > 0 &&
+    portValid.value &&
     (form.value.useIdentity ? form.value.identityId : form.value.username.trim())
   );
 });
@@ -120,14 +128,21 @@ function buildAuth(): AuthMethod {
 
 async function createInlineGroup() {
   if (!inlineGroupName.value.trim()) return;
-  const group = await hosts.addGroup(inlineGroupName.value.trim());
-  form.value.groupId = group.id;
-  inlineGroupName.value = "";
-  showInlineGroup.value = false;
+  error.value = "";
+  try {
+    const group = await hosts.addGroup(inlineGroupName.value.trim());
+    form.value.groupId = group.id;
+    inlineGroupName.value = "";
+    showInlineGroup.value = false;
+  } catch (e) {
+    error.value = `Failed to create group: ${e}`;
+  }
 }
 
+// A new host gets a fresh id per call, so a second click while the first save
+// is in flight would add a duplicate host rather than repeat the same write.
 async function save() {
-  if (!isValid.value) return;
+  if (!isValid.value || saving.value) return;
   const host: Host = {
     id: props.host?.id ?? crypto.randomUUID(),
     label: form.value.label.trim(),
@@ -150,12 +165,20 @@ async function save() {
     jump_host_id: props.host?.jump_host_id ?? null,
     identity_id: form.value.useIdentity ? form.value.identityId || null : null,
   };
-  if (props.host) {
-    await hosts.updateHost(host);
-  } else {
-    await hosts.addHost(host);
+  saving.value = true;
+  error.value = "";
+  try {
+    if (props.host) {
+      await hosts.updateHost(host);
+    } else {
+      await hosts.addHost(host);
+    }
+    emit("close");
+  } catch (e) {
+    error.value = `Failed to save host: ${e}`;
+  } finally {
+    saving.value = false;
   }
-  emit("close");
 }
 </script>
 
@@ -181,6 +204,9 @@ async function save() {
         <FormGroup>
           <Label for="host-port">Port</Label>
           <Input id="host-port" v-model.number="form.port" type="number" />
+          <p v-if="!portValid" class="text-[11px] text-destructive mt-1">
+            Port must be a whole number from 1 to 65535.
+          </p>
         </FormGroup>
       </div>
 
@@ -302,11 +328,13 @@ async function save() {
         <Label for="host-tags">Tags (comma-separated)</Label>
         <Input id="host-tags" v-model="form.tags" placeholder="production, web" />
       </FormGroup>
+
+      <p v-if="error" class="text-[12px] text-destructive" role="alert">{{ error }}</p>
     </div>
 
     <template #footer>
       <Button variant="ghost" @click="emit('close')">Cancel</Button>
-      <Button :disabled="!isValid" @click="save">
+      <Button :disabled="!isValid || saving" @click="save">
         {{ host ? "Save changes" : "Add host" }}
       </Button>
     </template>

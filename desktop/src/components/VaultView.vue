@@ -24,6 +24,7 @@ const vault = useVaultStore();
 const passphrase = ref("");
 const confirmPassphrase = ref("");
 const error = ref("");
+const setupLoading = ref(false);
 const unlockLoading = ref<"password" | "biometric" | null>(null);
 const enableBiometricMode = ref(false);
 const biometricPassphrase = ref("");
@@ -70,6 +71,7 @@ onMounted(async () => {
 });
 
 async function setup() {
+  if (setupLoading.value) return;
   error.value = "";
   if (passphrase.value !== confirmPassphrase.value) {
     error.value = "Passphrases do not match";
@@ -79,12 +81,15 @@ async function setup() {
     error.value = "Passphrase must be at least 8 characters";
     return;
   }
+  setupLoading.value = true;
   try {
     await vault.initialize(passphrase.value);
     passphrase.value = "";
     confirmPassphrase.value = "";
   } catch (e: any) {
     error.value = String(e);
+  } finally {
+    setupLoading.value = false;
   }
 }
 
@@ -242,7 +247,7 @@ const showBiometricButton = computed(
             <Input id="setup-confirm" v-model="confirmPassphrase" type="password" placeholder="Repeat passphrase" />
           </FormGroup>
           <p v-if="error" class="text-[12px] text-destructive">{{ error }}</p>
-          <Button @click="setup">
+          <Button :disabled="setupLoading" @click="setup">
             <VaultIcon class="size-3.5" :stroke-width="1.75" />
             Create Vault
           </Button>

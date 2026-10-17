@@ -222,3 +222,27 @@ describe("KnownHostsView trusted hosts", () => {
     expect(wrapper.text()).toContain("No trusted hosts match");
   });
 });
+
+describe("KnownHostsView loading", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(api.listKnownHosts).mockRejectedValue("known_hosts.json is unreadable");
+    vi.mocked(api.listRemovedKnownHosts).mockResolvedValue([]);
+    vi.mocked(api.listHostKeyChanges).mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it("reports a list that could not be read instead of rejecting unhandled", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "Failed to load known hosts: known_hosts.json is unreadable",
+    );
+    expect(wrapper.text()).not.toContain("Loading...");
+  });
+});

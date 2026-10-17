@@ -20,6 +20,7 @@ const removedHosts = ref<KnownHostEntry[]>([]);
 const changes = ref<PendingHostKeyChange[]>([]);
 const search = ref("");
 const loading = ref(false);
+const loadError = ref("");
 const { maskAddress } = useMaskedAddress();
 
 onMounted(async () => {
@@ -28,6 +29,7 @@ onMounted(async () => {
 
 async function load() {
   loading.value = true;
+  loadError.value = "";
   try {
     const [known, removed, pending] = await Promise.all([
       api.listKnownHosts(),
@@ -37,6 +39,8 @@ async function load() {
     hosts.value = known;
     removedHosts.value = removed;
     changes.value = pending;
+  } catch (e) {
+    loadError.value = `Failed to load known hosts: ${e}`;
   } finally {
     loading.value = false;
   }
@@ -137,6 +141,7 @@ async function trust(change: PendingHostKeyChange) {
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
+      <p v-if="loadError" class="mb-3 text-[12px] text-destructive" role="alert">{{ loadError }}</p>
       <!-- Key changes awaiting review. A host listed here is refusing to connect
            until the presented key is trusted or the server is fixed. Held back
            while a reload is in flight, so a stale list never sits above the
