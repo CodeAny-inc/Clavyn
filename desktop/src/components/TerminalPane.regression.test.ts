@@ -185,8 +185,20 @@ describe("TerminalPane session identity", () => {
   });
 });
 
+// The app modifier is ⌘ on macOS and Ctrl+Shift elsewhere (lib/shortcuts.ts).
+const PLATFORMS = [
+  ["MacIntel", { metaKey: true }],
+  ["Linux x86_64", { ctrlKey: true, shiftKey: true }],
+] as const;
+function onPlatform(platform: string) {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+}
+
 describe("TerminalPane input ownership", () => {
-  it.each([false, true])("exits fullscreen before a pane-navigation shortcut transfers focus (meta=%s)", async metaKey => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each(PLATFORMS)("exits fullscreen before a pane-navigation shortcut transfers focus (%s)", async (platform, modifiers) => {
+    onPlatform(platform);
     const { view, tabs, first, second } = await mountSplit();
     const ui = useUiStore();
     await view.get('[data-host-id="atlas"] button[aria-label="Fullscreen"]').trigger("click");
@@ -194,7 +206,7 @@ describe("TerminalPane input ownership", () => {
     // The pane is teleported to <body> while fullscreen; dispatch the keydown
     // on the live DOM element rather than through the component wrapper.
     paneEl('[data-host-id="atlas"] textarea').dispatchEvent(
-      new KeyboardEvent("keydown", { key: "ArrowRight", ctrlKey: !metaKey, metaKey, bubbles: true }),
+      new KeyboardEvent("keydown", { key: "ArrowRight", ...modifiers, bubbles: true }),
     );
     expect(tabs.activePaneId).toBe(second.id);
     expect(ui.fullscreenPaneId).toBeNull();
@@ -230,14 +242,29 @@ describe("TerminalPane input ownership", () => {
     void first; void tabs;
   });
 
+  it("leaves Ctrl+arrows, Ctrl+F and Ctrl+K to the shell off macOS", async () => {
+    onPlatform("Linux x86_64");
+    const { view, tabs } = await mountSplit();
+    const active = tabs.activePaneId;
+    const textarea = view.get('[data-host-id="atlas"] textarea').element;
+    for (const key of ["ArrowRight", "ArrowLeft", "f", "k"]) {
+      const event = new KeyboardEvent("keydown", { key, ctrlKey: true, bubbles: true, cancelable: true });
+      textarea.dispatchEvent(event);
+      expect(event.defaultPrevented, key).toBe(false);
+    }
+    expect(tabs.activePaneId).toBe(active);
+    expect(view.find('[data-host-id="atlas"] input[aria-label="Search terminal output"]').exists()).toBe(false);
+  });
+
   it("restores the destination search input and returns Escape to that pane's terminal", async () => {
+    onPlatform("Linux x86_64");
     const { view, tabs, first } = await mountSplit();
     await view.get('[data-host-id="atlas"] button[aria-label="Search in terminal"]').trigger("click");
     const search = view.get('[data-host-id="atlas"] input[aria-label="Search terminal output"]');
     expect(document.activeElement).toBe(search.element);
     await view.get('[data-host-id="orion"]').trigger("click");
     await vi.waitFor(() => expect(document.activeElement).toBe(view.get('[data-host-id="orion"] textarea').element));
-    await view.get('[data-host-id="orion"] textarea').trigger("keydown", { key: "ArrowLeft", ctrlKey: true });
+    await view.get('[data-host-id="orion"] textarea').trigger("keydown", { key: "ArrowLeft", ctrlKey: true, shiftKey: true });
     expect(tabs.activePaneId).toBe(first.id);
     await vi.waitFor(() => expect(document.activeElement).toBe(search.element));
     await search.trigger("keydown", { key: "Escape" });

@@ -53,7 +53,9 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault(); ui.exitFullscreen(); return;
   }
   const cmd = e.metaKey || e.ctrlKey;
-  if (cmd && e.key === "k") {
+  // Shift is allowed so that Ctrl+Shift+K, the form that works while a
+  // terminal has focus off macOS, toggles the palette as well.
+  if (cmd && e.key.toLowerCase() === "k") {
     e.preventDefault(); commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
     e.preventDefault(); activeView.value = "terminal"; tabs.newTab();
