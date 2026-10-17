@@ -229,8 +229,8 @@ async function save() {
         </FormGroup>
 
         <FormGroup>
-          <Label>Authentication method</Label>
-          <Select v-model="form.authMode">
+          <Label for="host-auth-method">Authentication method</Label>
+          <Select id="host-auth-method" v-model="form.authMode">
             <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="password">Password</option>
             <option value="publickey">SSH Key</option>

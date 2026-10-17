@@ -217,11 +217,11 @@ async function browseForKeyFile() {
               <span class="text-[13px] font-medium truncate">{{ key.label }}</span>
               <Badge>{{ key.key_type }}</Badge>
             </div>
-            <div class="text-[11px] text-muted-foreground truncate font-mono mt-0.5">
+            <div class="text-[11px] text-muted-foreground truncate font-mono mt-0.5 select-text">
               {{ key.fingerprint }}
             </div>
           </div>
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <button
               class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground transition-colors duration-100"
               :aria-label="showPublic === key.id ? 'Hide public key' : 'Show public key'"
@@ -254,7 +254,7 @@ async function browseForKeyFile() {
           class="rounded-md border border-border bg-muted/50 p-3 mt-1"
         >
           <div class="text-[11px] text-muted-foreground mb-1.5">Public key</div>
-          <pre class="text-[11px] font-mono text-foreground whitespace-pre-wrap break-all">{{ keys.keys.find(k => k.id === showPublic)?.public_key_base64 || 'Unavailable' }}</pre>
+          <pre class="text-[11px] font-mono text-foreground whitespace-pre-wrap break-all select-text">{{ keys.keys.find(k => k.id === showPublic)?.public_key_base64 || 'Unavailable' }}</pre>
         </div>
       </div>
 

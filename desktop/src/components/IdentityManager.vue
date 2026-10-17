@@ -307,7 +307,7 @@ function hostsUsingIdentity(identityId: string): number {
           <span class="truncate flex-1">{{ group.name }}</span>
           <span class="text-[10px] text-muted-foreground">{{ countIdentitiesInGroup(group.id) }}</span>
           <button
-            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100"
+            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Delete group"
             @click.stop="deleteGroup(group.id, group.name)"
           >
@@ -351,7 +351,7 @@ function hostsUsingIdentity(identityId: string): number {
               </span>
             </div>
           </div>
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <button
               class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground transition-colors duration-100"
               aria-label="Edit identity"
@@ -407,8 +407,8 @@ function hostsUsingIdentity(identityId: string): number {
         </FormGroup>
 
         <FormGroup>
-          <Label>Authentication method</Label>
-          <Select v-model="form.authMode">
+          <Label for="identity-auth-method">Authentication method</Label>
+          <Select id="identity-auth-method" v-model="form.authMode">
             <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="publickey">SSH Key</option>
             <option value="password">Password</option>

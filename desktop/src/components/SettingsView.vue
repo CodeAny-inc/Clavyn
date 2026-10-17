@@ -139,6 +139,7 @@ function openReleases() {
               </div>
             </div>
             <select
+              aria-label="Auto-lock after inactivity"
               class="h-8 rounded-md border border-border bg-background px-2 text-[12px] text-foreground outline-none cursor-pointer hover:border-muted-foreground/50 transition-colors duration-100"
               :value="settings.autoLockMinutes"
               @change="settings.setAutoLockMinutes(Number(($event.target as HTMLSelectElement).value))"
@@ -162,6 +163,7 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Lock on suspend / extended background"
               :aria-checked="settings.lockOnSleep"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
               :class="settings.lockOnSleep ? 'bg-primary' : 'bg-muted'"
@@ -187,6 +189,7 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Mask host addresses"
               :aria-checked="settings.maskAddresses"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
               :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted'"
@@ -219,6 +222,7 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Screen reader support"
               :aria-checked="settings.screenReaderMode"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
               :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted'"

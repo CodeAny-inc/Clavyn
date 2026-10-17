@@ -605,7 +605,7 @@ function selectAction(id: string) {
         <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
       </div>
     </header>
-    <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
+    <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs select-text" role="alert">
       <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
       <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="busy" @click.stop="reconnect">Reconnect</button>
     </div>
