@@ -3,6 +3,7 @@ import { setActivePinia, createPinia } from "pinia";
 import { useIdentitiesStore } from "./identities";
 import { useHostsStore } from "./hosts";
 import type { Identity } from "../types";
+import * as api from "../api";
 
 const mockIdentity: Identity = {
   id: "id-1",
@@ -35,6 +36,26 @@ describe("identities store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+  });
+
+  describe("load racing a local change", () => {
+    it("keeps a group removal made while the load was in flight", async () => {
+      const store = useIdentitiesStore();
+      const grouped: Identity = { ...mockIdentity, group_id: "group-1" };
+      vi.mocked(api.listIdentities).mockResolvedValueOnce([grouped]);
+      await store.load();
+
+      let resolveList: ((items: Identity[]) => void) | undefined;
+      vi.mocked(api.listIdentities).mockImplementationOnce(
+        () => new Promise((resolve) => { resolveList = resolve; }),
+      );
+      const pending = store.load();
+      store.ungroup("group-1");
+      resolveList!([{ ...mockIdentity, group_id: "group-1" }]);
+      await pending;
+
+      expect(store.identities[0].group_id).toBeNull();
+    });
   });
 
   describe("load", () => {
