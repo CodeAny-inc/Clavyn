@@ -40,6 +40,8 @@ const { maskAddress, maskHostsIn } = useMaskedAddress();
 
 const selectedHostId = ref("");
 const password = ref("");
+// The hostname the latest connect attempt was started with.
+const connectAttemptHostname = ref<string | null>(null);
 const showConnectForm = ref(true);
 const showNewDirDialog = ref(false);
 const showRenameDialog = ref(false);
@@ -81,7 +83,7 @@ const selectedEndpoint = computed(() => {
 // Backend errors can name the host (`host key for {host} changed`), so mask the
 // hosts this browser knows about the same way their addresses are masked.
 const displayedError = computed(() =>
-  maskHostsIn(sftp.error ?? "", [selectedHost.value?.hostname, sftp.connectedHost?.hostname]),
+  maskHostsIn(sftp.error ?? "", [selectedHost.value?.hostname, sftp.connectedHost?.hostname, connectAttemptHostname.value]),
 );
 const passwordRequired = computed(() => {
   const effective = selectedEffectiveIdentity.value;
@@ -170,6 +172,7 @@ async function connect() {
     }
     // The backend resolves the saved host and its identity itself; passing the
     // reviewed username makes it refuse an account that changed since preflight.
+    connectAttemptHostname.value = latest.hostname;
     const request = sftp.connect(latest, credential, effective.username);
     credential = null;
     await request;

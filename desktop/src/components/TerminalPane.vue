@@ -251,6 +251,9 @@ async function connectSession() {
   connecting.value = true;
   error.value = "";
   tabs.setPaneDisconnected(props.pane.id);
+  // The hostname this attempt connects to. Recorded now so that an error from
+  // this attempt is masked even if the saved host is renamed before it fails.
+  const attemptHostname = hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname;
   const previous = currentSessionId;
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
@@ -371,7 +374,7 @@ async function connectSession() {
     fit();
   } catch (cause) {
     // Backend errors can name the host; keep it masked like the header.
-    if (!disposed) writeError(maskHostsIn(`Connection failed: ${String(cause)}`, [hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname]));
+    if (!disposed) writeError(maskHostsIn(`Connection failed: ${String(cause)}`, [attemptHostname, hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname]));
   } finally {
     pendingOutput = null;
     connecting.value = false;

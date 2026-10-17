@@ -82,4 +82,38 @@ describe("address masking in connection errors", () => {
     await vi.waitFor(() => expect(wrapper!.text()).toContain("host key for se"));
     expect(wrapper.text()).not.toContain(HOSTNAME);
   });
+
+  it("masks the hostname a terminal attempt started with after the host is renamed", async () => {
+    let rejectConnect: ((error: string) => void) | undefined;
+    setInvokeHandler("connect_ssh", () => new Promise((_, reject) => { rejectConnect = reject; }));
+    useHostsStore().hosts = [{ ...host }];
+    const tab = useTabsStore().newTab(useHostsStore().hosts[0]);
+    const pane = collectPanes(tab.tree)[0];
+    wrapper = mount(TerminalPane, { props: { pane, tabId: tab.id, visible: true }, attachTo: document.body });
+
+    await vi.waitFor(() => expect(rejectConnect).toBeDefined());
+    useHostsStore().hosts[0].hostname = "renamed.example.test";
+    rejectConnect!(hostKeyError);
+
+    await vi.waitFor(() => expect(written.join("")).toContain("Connection failed"));
+    expect(written.join("")).not.toContain(HOSTNAME);
+  });
+
+  it("masks the hostname an SFTP attempt started with after the host is renamed", async () => {
+    let rejectConnect: ((error: string) => void) | undefined;
+    setInvokeHandler("list_hosts", () => [{ ...host }]);
+    setInvokeHandler("sftp_connect", () => new Promise((_, reject) => { rejectConnect = reject; }));
+    wrapper = mount(SftpBrowser, { props: { visible: true }, attachTo: document.body });
+    await flushPromises();
+
+    await wrapper.get("select").setValue(host.id);
+    const connect = wrapper.findAll("button").find(button => button.text().includes("Connect"));
+    await connect!.trigger("click");
+    await vi.waitFor(() => expect(rejectConnect).toBeDefined());
+    useHostsStore().hosts[0].hostname = "renamed.example.test";
+    rejectConnect!(hostKeyError);
+
+    await vi.waitFor(() => expect(wrapper!.text()).toContain("host key for se"));
+    expect(wrapper.text()).not.toContain(HOSTNAME);
+  });
 });
