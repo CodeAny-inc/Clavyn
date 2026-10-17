@@ -26,6 +26,17 @@ describe("VaultUnlockModal", () => {
     wrapper.unmount();
   });
 
+  it("is a named modal dialog, so app shortcuts leave it alone", async () => {
+    vi.spyOn(useVaultStore(), "refreshBiometricState").mockResolvedValue(undefined);
+    void useUiStore().requestVaultUnlock().catch(() => {});
+    await flushPromises();
+
+    const dialog = wrapper.get('[role="dialog"]');
+    expect(dialog.attributes("aria-modal")).toBe("true");
+    const title = wrapper.get(`#${dialog.attributes("aria-labelledby")}`);
+    expect(title.text()).toBe("Unlock Vault");
+  });
+
   it("offers Touch ID for the SSH unlock flow and resolves on success", async () => {
     const vault = useVaultStore();
     const ui = useUiStore();

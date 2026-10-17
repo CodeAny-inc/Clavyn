@@ -106,13 +106,20 @@ function cancel() {
       class="fixed inset-0 z-[100] flex items-center justify-center bg-black/50"
       @click.self="cancel"
     >
-      <div class="w-[380px] max-w-[92vw] rounded-lg border border-border bg-card p-4 sm:p-5 shadow-xl">
+      <!-- Marked modal so app shortcuts such as the command palette leave it
+           alone, and so assistive technology treats the page behind as inert. -->
+      <div
+        class="w-[380px] max-w-[92vw] rounded-lg border border-border bg-card p-4 sm:p-5 shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="vault-unlock-title"
+      >
         <div class="flex items-center gap-3 mb-4">
           <div class="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 shrink-0">
             <Vault class="size-5 text-primary" :stroke-width="1.75" />
           </div>
           <div>
-            <h3 class="text-[14px] font-semibold">Unlock Vault</h3>
+            <h3 id="vault-unlock-title" class="text-[14px] font-semibold">Unlock Vault</h3>
             <p class="text-[12px] text-muted-foreground mt-0.5">
               The vault must be unlocked to use SSH key authentication.
             </p>
