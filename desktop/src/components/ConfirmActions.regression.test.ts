@@ -13,6 +13,7 @@ import { answerConfirmation, pendingConfirmation } from "../composables/useConfi
 import { useVaultStore } from "../stores/vault";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity, KeyMeta, Workspace } from "../types";
+import { useSftpStore } from "../stores/sftp";
 
 const host: Host = {
   id: "atlas", label: "Atlas", hostname: "atlas.example.test", port: 22,
@@ -176,6 +177,31 @@ describe("destructive actions wait for confirmation", () => {
         '"README.md" already exists on the remote host. Overwrite it?',
       );
       expect(args).toMatchObject({ uploadToken: "upload-token", overwrite: true });
+    });
+
+    // The answer applies to the folder the question was asked about; a folder
+    // with a same-named file elsewhere must not inherit it.
+    it("deletes nothing when the folder changed while the question was open", async () => {
+      const row = wrapper!.findAll("tr").find((item) => item.text().includes("README.md"))!;
+      await row.trigger("contextmenu");
+      await wrapper!.findAll("button").find((button) => button.text() === "Delete")!.trigger("click");
+      await vi.waitFor(() => expect(pendingConfirmation.value).not.toBeNull());
+      useSftpStore().currentPath = "/srv/other";
+      answerConfirmation(true);
+      await flushPromises();
+      expect(calls("sftp_remove_file")).toHaveLength(0);
+      expect(useSftpStore().error).toContain("folder changed");
+    });
+
+    it("uploads nothing when the folder changed while the overwrite question was open", async () => {
+      setInvokeHandler("sftp_pick_upload_file", () => ({ token: "upload-token", name: "README.md" }));
+      await wrapper!.get('button[title="Upload"]').trigger("click");
+      await vi.waitFor(() => expect(pendingConfirmation.value).not.toBeNull());
+      useSftpStore().currentPath = "/srv/other";
+      answerConfirmation(true);
+      await flushPromises();
+      expect(calls("sftp_upload_from_local")).toHaveLength(0);
+      expect(useSftpStore().error).toContain("folder changed");
     });
   });
 });

@@ -82,6 +82,39 @@ describe("KeyManager add-key dialog", () => {
     expect(wrapper.get('[role="alert"]').text()).toContain("unsupported key format");
   });
 
+  it("keeps a late import failure out of a form opened after the first was closed", async () => {
+    let reject!: (e: Error) => void;
+    vi.spyOn(useKeysStore(), "importKey").mockReturnValue(new Promise((_, r) => { reject = r; }));
+
+    await openImportTabWithKeyMaterial();
+    await wrapper.findAll("button").find((b) => b.text() === "Import Key")!.trigger("click");
+    await wrapper.findAll("button").find((b) => b.text() === "Cancel")!.trigger("click");
+    await reopenImportTab();
+    await wrapper.get("#key-label").setValue("desktop");
+
+    reject(new Error("unsupported key format"));
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect((wrapper.get("#key-label").element as HTMLInputElement).value).toBe("desktop");
+  });
+
+  it("does not close a form opened after an earlier import finished", async () => {
+    let resolve!: () => void;
+    vi.spyOn(useKeysStore(), "importKey").mockReturnValue(new Promise<never>((r) => { resolve = r as () => void; }));
+
+    await openImportTabWithKeyMaterial();
+    await wrapper.findAll("button").find((b) => b.text() === "Import Key")!.trigger("click");
+    await wrapper.findAll("button").find((b) => b.text() === "Cancel")!.trigger("click");
+    await reopenImportTab();
+    await wrapper.get("#key-label").setValue("desktop");
+
+    resolve();
+    await flushPromises();
+
+    expect((wrapper.get("#key-label").element as HTMLInputElement).value).toBe("desktop");
+  });
+
   it("closes the dialog and drops the private key and passphrase when the vault locks", async () => {
     const vault = useVaultStore();
     vault.unlocked = true;

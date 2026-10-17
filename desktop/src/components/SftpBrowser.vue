@@ -282,15 +282,27 @@ async function confirmRename() {
   }
 }
 
+// A confirmation can stay open while the browser moves to another folder or
+// session, so an answer only applies to the location it was asked about.
+function location() {
+  return { sessionId: sftp.sessionId, path: sftp.currentPath };
+}
+function stillAt(asked: ReturnType<typeof location>, action: string) {
+  if (sftp.sessionId === asked.sessionId && sftp.currentPath === asked.path) return true;
+  sftp.error = `The folder changed while the question was open, so nothing was ${action}`;
+  return false;
+}
+
 async function deleteEntry(entry: SftpEntry) {
   closeContextMenu();
+  const asked = location();
   const confirmed = await confirmAction({
     title: entry.is_dir ? "Delete folder" : "Delete file",
     message: `Delete "${entry.name}"?`,
     confirmLabel: "Delete",
     destructive: true,
   });
-  if (!confirmed) return;
+  if (!confirmed || !stillAt(asked, "deleted")) return;
   try {
     await sftp.deleteEntry(entry);
   } catch {
@@ -326,6 +338,7 @@ async function upload() {
 
   try {
     const fileName = picked.name;
+    const asked = location();
     const existing = sftp.entries.find((entry) => entry.name === fileName);
     let overwrite = false;
 
@@ -340,7 +353,7 @@ async function upload() {
         confirmLabel: "Overwrite",
         destructive: true,
       });
-      if (!overwrite) return;
+      if (!overwrite || !stillAt(asked, "uploaded")) return;
     }
 
     await sftp.uploadFile(fileName, picked.token, overwrite);

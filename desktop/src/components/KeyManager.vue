@@ -80,29 +80,37 @@ watch(
 // the retention window.
 onUnmounted(clearAddForm);
 
+// Bumped whenever the form is cleared. A generate, import or file pick that
+// settles after its form was closed must not close, fill or flag the form the
+// user has opened since.
+let formSession = 0;
+
 async function generateKey() {
   if (!addForm.value.label.trim()) return;
   formError.value = "";
+  const session = formSession;
   try {
     await keys.generateKey(addForm.value.label);
-    resetForm();
+    if (session === formSession) resetForm();
   } catch (e) {
     console.error("Failed to generate key:", e);
-    formError.value = `Failed to generate key: ${e}`;
+    if (session === formSession) formError.value = `Failed to generate key: ${e}`;
   }
 }
 
 async function importKey() {
   if (!addForm.value.label.trim() || !addForm.value.privateKey.trim()) return;
   formError.value = "";
+  const session = formSession;
   try {
     await keys.importKey(
       addForm.value.label,
       addForm.value.privateKey,
       addForm.value.passphrase || null,
     );
-    resetForm();
+    if (session === formSession) resetForm();
   } catch (e) {
+    if (session !== formSession) return;
     console.error("Failed to import key:", e);
     // A rejected key is still a key, so the secret goes. The rest of the form
     // stays: the usual rejection is a wrong passphrase on an encrypted key, and
@@ -121,6 +129,7 @@ function clearKeyMaterial() {
 }
 
 function clearAddForm() {
+  formSession += 1;
   addForm.value.label = "";
   addForm.value.import = false;
   formError.value = "";
@@ -159,14 +168,15 @@ async function copyPublicKey(key: KeyMeta) {
 async function browseForKeyFile() {
   importing.value = true;
   formError.value = "";
+  const session = formSession;
   try {
     const content = await api.pickKeyFile();
-    if (content !== null) {
+    if (content !== null && session === formSession) {
       addForm.value.privateKey = content;
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    formError.value = `Failed to read key file: ${e}`;
+    if (session === formSession) formError.value = `Failed to read key file: ${e}`;
   } finally {
     importing.value = false;
   }
