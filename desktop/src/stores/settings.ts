@@ -83,6 +83,8 @@ export const useSettingsStore = defineStore("settings", () => {
 
   watch(appearance, applyAppearance, { immediate: true });
   // Following the system means following it while the app is open, too.
+  // main.ts installs the same listener for screens that never create this
+  // store; applying twice is harmless.
   onSystemAppearanceChange(() => {
     if (appearance.value === "system") applyAppearance("system");
   });

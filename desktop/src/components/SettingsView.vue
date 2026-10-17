@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, nextTick } from "vue";
 import * as api from "../api";
 import { useUpdateStore } from "../stores/update";
 import { useSettingsStore } from "../stores/settings";
@@ -34,6 +34,18 @@ const appearanceOptions: { value: Appearance; label: string }[] = [
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
 ];
+
+// A radio group is one Tab stop; the arrow keys move and select within it.
+function appearanceKey(event: KeyboardEvent) {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+  event.preventDefault();
+  const values = appearanceOptions.map((option) => option.value);
+  const next = values[(values.indexOf(settings.appearance) + step + values.length) % values.length];
+  settings.setAppearance(next);
+  const group = (event.currentTarget as HTMLElement).parentElement;
+  void nextTick(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus());
+}
 
 const autoLockOptions = [
   { value: 0, label: "Never" },
@@ -149,9 +161,11 @@ function openReleases() {
                 type="button"
                 role="radio"
                 :aria-checked="settings.appearance === option.value"
+                :tabindex="settings.appearance === option.value ? 0 : -1"
                 class="h-7 rounded px-3 text-[12px] font-medium transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 :class="settings.appearance === option.value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
                 @click="settings.setAppearance(option.value)"
+                @keydown="appearanceKey"
               >
                 {{ option.label }}
               </button>

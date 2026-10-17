@@ -71,6 +71,22 @@ describe("appearance", () => {
     expect(useSettingsStore().appearance).toBe("system");
   });
 
+  it("moves through the themes with the arrow keys, as one Tab stop", async () => {
+    systemTheme(false);
+    const wrapper = mount(SettingsView, { attachTo: document.body });
+    await flushPromises();
+    const radios = () => wrapper.findAll('[role="radio"]');
+    expect(radios().map((r) => r.attributes("tabindex"))).toEqual(["0", "-1", "-1"]);
+    await radios()[0].trigger("keydown", { key: "ArrowRight" });
+    await flushPromises();
+    expect(useSettingsStore().appearance).toBe("light");
+    expect(document.activeElement?.textContent?.trim()).toBe("Light");
+    await radios()[1].trigger("keydown", { key: "ArrowLeft" });
+    await radios()[0].trigger("keydown", { key: "ArrowLeft" });
+    expect(useSettingsStore().appearance).toBe("dark");
+    wrapper.unmount();
+  });
+
   it("is chosen in Settings", async () => {
     systemTheme(false);
     setActivePinia(createPinia());
