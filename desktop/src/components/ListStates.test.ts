@@ -92,7 +92,36 @@ describe("host list states", () => {
     await useHostsStore().load().catch(() => {});
     await flushPromises();
     expect(wrapper.text()).toContain("Atlas");
-    expect(wrapper.get('[role="alert"]').text()).toContain("Hosts could not be refreshed");
+    expect(wrapper.get('[role="alert"]').text()).toContain("The host list could not be refreshed");
+  });
+
+  it("shows one alert when a filter hides every row and a reload fails", async () => {
+    setInvokeHandler("list_hosts", () => [host]);
+    wrapper = mount(HostList, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get('input[placeholder="Search hosts..."]').setValue("zzz");
+
+    setInvokeHandler("list_hosts", () => {
+      throw new Error("store.json: Input/output error");
+    });
+    await useHostsStore().load().catch(() => {});
+    await flushPromises();
+    expect(wrapper.text()).toContain('No hosts match "zzz"');
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+  });
+
+  it("names the failed read when only the group list could not be loaded", async () => {
+    setInvokeHandler("list_hosts", () => [host]);
+    setInvokeHandler("list_groups", () => {
+      throw new Error("store.json: Permission denied");
+    });
+    wrapper = mount(HostList, { attachTo: document.body });
+    await flushPromises();
+
+    const alert = wrapper.get('[role="alert"]');
+    expect(alert.text()).toContain("groups:");
+    expect(alert.text()).toContain("Permission denied");
+    expect(alert.text()).not.toContain("hosts:");
   });
 
   it("keeps the first-run state for an account that really has no hosts", async () => {
@@ -124,6 +153,18 @@ describe("identity and workspace list states", () => {
     expect(wrapper.text()).toContain("Workspaces could not be loaded");
     expect(wrapper.text()).toContain("Permission denied");
     expect(wrapper.text()).not.toContain("No workspaces yet");
+  });
+
+  it("keeps a workspace created while the startup read is in flight", async () => {
+    let release!: () => void;
+    setInvokeHandler("list_workspaces", () => new Promise((resolve) => { release = () => resolve([]); }));
+    setInvokeHandler("create_workspace", (args) => ({ id: "ws-new", name: (args as { name: string }).name, tabs: [] }));
+    const store = useWorkspacesStore();
+    const read = store.load();
+    await store.createWorkspace("ops");
+    release();
+    await read;
+    expect(store.workspaces.map((w) => w.name)).toEqual(["ops"]);
   });
 
   it("shares one workspace read between overlapping loads", async () => {

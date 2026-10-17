@@ -294,7 +294,7 @@ function authLabel(host: Host): string {
 
       <!-- A reload that failed while rows from an earlier read are still shown -->
       <div v-if="hosts.loadError && hosts.hosts.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
-        <span class="flex-1">Hosts could not be refreshed: {{ hosts.loadError }}</span>
+        <span class="flex-1">The host list could not be refreshed: {{ hosts.loadError }}</span>
         <button class="underline" :disabled="hosts.loading" @click="loadHosts">Retry</button>
       </div>
 
@@ -361,7 +361,7 @@ function authLabel(host: Host): string {
       </div>
 
       <!-- Nothing to list, for one of four different reasons -->
-      <div v-else-if="hosts.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+      <div v-else-if="hosts.loadError && !hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
         <p class="text-[14px] font-medium text-foreground">Hosts could not be loaded</p>
         <p class="text-[12px] text-muted-foreground">{{ hosts.loadError }}</p>
         <Button size="sm" variant="outline" :disabled="hosts.loading" @click="loadHosts">Retry</Button>

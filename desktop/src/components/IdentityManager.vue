@@ -375,7 +375,7 @@ function hostsUsingIdentity(identityId: string): number {
       </div>
 
       <!-- Nothing to list, for one of four different reasons -->
-      <div v-else-if="identities.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+      <div v-else-if="identities.loadError && !identities.identities.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
         <p class="text-[14px] font-medium text-foreground">Identities could not be loaded</p>
         <p class="text-[12px] text-muted-foreground">{{ identities.loadError }}</p>
         <Button size="sm" variant="outline" :disabled="identities.loading" @click="identities.load()">Retry</Button>

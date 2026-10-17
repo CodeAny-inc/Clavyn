@@ -62,9 +62,13 @@ export const useHostsStore = defineStore("hosts", () => {
     pendingLoad = Promise.all([
       api.listHosts().then((loaded) => {
         if (hostsRevision === hostsStartedAt) hosts.value = loaded;
+      }, (e) => {
+        throw `hosts: ${e}`;
       }),
       api.listGroups().then((loaded) => {
         if (groupsRevision === groupsStartedAt) groups.value = loaded;
+      }, (e) => {
+        throw `groups: ${e}`;
       }),
     ])
       .then(() => {
