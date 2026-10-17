@@ -8,6 +8,11 @@ export const useHostsStore = defineStore("hosts", () => {
   const groups = ref<HostGroup[]>([]);
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
+  // Lets a view tell "nothing stored" apart from "not read yet" and "could
+  // not be read", which all leave `hosts` empty.
+  const loaded = ref(false);
+  const loading = ref(false);
+  const loadError = ref("");
   let pendingLoad: Promise<void> | null = null;
   // Bumped whenever a mutation has been applied locally. A read that started
   // before the bump carries a snapshot taken before that change, so it is
@@ -52,6 +57,8 @@ export const useHostsStore = defineStore("hosts", () => {
     if (pendingLoad) return pendingLoad;
     const hostsStartedAt = hostsRevision;
     const groupsStartedAt = groupsRevision;
+    loading.value = true;
+    loadError.value = "";
     pendingLoad = Promise.all([
       api.listHosts().then((loaded) => {
         if (hostsRevision === hostsStartedAt) hosts.value = loaded;
@@ -60,8 +67,15 @@ export const useHostsStore = defineStore("hosts", () => {
         if (groupsRevision === groupsStartedAt) groups.value = loaded;
       }),
     ])
-      .then(() => undefined)
+      .then(() => {
+        loaded.value = true;
+      })
+      .catch((e) => {
+        loadError.value = String(e);
+        throw e;
+      })
       .finally(() => {
+        loading.value = false;
         pendingLoad = null;
       });
     return pendingLoad;
@@ -113,6 +127,9 @@ export const useHostsStore = defineStore("hosts", () => {
     searchQuery,
     selectedGroupId,
     filteredHosts,
+    loaded,
+    loading,
+    loadError,
     load,
     addHost,
     updateHost,

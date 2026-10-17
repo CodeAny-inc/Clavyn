@@ -370,7 +370,21 @@ function hostsUsingIdentity(identityId: string): number {
         </div>
       </div>
 
-      <!-- Empty state -->
+      <!-- Nothing to list, for one of four different reasons -->
+      <div v-else-if="identities.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Identities could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ identities.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="identities.loading" @click="identities.load()">Retry</Button>
+      </div>
+      <p v-else-if="!identities.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading identities…
+      </p>
+      <div v-else-if="identities.identities.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
+        <p class="text-[13px] text-muted-foreground">
+          {{ identities.searchQuery.trim() ? `No identities match "${identities.searchQuery.trim()}"` : "No identities in this group" }}
+        </p>
+        <Button size="sm" variant="outline" @click="identities.searchQuery = ''; identities.selectedGroupId = null">Show all identities</Button>
+      </div>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <UserCircle class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>

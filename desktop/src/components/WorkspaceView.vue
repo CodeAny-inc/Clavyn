@@ -73,10 +73,15 @@ const filteredHostsForPicker = computed(() => {
 });
 
 onMounted(() => {
-  void workspaces.load();
+  loadWorkspaces();
   void hosts.load();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadWorkspaces() {
+  workspaces.load().catch(() => {});
+}
 
 // --- workspace form ---
 function addWorkspace() {
@@ -420,6 +425,14 @@ const colorOptions = [
       </div>
 
       <!-- Empty state -->
+      <div v-else-if="workspaces.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Workspaces could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ workspaces.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</Button>
+      </div>
+      <p v-else-if="!workspaces.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading workspaces…
+      </p>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Folder class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>

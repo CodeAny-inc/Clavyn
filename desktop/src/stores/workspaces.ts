@@ -6,9 +6,24 @@ import type { Workspace } from "../types";
 export const useWorkspacesStore = defineStore("workspaces", () => {
   const workspaces = ref<Workspace[]>([]);
   const activeWorkspaceId = ref<string | null>(null);
+  // Lets the view tell "none saved" apart from "not read yet" and "could not
+  // be read", which all leave `workspaces` empty.
+  const loaded = ref(false);
+  const loading = ref(false);
+  const loadError = ref("");
 
   async function load() {
-    workspaces.value = await api.listWorkspaces();
+    loading.value = true;
+    loadError.value = "";
+    try {
+      workspaces.value = await api.listWorkspaces();
+      loaded.value = true;
+    } catch (e) {
+      loadError.value = String(e);
+      throw e;
+    } finally {
+      loading.value = false;
+    }
   }
 
   async function createWorkspace(name: string) {
@@ -38,6 +53,9 @@ export const useWorkspacesStore = defineStore("workspaces", () => {
   return {
     workspaces,
     activeWorkspaceId,
+    loaded,
+    loading,
+    loadError,
     load,
     createWorkspace,
     saveWorkspace,

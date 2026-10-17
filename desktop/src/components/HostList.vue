@@ -71,9 +71,19 @@ const showConnectDialog = ref(false);
 const connectTarget = ref<Host | null>(null);
 
 onMounted(() => {
-  void hosts.load();
+  loadHosts();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadHosts() {
+  hosts.load().catch(() => {});
+}
+
+function clearFilters() {
+  hosts.searchQuery = "";
+  hosts.selectedGroupId = null;
+}
 
 function identityReady(host: Host) {
   return sshIdentityReady(host, identities.loaded);
@@ -344,7 +354,21 @@ function authLabel(host: Host): string {
         </div>
       </div>
 
-      <!-- Empty state -->
+      <!-- Nothing to list, for one of four different reasons -->
+      <div v-else-if="hosts.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Hosts could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ hosts.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="hosts.loading" @click="loadHosts">Retry</Button>
+      </div>
+      <p v-else-if="!hosts.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading hosts…
+      </p>
+      <div v-else-if="hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
+        <p class="text-[13px] text-muted-foreground">
+          {{ hosts.searchQuery.trim() ? `No hosts match "${hosts.searchQuery.trim()}"` : "No hosts in this group" }}
+        </p>
+        <Button size="sm" variant="outline" @click="clearFilters">Show all hosts</Button>
+      </div>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Server class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
