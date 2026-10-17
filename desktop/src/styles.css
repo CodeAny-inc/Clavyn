@@ -6,15 +6,20 @@
    (putting :root/.dark custom properties inside @layer base caused the
    dark-theme block to be stripped from the compiled CSS). */
 :root {
-  /* Terminal chrome adapts to the app theme. The xterm viewport itself stays
-     dark (standard for terminals), but the surrounding tab strip and pane
-     headers use neutral surfaces so light mode doesn't show a black nav bar. */
+  /* The tab strip follows the app theme. A pane, its header and the gaps
+     between panes are one warm near-black surface in either theme, so a pane
+     reads as a single object instead of a light bar sitting on a dark well.
+     Ink and muted ink are the only text tones on it. */
   --workspace-chrome: hsl(0 0% 96.5%);
-  --workspace-accent: hsl(215 90% 56%);
-  --terminal-background: #10151e;
+  /* Marks the active tab and drop targets by tone, not by a saturated hue. */
+  --workspace-accent: hsl(36 8% 24%);
+  --terminal-background: #161513;
+  --terminal-chrome: #1c1b18;
+  --terminal-chrome-active: #24221f;
+  --terminal-seam: #302e2a;
+  --terminal-ink: #ebe7de;
+  --terminal-ink-muted: #948f84;
   --terminal-border: hsl(0 0% 88%);
-  --terminal-toolbar: hsl(0 0% 95%);
-  --terminal-toolbar-active: hsl(0 0% 93%);
   --background: 0 0% 99%;
   --foreground: 0 0% 10%;
   --card: 0 0% 100%;
@@ -68,10 +73,8 @@
   --sidebar-border: 0 0% 20%;
   /* Terminal chrome stays dark-on-dark in dark mode. */
   --workspace-chrome: hsl(0 0% 11%);
-  --workspace-accent: hsl(213 88% 64%);
+  --workspace-accent: hsl(40 18% 82%);
   --terminal-border: hsl(0 0% 20%);
-  --terminal-toolbar: hsl(0 0% 12%);
-  --terminal-toolbar-active: hsl(0 0% 16%);
 }
 
 @layer base {
