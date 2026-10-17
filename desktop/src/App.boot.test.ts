@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, shallowMount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import App from "./App.vue";
@@ -180,5 +180,35 @@ describe("App boot", () => {
     await flushPromises();
     expect(update.available).toBe(true);
     expect(update.showModal).toBe(true);
+  });
+
+  it("still checks for updates and loads the rest when one boot read fails", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    setInvokeHandler("list_workspaces", () => {
+      throw new Error("workspaces unreadable");
+    });
+    mountApp();
+    await flushPromises();
+
+    expect(commandsInvoked()).toContain("check_for_updates");
+    expect(useHostsStore().hosts).toHaveLength(1);
+    expect(useIdentitiesStore().loaded).toBe(true);
+    expect(useVaultStore().initialized).toBe(true);
+  });
+
+  it("reports a failed vault status probe as unavailable, never as a missing vault", async () => {
+    setInvokeHandler("vault_is_initialized", () => {
+      throw new Error("vault status unreadable");
+    });
+    mountApp();
+    await flushPromises();
+
+    const vault = useVaultStore();
+    expect(vault.statusUnavailable).toBe(true);
+    expect(vault.needsSetup).toBe(false);
+    expect(vault.needsUnlock).toBe(false);
+    expect(vault.error).toContain("vault status unreadable");
+    expect(commandsInvoked()).toContain("check_for_updates");
+    expect(useHostsStore().hosts).toHaveLength(1);
   });
 });

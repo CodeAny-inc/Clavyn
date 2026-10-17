@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
 import { useWorkspacesStore } from "../stores/workspaces";
-import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
+import { useTabsStore, isPane, collectPanes, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
@@ -28,6 +28,10 @@ import {
   Search,
 } from "lucide-vue-next";
 import type { Workspace, TabLayout, PaneLayout, Host } from "../types";
+
+const emit = defineEmits<{
+  "switch-view": [view: string];
+}>();
 
 const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
@@ -198,8 +202,14 @@ function layoutToPaneTree(layout: PaneLayout, autoConnect: boolean): PaneTree {
 function restoreWorkspace(ws: Workspace) {
   if (!ws.tabs || ws.tabs.length === 0) {
     tabs.newTab();
+    emit("switch-view", "terminal");
     return;
   }
+
+  // Opening replaces every tab, which ends their sessions, so a live session
+  // is only given up with the user's consent.
+  const live = tabs.tabs.some((tab) => collectPanes(tab.tree).some((pane) => pane.connected));
+  if (live && !confirm(`Open workspace "${ws.name}"? This closes every open tab and disconnects its sessions.`)) return;
 
   // Close all existing tabs first
   const existingIds = tabs.tabs.map((t) => t.id);
@@ -218,6 +228,7 @@ function restoreWorkspace(ws: Workspace) {
   if (tabs.tabs.length > 0) {
     tabs.setActiveTab(tabs.tabs[0].id);
   }
+  emit("switch-view", "terminal");
 }
 
 // --- host association ---

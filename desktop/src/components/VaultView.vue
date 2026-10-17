@@ -216,7 +216,7 @@ const showBiometricButton = computed(
               {{ vault.unlocked ? "Vault unlocked" : "Vault locked" }}
             </div>
             <div class="text-[12px] text-muted-foreground">
-              {{ vault.initialized ? "Encrypted storage is active" : "No vault configured" }}
+              {{ vault.initialized ? "Encrypted storage is active" : vault.statusUnavailable ? "Vault status unavailable" : "No vault configured" }}
             </div>
           </div>
           <Button v-if="vault.unlocked" variant="outline" size="sm" @click="lock">
@@ -317,6 +317,12 @@ const showBiometricButton = computed(
               Forgot passphrase? Reset vault
             </button>
           </template>
+        </div>
+
+        <!-- Status unknown: the probe failed, so neither setup nor unlock applies -->
+        <div v-else-if="!vault.initialized" class="flex flex-col gap-4">
+          <p class="text-[12px] text-destructive">Could not read the vault status: {{ vault.error }}</p>
+          <Button variant="outline" @click="vault.checkStatus()">Retry</Button>
         </div>
 
         <!-- Unlocked mode -->
