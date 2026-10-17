@@ -31,6 +31,11 @@ pub async fn secure_initialize_vault(
     let mut vault = state.vault.lock().await;
     ensure_vault_uninitialized(&vault)?;
 
+    // Refusals that initialization would make are checked first, so a request
+    // that cannot create a vault leaves the existing biometric state alone.
+    vault
+        .check_can_initialize(passphrase.as_str())
+        .map_err(|error| error.to_string())?;
     crate::vault_keychain_cleanup::prepare_for_new_vault(&state.app_data_dir).await?;
     crate::biometric::clear_for_vault_initialization().await;
 
