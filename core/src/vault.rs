@@ -1861,8 +1861,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("vault.json");
         let target = dir.path().join("vault-on-removable-disk.json");
-        std::os::unix::fs::symlink(&target, &path).expect("link to a missing target");
+        // Opened before the link appears, as a handle from startup would be.
         let mut vault = Vault::open(path.clone()).expect("open");
+        std::os::unix::fs::symlink(&target, &path).expect("link to a missing target");
 
         assert!(vault
             .initialize("correct horse battery staple")
@@ -1872,6 +1873,19 @@ mod tests {
         assert!(!target.exists(), "the link target was created");
         let meta = std::fs::symlink_metadata(&path).expect("the link is still there");
         assert!(meta.file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vault_path_linking_to_a_missing_file_does_not_open_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &path).expect("symlink");
+
+        assert!(matches!(
+            Vault::open(path),
+            Err(crate::CoreError::UnreadableState { .. })
+        ));
     }
 
     #[test]

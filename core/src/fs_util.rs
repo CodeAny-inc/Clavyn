@@ -30,7 +30,21 @@ const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
 pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // A symbolic link whose target is missing also reads as NotFound, but
+        // the state is not absent: something is configured there, and treating
+        // it as nothing would offer to create a file the link then blocks.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(path) {
+                Ok(_) => Err(unreadable_state(
+                    path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "it is a symbolic link to a file that does not exist",
+                    ),
+                )),
+                Err(_) => Ok(None),
+            };
+        }
         Err(e) => return Err(unreadable_state(path, e)),
     };
     serde_json::from_slice(&bytes)
@@ -141,20 +155,18 @@ pub fn create_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     let published = match published {
         // Some volumes have no hard links (FAT and exFAT, some network
         // shares). Creating the file in place with `create_new` is just as
-        // unwilling to replace an existing one; what it gives up is that a
-        // crash mid-write can leave a partial file, which then loads as
-        // unreadable state rather than as no vault.
+        // unwilling to replace an existing one. What it gives up is that a
+        // failed or interrupted write leaves a partial file. That file is not
+        // removed by name, which could delete one another process created
+        // there in the meantime; it loads as corrupt state, which startup
+        // recovery offers to move aside.
         Err(e)
             if matches!(
                 e.kind(),
                 std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
             ) =>
         {
-            write_temp(path, contents).inspect_err(|e| {
-                if e.kind() != std::io::ErrorKind::AlreadyExists {
-                    let _ = std::fs::remove_file(path);
-                }
-            })
+            write_temp(path, contents)
         }
         other => other,
     };
@@ -767,6 +779,20 @@ mod tests {
 
         let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "unexpected mode {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_missing_file_is_unreadable_not_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &path).expect("symlink");
+
+        let read: crate::Result<Option<serde_json::Value>> = super::read_state_file(&path);
+        assert!(
+            matches!(read, Err(crate::CoreError::UnreadableState { .. })),
+            "a dangling link loaded as {read:?}"
+        );
     }
 
     #[test]
