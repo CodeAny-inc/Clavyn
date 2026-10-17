@@ -35,6 +35,9 @@ const keys = useKeysStore();
 const vault = useVaultStore();
 
 const showForm = ref(false);
+// Changes whenever the dialog opens or closes. A key being created for one
+// opening must not write into a later one.
+let formSession = 0;
 const editing = ref<Identity | null>(null);
 const showGroupForm = ref(false);
 const newGroupName = ref("");
@@ -77,6 +80,7 @@ function clearKeyMaterial() {
 // the key material. Synchronous so nothing can observe the refs between the
 // close and the clear.
 watch(showForm, (open) => {
+  formSession += 1;
   if (!open) clearKeyMaterial();
 }, { flush: "sync" });
 
@@ -219,13 +223,14 @@ async function ensureKey(): Promise<string | null> {
   }
   if (keyMode.value === "generate") {
     if (!newKeyLabel.value.trim()) return null;
+    const session = formSession;
     creatingKey.value = true;
     try {
       const key = await keys.generateKey(newKeyLabel.value.trim());
-      adoptCreatedKey(key.id);
+      if (session === formSession) adoptCreatedKey(key.id);
       return key.id;
     } catch (e) {
-      formError.value = `Failed to generate key: ${e}`;
+      if (session === formSession) formError.value = `Failed to generate key: ${e}`;
       return null;
     } finally {
       creatingKey.value = false;
@@ -233,6 +238,7 @@ async function ensureKey(): Promise<string | null> {
   }
   if (keyMode.value === "import") {
     if (!newKeyLabel.value.trim() || !importKeyText.value.trim()) return null;
+    const session = formSession;
     creatingKey.value = true;
     try {
       const key = await keys.importKey(
@@ -240,13 +246,15 @@ async function ensureKey(): Promise<string | null> {
         importKeyText.value,
         importKeyPassphrase.value || null,
       );
-      adoptCreatedKey(key.id);
+      if (session === formSession) adoptCreatedKey(key.id);
       return key.id;
     } catch (e) {
       // A rejected key is still a key, so the secret goes. The label stays: the
       // usual rejection is a wrong passphrase on an encrypted key.
-      clearKeyMaterial();
-      formError.value = `Failed to import key: ${e}`;
+      if (session === formSession) {
+        clearKeyMaterial();
+        formError.value = `Failed to import key: ${e}`;
+      }
       return null;
     } finally {
       creatingKey.value = false;
