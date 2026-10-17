@@ -15,7 +15,6 @@ describe("KeyManager add-key dialog", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     setInvokeHandler("list_keys", () => []);
-    vi.stubGlobal("alert", vi.fn());
     wrapper = mount(KeyManager, {
       global: { stubs: { Teleport: true } },
     });
@@ -79,6 +78,8 @@ describe("KeyManager add-key dialog", () => {
     expect((wrapper.get("#key-passphrase").element as HTMLInputElement).value).toBe("");
     expect((wrapper.get("#key-label").element as HTMLInputElement).value).toBe("laptop");
     expect(wrapper.findAll("button").some((b) => b.text() === "Import Key")).toBe(true);
+    // The reason is shown in the dialog: `alert` is not available in the webview.
+    expect(wrapper.get('[role="alert"]').text()).toContain("unsupported key format");
   });
 
   it("closes the dialog and drops the private key and passphrase when the vault locks", async () => {

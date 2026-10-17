@@ -29,6 +29,7 @@ import {
   sshIdentityReady,
 } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 
@@ -283,7 +284,13 @@ async function confirmRename() {
 
 async function deleteEntry(entry: SftpEntry) {
   closeContextMenu();
-  if (!confirm(`Delete "${entry.name}"?`)) return;
+  const confirmed = await confirmAction({
+    title: entry.is_dir ? "Delete folder" : "Delete file",
+    message: `Delete "${entry.name}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed) return;
   try {
     await sftp.deleteEntry(entry);
   } catch {
@@ -327,9 +334,12 @@ async function upload() {
         sftp.error = `A directory named "${fileName}" already exists`;
         return;
       }
-      overwrite = confirm(
-        `"${fileName}" already exists on the remote host. Overwrite it?`,
-      );
+      overwrite = await confirmAction({
+        title: "Replace remote file",
+        message: `"${fileName}" already exists on the remote host. Overwrite it?`,
+        confirmLabel: "Overwrite",
+        destructive: true,
+      });
       if (!overwrite) return;
     }
 

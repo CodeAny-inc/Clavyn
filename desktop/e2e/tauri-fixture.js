@@ -76,6 +76,13 @@
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "startup_failure") return null;
+      // The capability file grants no dialog permissions, so the ACL refuses
+      // these before the plugin runs.
+      if (command === "plugin:dialog|confirm" || command === "plugin:dialog|message") {
+        const name = command.slice("plugin:dialog|".length);
+        throw new Error(`dialog.${name} not allowed. Permissions associated with this command: dialog:allow-${name}, dialog:default`);
+      }
+      if (["delete_host", "delete_key"].includes(command)) return;
       // Keep the exact objects served, including any edits a scenario makes to
       // them, so connects can resolve a host by id the way the backend does.
       if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
@@ -138,5 +145,14 @@
       ];
       throw new Error(`Unhandled test IPC: ${command}`);
     },
+  };
+  // What tauri-plugin-dialog's init script installs in every desktop webview:
+  // `confirm` becomes async, so its result is a Promise and always truthy, and
+  // `alert` returns before anything is shown.
+  window.alert = function (message) {
+    window.__TAURI_INTERNALS__.invoke("plugin:dialog|message", { message: String(message) });
+  };
+  window.confirm = async function (message) {
+    return await window.__TAURI_INTERNALS__.invoke("plugin:dialog|confirm", { message: String(message) });
   };
 })();

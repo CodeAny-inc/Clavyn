@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import * as api from "../api";
 import KnownHostsView from "./KnownHostsView.vue";
+import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 
 vi.mock("../api", () => ({
   listKnownHosts: vi.fn(),
@@ -188,25 +189,42 @@ describe("KnownHostsView trusted hosts", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps the brackets of an IPv6 entry so the pair rebuilds it", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  async function removeConfirmed(wrapper: VueWrapper) {
+    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
+    await flushPromises();
+    answerConfirmation(true);
+    await flushPromises();
+  }
+
+  it("removes nothing until the removal is confirmed", async () => {
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
     await flushPromises();
+    expect(pendingConfirmation.value?.message).toBe(`Remove known host "${trusted.host}"?`);
+    expect(api.removeKnownHost).not.toHaveBeenCalled();
+
+    answerConfirmation(false);
+    await flushPromises();
+    expect(api.removeKnownHost).not.toHaveBeenCalled();
+  });
+
+  it("keeps the brackets of an IPv6 entry so the pair rebuilds it", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    await removeConfirmed(wrapper);
 
     expect(api.removeKnownHost).toHaveBeenCalledWith("[2001:db8::1]", 2222);
   });
 
   it("reports a removal that failed instead of dropping it", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     vi.mocked(api.removeKnownHost).mockRejectedValueOnce("known_hosts.json is read-only");
-    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
-    await flushPromises();
+    await removeConfirmed(wrapper);
 
     expect(wrapper.text()).toContain("known_hosts.json is read-only");
   });

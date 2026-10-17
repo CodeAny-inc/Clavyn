@@ -6,6 +6,7 @@ import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -135,7 +136,12 @@ async function save() {
 }
 
 async function remove(id: string, name: string) {
-  if (confirm(`Delete workspace "${name}"?`)) {
+  if (await confirmAction({
+    title: "Delete workspace",
+    message: `Delete workspace "${name}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     await workspaces.deleteWorkspace(id);
   }
 }

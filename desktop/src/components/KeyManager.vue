@@ -23,6 +23,7 @@ import {
   Lock,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { confirmAction } from "../composables/useConfirm";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
@@ -33,6 +34,7 @@ const showAdd = ref(false);
 const showPublic = ref<string | null>(null);
 const copiedId = ref<string | null>(null);
 const importing = ref(false);
+const formError = ref("");
 
 const addForm = ref({
   label: "",
@@ -80,17 +82,19 @@ onUnmounted(clearAddForm);
 
 async function generateKey() {
   if (!addForm.value.label.trim()) return;
+  formError.value = "";
   try {
     await keys.generateKey(addForm.value.label);
     resetForm();
   } catch (e) {
     console.error("Failed to generate key:", e);
-    alert(`Failed to generate key: ${e}`);
+    formError.value = `Failed to generate key: ${e}`;
   }
 }
 
 async function importKey() {
   if (!addForm.value.label.trim() || !addForm.value.privateKey.trim()) return;
+  formError.value = "";
   try {
     await keys.importKey(
       addForm.value.label,
@@ -105,7 +109,7 @@ async function importKey() {
     // closing the dialog would also drop the label and bounce the user back to
     // the Generate tab, leaving them to rebuild a form that was not the problem.
     clearKeyMaterial();
-    alert(`Failed to import key: ${e}`);
+    formError.value = `Failed to import key: ${e}`;
   }
 }
 
@@ -119,6 +123,7 @@ function clearKeyMaterial() {
 function clearAddForm() {
   addForm.value.label = "";
   addForm.value.import = false;
+  formError.value = "";
   clearKeyMaterial();
 }
 
@@ -128,7 +133,12 @@ function resetForm() {
 }
 
 async function deleteKey(key: KeyMeta) {
-  if (confirm(`Delete key "${key.label}"?`)) {
+  if (await confirmAction({
+    title: "Delete key",
+    message: `Delete key "${key.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     await keys.deleteKey(key.id);
   }
 }
@@ -148,6 +158,7 @@ async function copyPublicKey(key: KeyMeta) {
 
 async function browseForKeyFile() {
   importing.value = true;
+  formError.value = "";
   try {
     const content = await api.pickKeyFile();
     if (content !== null) {
@@ -155,7 +166,7 @@ async function browseForKeyFile() {
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    alert(`Failed to read key file: ${e}`);
+    formError.value = `Failed to read key file: ${e}`;
   } finally {
     importing.value = false;
   }
@@ -334,6 +345,8 @@ async function browseForKeyFile() {
         <p v-else class="text-[12px] text-muted-foreground">
           A new Ed25519 key pair will be generated and stored encrypted in the vault.
         </p>
+
+        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
