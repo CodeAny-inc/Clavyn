@@ -1,5 +1,5 @@
 use crate::host_key_prompt;
-use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
+use crate::state::{end_of_output, AppState, EpochMark, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, import_openssh_private, parse_openssh_private, KeyMeta};
@@ -148,7 +148,9 @@ pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> Api
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &private).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(meta)
 }
 
@@ -179,7 +181,9 @@ pub async fn import_key(
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(meta)
 }
 
@@ -187,7 +191,9 @@ pub async fn import_key(
 pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.remove_key(&key, &key_id.to_string()).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(())
 }
 
@@ -1855,8 +1861,10 @@ mod connect_lock_tests {
 mod key_store_off_lock_tests {
     use super::*;
     use crate::state::VaultSession;
+    use crate::vault_epoch::BlockingEpochStore;
     use russh::keys::ssh_key;
     use std::future::Future;
+    use std::sync::atomic::Ordering;
     use tauri::Manager;
 
     async fn unlock(state: &AppState) {
@@ -1877,6 +1885,37 @@ mod key_store_off_lock_tests {
                 ),
             )
             .await;
+    }
+
+    /// The credential store can sit on a prompt for as long as the user leaves
+    /// it up. A save must not keep the vault while it waits, or every key
+    /// operation, connect and reset queues behind the dialog.
+    #[tokio::test]
+    async fn a_save_releases_the_vault_before_recording_its_epoch() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (store, mut parked, release) = BlockingEpochStore::new();
+        Arc::get_mut(&mut state).expect("sole owner").epoch_store = store.clone();
+        unlock(&state).await;
+        app.manage(state);
+
+        store.armed.store(true, Ordering::SeqCst);
+        let generating = generate_key(app.state(), "k".into());
+        tokio::pin!(generating);
+        tokio::select! {
+            _ = parked.recv() => {}
+            result = &mut generating => panic!("never reached the credential store: {result:?}"),
+        }
+        let vault_free = app.state::<Arc<AppState>>().vault.try_lock().is_ok();
+        store.armed.store(false, Ordering::SeqCst);
+        release.send(()).expect("release");
+        generating.await.expect("generate");
+
+        assert!(
+            vault_free,
+            "the vault stayed locked while the credential store was blocked"
+        );
     }
 
     /// Removing a key's own passphrase runs its KDF, which must not run on the

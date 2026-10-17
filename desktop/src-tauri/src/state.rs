@@ -214,6 +214,27 @@ pub struct AppState {
     pub app_data_dir: PathBuf,
     /// Highest vault epoch seen per vault generation; see `vault_epoch`.
     pub epoch_store: Arc<dyn crate::vault_epoch::EpochStore>,
+    /// Serializes calls into `epoch_store`. They run without the vault mutex,
+    /// and each reads the record before writing it, so two interleaved calls
+    /// could otherwise leave the lower of two epochs recorded.
+    pub epoch_store_calls: Mutex<()>,
+}
+
+/// A vault's generation and epoch, copied out from under the vault mutex so the
+/// credential store is only reached once the mutex is released.
+pub struct EpochMark {
+    binding_id: String,
+    epoch: u64,
+}
+
+impl EpochMark {
+    /// `None` for a vault that has not been created.
+    pub fn of(vault: &Vault) -> Option<Self> {
+        vault.binding_id().map(|binding_id| Self {
+            binding_id: binding_id.to_owned(),
+            epoch: vault.epoch(),
+        })
+    }
 }
 
 /// Live local terminals and the ids currently being opened.
@@ -435,23 +456,71 @@ impl AppState {
             local_terminals: Mutex::new(LocalTerminals::default()),
             app_data_dir: app_data,
             epoch_store: crate::vault_epoch::default_store(),
+            epoch_store_calls: Mutex::new(()),
         }))
     }
 
-    /// Record the epoch `vault` is now at, after it was saved or opened.
+    /// Record the epoch a vault is now at, after it was saved or opened.
     ///
+    /// Takes an `EpochMark` rather than the vault so it is reached with the
+    /// vault mutex already released: the credential store is synchronous and
+    /// can stop on a prompt, and every vault operation would wait behind it.
     /// Awaited rather than spawned so a caller that goes on to read the record
-    /// sees this write, and run on the blocking pool because the credential
-    /// store is synchronous and can stop on a prompt.
-    pub async fn record_vault_epoch(&self, vault: &Vault) {
-        if let Some(binding_id) = vault.binding_id() {
+    /// sees this write, and run on the blocking pool for the same reason.
+    pub async fn record_vault_epoch(&self, mark: Option<EpochMark>) {
+        if let Some(mark) = mark {
+            let _serial = self.epoch_store_calls.lock().await;
             crate::vault_epoch::record_off_thread(
                 self.epoch_store.clone(),
-                binding_id.to_string(),
-                vault.epoch(),
+                mark.binding_id,
+                mark.epoch,
             )
             .await;
         }
+    }
+
+    /// The rollback check and format upgrade that complete an unlock, after
+    /// the passphrase has been verified into `key` for the vault generation
+    /// `binding_id` at the authenticated epoch `epoch`.
+    ///
+    /// The check runs with the vault mutex released, since the credential store
+    /// can block on a prompt for as long as the user leaves it up. The vault is
+    /// taken again afterwards and must still be the generation and epoch that
+    /// were checked; a reset or a save in between makes the check stale, so the
+    /// unlock is refused rather than committed on top of it.
+    pub async fn finish_unlock(
+        &self,
+        key: &VaultKey,
+        binding_id: &str,
+        epoch: u64,
+        accept_older: bool,
+    ) -> std::result::Result<(), String> {
+        {
+            let _serial = self.epoch_store_calls.lock().await;
+            crate::vault_epoch::check_on_unlock_off_thread(
+                self.epoch_store.clone(),
+                binding_id.to_owned(),
+                epoch,
+                accept_older,
+            )
+            .await?;
+        }
+        let mut vault = self.vault.lock().await;
+        if vault.binding_id() != Some(binding_id) || vault.epoch() != epoch {
+            return Err("the vault changed while it was being unlocked; try again".into());
+        }
+        // A vault stored in an older on-disk format is rewritten in the
+        // authenticated one here, the one moment the master key is available.
+        // The rewrite is atomic and preserves the salt, so a failure leaves the
+        // file and any bound Keychain credential intact and must not fail the
+        // unlock.
+        if let Err(error) = vault.migrate_to_current_format(key) {
+            tracing::warn!("vault format upgrade deferred: {error}");
+        }
+        let mark = EpochMark::of(&vault);
+        drop(vault);
+        self.record_vault_epoch(mark).await;
+        Ok(())
     }
 
     /// A held guard on the vault together with the master key for its current

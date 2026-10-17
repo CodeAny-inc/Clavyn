@@ -74,36 +74,26 @@ pub async fn secure_unlock_vault(
     let generation = state.auth_generation.current();
     let passphrase = zeroize::Zeroizing::new(passphrase);
 
-    let mut vault = state.vault.lock().await;
-    // Verification derives the master key; keep it for the unlocked session so
-    // later vault operations do not each repeat the Argon2 work.
-    let key = vault
-        .verify_passphrase(passphrase.as_str())
-        .await
-        .map_err(err)?;
-    let binding_id = vault
-        .binding_id()
-        .ok_or_else(|| "vault binding is unavailable".to_string())?
-        .to_owned();
-    // Compared only now, with the passphrase verified, so the epoch is the
-    // authenticated one. `accept_older` is the user choosing a copy this check
-    // refused, such as a backup they restored.
-    crate::vault_epoch::check_on_unlock_off_thread(
-        state.epoch_store.clone(),
-        binding_id.clone(),
-        vault.epoch(),
-        accept_older.unwrap_or(false),
-    )
-    .await?;
-    // A vault stored in an older on-disk format is rewritten in the
-    // authenticated one here, the one moment the master key is available. The
-    // rewrite is atomic and preserves the salt, so a failure leaves the file and
-    // any bound Keychain credential intact and must not fail the unlock.
-    if let Err(error) = vault.migrate_to_current_format(&key) {
-        tracing::warn!("vault format upgrade deferred: {error}");
-    }
-    state.record_vault_epoch(&vault).await;
-    drop(vault);
+    let (key, binding_id, epoch) = {
+        let vault = state.vault.lock().await;
+        // Verification derives the master key; keep it for the unlocked session
+        // so later vault operations do not each repeat the Argon2 work.
+        let key = vault
+            .verify_passphrase(passphrase.as_str())
+            .await
+            .map_err(err)?;
+        let binding_id = vault
+            .binding_id()
+            .ok_or_else(|| "vault binding is unavailable".to_string())?
+            .to_owned();
+        (key, binding_id, vault.epoch())
+    };
+    // The rollback check compares the epoch only now, with the passphrase
+    // verified, so it is the authenticated one. `accept_older` is the user
+    // choosing a copy this check refused, such as a backup they restored.
+    state
+        .finish_unlock(&key, &binding_id, epoch, accept_older.unwrap_or(false))
+        .await?;
 
     let session = VaultSession::new(passphrase, key, binding_id);
     if !state
@@ -344,7 +334,8 @@ mod tests {
 mod rollback_tests {
     use super::secure_unlock_vault;
     use crate::state::AppState;
-    use crate::vault_epoch::ROLLBACK_MARKER;
+    use crate::vault_epoch::{BlockingEpochStore, ROLLBACK_MARKER};
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use tauri::Manager;
 
@@ -402,5 +393,90 @@ mod rollback_tests {
             .await
             .expect("import");
         assert!(state.epoch_store.read(&binding_id).expect("read").expect("recorded") > before);
+    }
+
+    /// An app whose credential store parks reads once armed, with a vault that
+    /// has been created but not unlocked. Also returns the vault's master key.
+    async fn app_with_blocking_store() -> (
+        tauri::App<tauri::test::MockRuntime>,
+        tempfile::TempDir,
+        Arc<BlockingEpochStore>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+        clavyn_core::vault::VaultKey,
+    ) {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (store, parked, release) = BlockingEpochStore::new();
+        Arc::get_mut(&mut state).expect("sole owner").epoch_store = store.clone();
+        let master = state
+            .vault
+            .lock()
+            .await
+            .initialize("passphrase")
+            .await
+            .expect("initialize");
+        app.manage(state);
+        (app, dir, store, parked, release, master)
+    }
+
+    /// The rollback check can wait on a credential store prompt for as long as
+    /// the user leaves it up, and must not keep the vault while it does.
+    #[tokio::test]
+    async fn the_rollback_check_runs_with_the_vault_released() {
+        let (app, _dir, store, mut parked, release, _) = app_with_blocking_store().await;
+
+        store.armed.store(true, Ordering::SeqCst);
+        let unlocking = secure_unlock_vault(app.state(), "passphrase".into(), None);
+        tokio::pin!(unlocking);
+        tokio::select! {
+            _ = parked.recv() => {}
+            result = &mut unlocking => panic!("never reached the credential store: {result:?}"),
+        }
+        let state = app.state::<Arc<AppState>>();
+        let vault_free = state.vault.try_lock().is_ok();
+        store.armed.store(false, Ordering::SeqCst);
+        release.send(()).expect("release");
+        unlocking.await.expect("unlock");
+
+        assert!(
+            vault_free,
+            "the vault stayed locked during the rollback check"
+        );
+        assert!(state.vault_session.is_unlocked().await);
+    }
+
+    /// A save that lands while the rollback check waits leaves the check
+    /// answering for an epoch the vault is no longer at, so the unlock is
+    /// refused rather than committed on a stale answer.
+    #[tokio::test]
+    async fn a_vault_saved_during_the_rollback_check_is_not_unlocked() {
+        let (app, _dir, store, mut parked, release, master) = app_with_blocking_store().await;
+
+        store.armed.store(true, Ordering::SeqCst);
+        let unlocking = secure_unlock_vault(app.state(), "passphrase".into(), None);
+        tokio::pin!(unlocking);
+        tokio::select! {
+            _ = parked.recv() => {}
+            result = &mut unlocking => panic!("never reached the credential store: {result:?}"),
+        }
+        let state = app.state::<Arc<AppState>>();
+        {
+            let mut vault = state
+                .vault
+                .try_lock()
+                .expect("vault released during the check");
+            let (private, _) = clavyn_core::keys::generate_ed25519().expect("generate");
+            let (meta, _) =
+                clavyn_core::keys::parse_openssh_private(&private, None).expect("parse");
+            vault.add_key(&master, meta, &private).expect("save");
+        }
+        store.armed.store(false, Ordering::SeqCst);
+        release.send(()).expect("release");
+
+        let error = unlocking.await.expect_err("stale rollback check");
+        assert!(error.contains("changed"), "{error}");
+        assert!(!state.vault_session.is_unlocked().await);
     }
 }
