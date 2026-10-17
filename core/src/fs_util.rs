@@ -805,7 +805,10 @@ mod tests {
 
         create_private_bytes(&path, b"{}").expect("create");
 
-        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "unexpected mode {:o}", mode & 0o777);
     }
 }
