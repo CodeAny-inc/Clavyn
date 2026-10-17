@@ -3,12 +3,12 @@ use crate::identity::Identity;
 use crate::known_hosts::KnownHosts;
 use crate::vault::Vault;
 use crate::{CoreError, Result};
-use russh::client::{self, Config, Handle};
+use russh::client::{self, AuthResult, Config, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{
     decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg,
     PublicKeyOrCertificate,
 };
-use russh::{mac, Preferred};
+use russh::{mac, MethodKind, MethodSet, Preferred};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -292,6 +292,150 @@ fn rsa_hash_for(advertised: Option<Option<HashAlg>>) -> HashAlg {
     }
 }
 
+/// Upper bound on keyboard-interactive exchanges in one sign-in. A server
+/// asking for the password needs one or two; one that keeps sending empty
+/// rounds is not going to finish.
+const MAX_KEYBOARD_INTERACTIVE_ROUNDS: usize = 5;
+
+fn auth_error(e: russh::Error) -> CoreError {
+    CoreError::Ssh(format!("auth: {e}"))
+}
+
+/// Signs in with a password the way OpenSSH does: a `none` request first to
+/// learn which methods the server accepts, then `password` if it is offered,
+/// and `keyboard-interactive` if it is offered and `password` is not, or did
+/// not succeed. Servers that leave password checks to PAM often disable
+/// `password` and ask for the password through `keyboard-interactive`.
+async fn authenticate_with_password(
+    session: &mut Handle<SshHandler>,
+    username: &str,
+    password: &str,
+) -> Result<AuthResult> {
+    let methods = match session
+        .authenticate_none(username)
+        .await
+        .map_err(auth_error)?
+    {
+        AuthResult::Success => return Ok(AuthResult::Success),
+        AuthResult::Failure {
+            remaining_methods, ..
+        } => remaining_methods,
+    };
+    let mut outcome = AuthResult::Failure {
+        remaining_methods: methods.clone(),
+        partial_success: false,
+    };
+    if methods.contains(&MethodKind::Password) {
+        outcome = session
+            .authenticate_password(username, password)
+            .await
+            .map_err(auth_error)?;
+        match &outcome {
+            AuthResult::Failure {
+                remaining_methods,
+                partial_success: false,
+            } if remaining_methods.contains(&MethodKind::KeyboardInteractive) => {}
+            _ => return Ok(outcome),
+        }
+    }
+    if methods.contains(&MethodKind::KeyboardInteractive) {
+        outcome = keyboard_interactive_password(session, username, password).await?;
+    }
+    Ok(outcome)
+}
+
+/// Answers a keyboard-interactive exchange with the password, as OpenSSH does
+/// for a PAM password prompt: the password goes only to a round with a single
+/// prompt whose input is not echoed, and only once. A round with several
+/// prompts, an echoed prompt, or a second password prompt asks for something
+/// else — usually a one-time code — so it is refused rather than answered with
+/// the password. Rounds with no prompts only carry text and are acknowledged
+/// with an empty reply.
+async fn keyboard_interactive_password(
+    session: &mut Handle<SshHandler>,
+    username: &str,
+    password: &str,
+) -> Result<AuthResult> {
+    let mut reply = session
+        .authenticate_keyboard_interactive_start(username, None)
+        .await
+        .map_err(auth_error)?;
+    let mut answered = false;
+    for _ in 0..MAX_KEYBOARD_INTERACTIVE_ROUNDS {
+        let prompts = match reply {
+            KeyboardInteractiveAuthResponse::Success => return Ok(AuthResult::Success),
+            KeyboardInteractiveAuthResponse::Failure {
+                remaining_methods,
+                partial_success,
+            } => {
+                return Ok(AuthResult::Failure {
+                    remaining_methods,
+                    partial_success,
+                })
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => prompts,
+        };
+        let responses = match prompts.as_slice() {
+            [] => Vec::new(),
+            [prompt] if !prompt.echo && !answered => {
+                answered = true;
+                vec![password.to_owned()]
+            }
+            _ => {
+                let asked: Vec<String> = prompts
+                    .iter()
+                    .map(|p| format!("{:?}", p.prompt.trim()))
+                    .collect();
+                return Err(CoreError::Ssh(format!(
+                    "auth: the server asks for more than the password ({}); Clavyn cannot \
+                     answer additional sign-in prompts such as one-time codes yet",
+                    asked.join(", ")
+                )));
+            }
+        };
+        reply = session
+            .authenticate_keyboard_interactive_respond(responses)
+            .await
+            .map_err(auth_error)?;
+    }
+    Err(CoreError::Ssh(format!(
+        "auth: the server sent more than {MAX_KEYBOARD_INTERACTIVE_ROUNDS} keyboard-interactive \
+         rounds without finishing sign-in"
+    )))
+}
+
+/// Explains a failed sign-in from what the server said it still accepts.
+/// `usable` lists the methods Clavyn can drive for this host's auth setting;
+/// `credential` names what was offered.
+fn rejection(
+    remaining: &MethodSet,
+    partial_success: bool,
+    usable: &[MethodKind],
+    method: &str,
+    credential: &str,
+) -> CoreError {
+    let accepted = if remaining.is_empty() {
+        "nothing it names".to_owned()
+    } else {
+        remaining
+            .iter()
+            .map(<&str>::from)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let reason = if partial_success {
+        format!(
+            "the server accepted this step but requires another: {accepted}; Clavyn cannot \
+             complete multi-step sign-in yet"
+        )
+    } else if !remaining.is_empty() && !usable.iter().any(|m| remaining.contains(m)) {
+        format!("the server does not accept {method} sign-in (it accepts: {accepted})")
+    } else {
+        format!("the server rejected the {credential} (it accepts: {accepted})")
+    };
+    CoreError::Ssh(format!("authentication rejected by server: {reason}"))
+}
+
 /// Open an authenticated SSH session and return the handle.
 /// The caller is responsible for opening a channel and starting the shell.
 ///
@@ -371,7 +515,7 @@ pub async fn connect(
     // server that finishes the key exchange and then stalls while answering an
     // authentication request. Neither timeout subsumes the other.
     let auth_ok = tokio::time::timeout(CONNECT_TIMEOUT, async {
-        let outcome = match auth {
+        match auth {
             AuthMethod::Agent => {
                 unreachable!("agent auth is rejected before network connection")
             }
@@ -379,7 +523,7 @@ pub async fn connect(
                 let pw = password.ok_or_else(|| {
                     CoreError::InvalidInput("password required but not provided".into())
                 })?;
-                session.authenticate_password(username, pw).await
+                authenticate_with_password(&mut session, username, pw).await
             }
             AuthMethod::PublicKey => {
                 let key_id = key_id.ok_or_else(|| {
@@ -418,15 +562,34 @@ pub async fn connect(
                         PrivateKeyWithHashAlg::new(Arc::new(pair), hash_alg),
                     )
                     .await
+                    .map_err(auth_error)
             }
-        };
-        outcome.map_err(|e| CoreError::Ssh(format!("auth: {e}")))
+        }
     })
     .await
     .map_err(|_| timed_out("auth", &addr))??;
 
-    if !auth_ok.success() {
-        return Err(CoreError::Ssh("authentication rejected by server".into()));
+    if let AuthResult::Failure {
+        remaining_methods,
+        partial_success,
+    } = auth_ok
+    {
+        return Err(match auth {
+            AuthMethod::PublicKey => rejection(
+                &remaining_methods,
+                partial_success,
+                &[MethodKind::PublicKey],
+                "publickey",
+                "key",
+            ),
+            _ => rejection(
+                &remaining_methods,
+                partial_success,
+                &[MethodKind::Password, MethodKind::KeyboardInteractive],
+                "password",
+                "password",
+            ),
+        });
     }
     Ok(session)
 }

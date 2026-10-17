@@ -17,8 +17,8 @@ use clavyn_core::vault::Vault;
 use clavyn_core::CoreError;
 use common::{copy_fixture, passphrase_protected_ed25519, PASSPHRASE};
 use russh::keys::{decode_secret_key, parse_public_key_base64, Algorithm, PrivateKey, PublicKey};
-use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
-use russh::{Channel, ChannelId, ChannelMsg, Preferred};
+use russh::server::{self, Auth, ChannelOpenHandle, Msg, Response, Session};
+use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Preferred};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
@@ -114,7 +114,10 @@ async fn start_server_offering(
     serve(config, handler).await
 }
 
-async fn serve(config: server::Config, handler: TestServer) -> u16 {
+async fn serve<H>(config: server::Config, handler: H) -> u16
+where
+    H: server::Handler + Clone + Send + 'static,
+{
     let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -389,3 +392,194 @@ async fn a_host_key_signed_only_with_sha1_is_refused() {
     assert!(pins.lock().await.list().is_empty());
 }
 
+
+/// How [`SignInServer`] treats a sign-in.
+#[derive(Clone, Copy)]
+enum SignIn {
+    /// `keyboard-interactive` only: a round with no prompts, then a single
+    /// hidden `Password:` prompt, as a PAM-backed sshd with
+    /// `PasswordAuthentication no` sends.
+    KeyboardInteractive,
+    /// `keyboard-interactive` only, asking for the password and a one-time code
+    /// in one round.
+    PasswordAndCode,
+    /// `password`, rejecting every attempt while still listing `password` and
+    /// `publickey`, as sshd does.
+    PasswordOrKey,
+    /// The password through `keyboard-interactive` is only the first of two
+    /// steps, as with sshd's `AuthenticationMethods keyboard-interactive,publickey`.
+    PasswordThenKey,
+}
+
+#[derive(Clone)]
+struct SignInServer {
+    mode: SignIn,
+    rounds: usize,
+    responses: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl SignInServer {
+    fn new(mode: SignIn) -> Self {
+        Self {
+            mode,
+            rounds: 0,
+            responses: Arc::default(),
+        }
+    }
+}
+
+impl server::Handler for SignInServer {
+    type Error = russh::Error;
+
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        Ok(Auth::Reject {
+            proceed_with_methods: Some(MethodSet::from(
+                &[MethodKind::Password, MethodKind::PublicKey][..],
+            )),
+            partial_success: false,
+        })
+    }
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        let answers: Vec<String> = response
+            .into_iter()
+            .flatten()
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .collect();
+        self.responses
+            .lock()
+            .unwrap()
+            .extend(answers.iter().cloned());
+        self.rounds += 1;
+        let prompt = |prompts: &'static [(Cow<'static, str>, bool)]| Auth::Partial {
+            name: "".into(),
+            instructions: "".into(),
+            prompts: Cow::Borrowed(prompts),
+        };
+        Ok(match (self.mode, self.rounds) {
+            (SignIn::KeyboardInteractive, 1) => prompt(&[]),
+            (SignIn::KeyboardInteractive, 2) => prompt(&[(Cow::Borrowed("Password: "), false)]),
+            (SignIn::KeyboardInteractive, 3) if user == USER && answers == [PASSWORD] => {
+                Auth::Accept
+            }
+            (SignIn::PasswordThenKey, 1) => prompt(&[(Cow::Borrowed("Password: "), false)]),
+            (SignIn::PasswordThenKey, 2) if user == USER && answers == [PASSWORD] => Auth::Reject {
+                proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey][..])),
+                partial_success: true,
+            },
+            (SignIn::PasswordAndCode, 1) => prompt(&[
+                (Cow::Borrowed("Password: "), false),
+                (Cow::Borrowed("Verification code: "), false),
+            ]),
+            _ => Auth::reject(),
+        })
+    }
+}
+
+async fn start_sign_in_server(methods: &[MethodKind], handler: SignInServer) -> u16 {
+    let mut config = server_config(random_host_key());
+    config.methods = MethodSet::from(methods);
+    serve(config, handler).await
+}
+
+async fn password_error(port: u16, password: &str) -> String {
+    let dir = tempfile::tempdir().expect("temp dir");
+    match connect(
+        &password_host(port),
+        None,
+        known_hosts(&dir),
+        None,
+        None,
+        Some(password),
+    )
+    .await
+    {
+        Ok(_) => panic!("sign-in unexpectedly succeeded"),
+        Err(error) => error.to_string(),
+    }
+}
+
+/// A server that takes the password only through `keyboard-interactive` — the
+/// default for sshd on FreeBSD and many PAM setups — accepts a Password host.
+#[tokio::test]
+async fn a_password_is_answered_through_keyboard_interactive() {
+    let server = SignInServer::new(SignIn::KeyboardInteractive);
+    let responses = server.responses.clone();
+    let port = start_sign_in_server(&[MethodKind::KeyboardInteractive], server).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    connect(
+        &password_host(port),
+        None,
+        known_hosts(&dir),
+        None,
+        None,
+        Some(PASSWORD),
+    )
+    .await
+    .expect("keyboard-interactive password auth");
+    assert_eq!(*responses.lock().unwrap(), [PASSWORD]);
+}
+
+/// The password is never handed to a round that also asks for something else.
+#[tokio::test]
+async fn a_second_factor_prompt_is_refused_without_sending_the_password() {
+    let server = SignInServer::new(SignIn::PasswordAndCode);
+    let responses = server.responses.clone();
+    let port = start_sign_in_server(&[MethodKind::KeyboardInteractive], server).await;
+
+    let error = password_error(port, PASSWORD).await;
+    assert!(error.contains("Verification code"), "{error}");
+    assert!(error.contains("cannot"), "{error}");
+    assert!(responses.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rejected_password_names_the_methods_the_server_accepts() {
+    let port = start_sign_in_server(
+        &[MethodKind::Password, MethodKind::PublicKey],
+        SignInServer::new(SignIn::PasswordOrKey),
+    )
+    .await;
+
+    let error = password_error(port, "wrong password").await;
+    assert!(error.contains("authentication rejected"), "{error}");
+    assert!(error.contains("rejected the password"), "{error}");
+    assert!(error.contains("it accepts: password, publickey"), "{error}");
+}
+
+#[tokio::test]
+async fn a_server_without_password_sign_in_says_so() {
+    let port = start_sign_in_server(
+        &[MethodKind::PublicKey],
+        SignInServer::new(SignIn::PasswordOrKey),
+    )
+    .await;
+
+    let error = password_error(port, PASSWORD).await;
+    assert!(
+        error.contains("does not accept password sign-in (it accepts: publickey)"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_partial_success_is_reported_as_a_further_step() {
+    let port = start_sign_in_server(
+        &[MethodKind::KeyboardInteractive, MethodKind::PublicKey],
+        SignInServer::new(SignIn::PasswordThenKey),
+    )
+    .await;
+
+    let error = password_error(port, PASSWORD).await;
+    assert!(
+        error.contains("accepted this step but requires another: publickey"),
+        "{error}"
+    );
+    assert!(error.contains("multi-step"), "{error}");
+}
