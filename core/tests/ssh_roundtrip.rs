@@ -400,6 +400,9 @@ enum SignIn {
     /// hidden `Password:` prompt, as a PAM-backed sshd with
     /// `PasswordAuthentication no` sends.
     KeyboardInteractive,
+    /// `keyboard-interactive` only: four rounds with no prompts, the password in
+    /// the fifth, and the acceptance in reply to that fifth answer.
+    PasswordInFifthRound,
     /// `keyboard-interactive` only, asking for the password and a one-time code
     /// in one round.
     PasswordAndCode,
@@ -469,6 +472,11 @@ impl server::Handler for SignInServer {
             (SignIn::KeyboardInteractive, 3) if user == USER && answers == [PASSWORD] => {
                 Auth::Accept
             }
+            (SignIn::PasswordInFifthRound, 1..=4) => prompt(&[]),
+            (SignIn::PasswordInFifthRound, 5) => prompt(&[(Cow::Borrowed("Password: "), false)]),
+            (SignIn::PasswordInFifthRound, 6) if user == USER && answers == [PASSWORD] => {
+                Auth::Accept
+            }
             (SignIn::PasswordThenKey, 1) => prompt(&[(Cow::Borrowed("Password: "), false)]),
             (SignIn::PasswordThenKey, 2) if user == USER && answers == [PASSWORD] => Auth::Reject {
                 proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey][..])),
@@ -526,6 +534,26 @@ async fn a_password_is_answered_through_keyboard_interactive() {
     .await
     .expect("keyboard-interactive password auth");
     assert_eq!(*responses.lock().unwrap(), [PASSWORD]);
+}
+
+/// The server's reply to the last round Clavyn answers is still read, so an
+/// acceptance there signs in.
+#[tokio::test]
+async fn an_acceptance_after_the_last_allowed_round_signs_in() {
+    let server = SignInServer::new(SignIn::PasswordInFifthRound);
+    let port = start_sign_in_server(&[MethodKind::KeyboardInteractive], server).await;
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    connect(
+        &password_host(port),
+        None,
+        known_hosts(&dir),
+        None,
+        None,
+        Some(PASSWORD),
+    )
+    .await
+    .expect("sign-in accepted in reply to the fifth round");
 }
 
 /// A password rejected through `password` is not tried again through

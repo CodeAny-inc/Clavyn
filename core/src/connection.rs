@@ -356,7 +356,9 @@ async fn keyboard_interactive_password(
         .await
         .map_err(auth_error)?;
     let mut answered = false;
-    for _ in 0..MAX_KEYBOARD_INTERACTIVE_ROUNDS {
+    // One pass more than the rounds answered, so the server's reply to the
+    // last allowed round is still read rather than reported as one too many.
+    for round in 0..=MAX_KEYBOARD_INTERACTIVE_ROUNDS {
         let prompts = match reply {
             KeyboardInteractiveAuthResponse::Success => return Ok(AuthResult::Success),
             KeyboardInteractiveAuthResponse::Failure {
@@ -367,6 +369,11 @@ async fn keyboard_interactive_password(
                     remaining_methods,
                     partial_success,
                 })
+            }
+            KeyboardInteractiveAuthResponse::InfoRequest { .. }
+                if round == MAX_KEYBOARD_INTERACTIVE_ROUNDS =>
+            {
+                break
             }
             KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => prompts,
         };
