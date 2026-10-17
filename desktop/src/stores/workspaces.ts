@@ -13,8 +13,20 @@ export const useWorkspacesStore = defineStore("workspaces", () => {
   const loadError = ref("");
   let pendingLoad: Promise<void> | null = null;
   // Bumped after every local change. A read that started before the bump
-  // carries a snapshot taken before that change, so it is dropped.
+  // carries a snapshot taken before that change.
   let revision = 0;
+
+  // A read that overlapped a local change is repeated rather than published or
+  // dropped: publishing would undo the change on screen, and dropping would
+  // leave every other workspace unlisted. The backend has applied the change
+  // by the time the local bump happens, so the repeat includes it.
+  async function readCurrent(): Promise<Workspace[]> {
+    for (;;) {
+      const startedAt = revision;
+      const items = await api.listWorkspaces();
+      if (revision === startedAt) return items;
+    }
+  }
 
   // Startup and the view both call load(); they share one read, so a late
   // failure from one cannot overwrite the other's success.
@@ -22,11 +34,9 @@ export const useWorkspacesStore = defineStore("workspaces", () => {
     if (pendingLoad) return pendingLoad;
     loading.value = true;
     loadError.value = "";
-    const startedAt = revision;
-    pendingLoad = api
-      .listWorkspaces()
+    pendingLoad = readCurrent()
       .then((items) => {
-        if (revision === startedAt) workspaces.value = items;
+        workspaces.value = items;
         loaded.value = true;
       })
       .catch((e) => {

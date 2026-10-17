@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import HostList from "./HostList.vue";
@@ -155,16 +155,22 @@ describe("identity and workspace list states", () => {
     expect(wrapper.text()).not.toContain("No workspaces yet");
   });
 
-  it("keeps a workspace created while the startup read is in flight", async () => {
-    let release!: () => void;
-    setInvokeHandler("list_workspaces", () => new Promise((resolve) => { release = () => resolve([]); }));
-    setInvokeHandler("create_workspace", (args) => ({ id: "ws-new", name: (args as { name: string }).name, tabs: [] }));
+  it("lists every workspace, including one created while the startup read was in flight", async () => {
+    const saved = { id: "ws-old", name: "release", tabs: [] };
+    const created = { id: "ws-new", name: "ops", tabs: [] };
+    const reads: Array<(items: unknown[]) => void> = [];
+    setInvokeHandler("list_workspaces", () => new Promise((resolve) => reads.push(resolve)));
+    setInvokeHandler("create_workspace", () => created);
     const store = useWorkspacesStore();
-    const read = store.load();
+    const load = store.load();
     await store.createWorkspace("ops");
-    release();
-    await read;
-    expect(store.workspaces.map((w) => w.name)).toEqual(["ops"]);
+    // The first read was taken before the create and is repeated; the backend
+    // answers the repeat with both.
+    reads[0]([saved]);
+    await vi.waitFor(() => expect(reads).toHaveLength(2));
+    reads[1]([saved, created]);
+    await load;
+    expect(store.workspaces.map((w) => w.name)).toEqual(["release", "ops"]);
   });
 
   it("shares one workspace read between overlapping loads", async () => {
