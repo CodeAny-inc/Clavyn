@@ -9,8 +9,16 @@ use std::time::Duration;
 /// that did not finish.
 const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
 
-/// Load a state file, keeping "could not be read" and "is not valid state"
-/// apart and naming the file in both.
+/// Load a state file, keeping "absent", "could not be read" and "is not valid
+/// state" apart and naming the file in the last two.
+///
+/// Only `NotFound` reads as absent (`Ok(None)`). Every other failure — a
+/// permission problem on the file or a directory above it, an I/O error, a
+/// stale network handle, a symlink loop — is `UnreadableState`. `Path::exists`
+/// cannot be used to decide this: it answers false for all of those, and a
+/// caller that then starts from empty state loses pinned host keys for the
+/// session, and offers to create a vault whose first save replaces the one
+/// that could not be read.
 ///
 /// The bytes are read and parsed as bytes rather than through a `String`: a
 /// file that is not valid UTF-8 — hand-edited in an ANSI or UTF-16 editor, or
@@ -19,15 +27,25 @@ const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
 /// screen as a failure it can only offer to retry, forever. As a parse failure
 /// it is `CorruptState`, which is what makes moving the file aside the right
 /// offer.
-pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = std::fs::read(path).map_err(|e| crate::CoreError::UnreadableState {
+pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(unreadable_state(path, e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| crate::CoreError::CorruptState {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })
+}
+
+pub(crate) fn unreadable_state(path: &Path, error: std::io::Error) -> crate::CoreError {
+    crate::CoreError::UnreadableState {
         path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
-    serde_json::from_slice(&bytes).map_err(|e| crate::CoreError::CorruptState {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })
+        reason: error.to_string(),
+    }
 }
 
 /// Write `contents` to `path` atomically, readable only by the owner.
@@ -491,6 +509,30 @@ mod owner_only {
             }
         }
     }
+}
+
+/// Seed `name` with `contents` in a fresh directory, take the search bit off
+/// that directory, and hand the path to `load`. The file is there, but neither
+/// it nor its metadata can be reached, which is what an inherited ACL or an
+/// unreachable network share looks like to a loader. Returns `None` when the
+/// restriction is not enforced — root ignores it — so there is nothing to
+/// observe.
+#[cfg(all(test, unix))]
+pub(crate) fn load_from_unsearchable_dir<T>(
+    name: &str,
+    contents: &str,
+    load: impl FnOnce(PathBuf) -> Result<T>,
+) -> Option<Result<T>> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(name);
+    std::fs::write(&path, contents).expect("seed");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let enforced = std::fs::metadata(&path).is_err();
+    let loaded = load(path);
+    // Restore the directory so the tempdir can be removed.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("restore");
+    enforced.then_some(loaded)
 }
 
 #[cfg(test)]

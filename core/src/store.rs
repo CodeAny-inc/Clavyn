@@ -28,14 +28,10 @@ pub struct Store {
 
 impl Store {
     pub fn load(path: PathBuf) -> Result<Self> {
-        let data = if path.exists() {
-            // Fail closed. Falling back to an empty store would drop every host,
-            // identity and workspace, and the next save() would overwrite the
-            // file that still holds them.
-            crate::fs_util::read_state_file(&path)?
-        } else {
-            StoreData::default()
-        };
+        // Fail closed. Falling back to an empty store would drop every host,
+        // identity and workspace, and the next save() would overwrite the file
+        // that still holds them.
+        let data = crate::fs_util::read_state_file(&path)?.unwrap_or_default();
         Ok(Self { path, data })
     }
 
@@ -85,11 +81,13 @@ impl Store {
     }
 
     pub fn update_host(&mut self, host: Host) -> Result<()> {
-        self.commit(|data| {
-            if let Some(h) = data.hosts.iter_mut().find(|h| h.id == host.id) {
-                *h = host;
-            }
-        })
+        let index = self
+            .data
+            .hosts
+            .iter()
+            .position(|h| h.id == host.id)
+            .ok_or_else(|| CoreError::NotFound(format!("host {}", host.id)))?;
+        self.commit(|data| data.hosts[index] = host)
     }
 
     pub fn remove_host(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -131,11 +129,13 @@ impl Store {
     }
 
     pub fn update_identity(&mut self, identity: Identity) -> Result<()> {
-        self.commit(|data| {
-            if let Some(i) = data.identities.iter_mut().find(|i| i.id == identity.id) {
-                *i = identity;
-            }
-        })
+        let index = self
+            .data
+            .identities
+            .iter()
+            .position(|i| i.id == identity.id)
+            .ok_or_else(|| CoreError::NotFound(format!("identity {}", identity.id)))?;
+        self.commit(|data| data.identities[index] = identity)
     }
 
     pub fn remove_identity(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -165,11 +165,13 @@ impl Store {
 
     pub fn update_workspace(&mut self, mut ws: Workspace) -> Result<()> {
         ws.sanitize()?;
-        self.commit(|data| {
-            if let Some(w) = data.workspaces.iter_mut().find(|w| w.id == ws.id) {
-                *w = ws;
-            }
-        })
+        let index = self
+            .data
+            .workspaces
+            .iter()
+            .position(|w| w.id == ws.id)
+            .ok_or_else(|| CoreError::NotFound(format!("workspace {}", ws.id)))?;
+        self.commit(|data| data.workspaces[index] = ws)
     }
 
     pub fn remove_workspace(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -193,8 +195,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::Store;
-    use crate::host::HostGroup;
+    use crate::host::{Host, HostGroup};
+    use crate::identity::Identity;
     use crate::workspace::{PaneLayout, SplitDirection, TabLayout, Workspace};
+    use crate::CoreError;
 
     fn workspace_with_ratio(ratio: f32) -> Workspace {
         let mut ws = Workspace::new("hostile");
@@ -331,6 +335,55 @@ mod tests {
             error.to_string().contains("cannot be loaded again"),
             "unexpected error: {error}"
         );
+        assert_eq!(std::fs::read_to_string(&path).expect("read back"), ONE_HOST);
+    }
+
+    // Every stat error reads as "absent" to `Path::exists`, and an empty store
+    // loaded in its place is written over the real one on the next save.
+    #[test]
+    #[cfg(unix)]
+    fn a_store_that_cannot_be_reached_is_not_loaded_as_empty() {
+        let Some(loaded) =
+            crate::fs_util::load_from_unsearchable_dir("store.json", ONE_HOST, Store::load)
+        else {
+            return;
+        };
+        match loaded {
+            Err(CoreError::UnreadableState { path, .. }) => {
+                assert!(path.ends_with("store.json"), "unexpected path: {path}");
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("an unreachable store loaded as empty"),
+        }
+    }
+
+    #[test]
+    fn updating_an_item_that_is_not_stored_is_an_error_and_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        std::fs::write(&path, ONE_HOST).expect("seed store");
+        let mut store = Store::load(path.clone()).expect("load");
+
+        let host = Host::new("ghost", "ghost.example.com", 22, "root");
+        match store.update_host(host) {
+            Err(CoreError::NotFound(what)) => assert!(what.starts_with("host "), "{what}"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        let identity = Identity::new("ghost", "root");
+        match store.update_identity(identity) {
+            Err(CoreError::NotFound(what)) => assert!(what.starts_with("identity "), "{what}"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        match store.update_workspace(Workspace::new("ghost")) {
+            Err(CoreError::NotFound(what)) => assert!(what.starts_with("workspace "), "{what}"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        assert_eq!(store.hosts().len(), 1);
+        assert!(store.identities().is_empty());
+        assert!(store.workspaces().is_empty());
         assert_eq!(std::fs::read_to_string(&path).expect("read back"), ONE_HOST);
     }
 }

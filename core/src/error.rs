@@ -36,6 +36,10 @@ pub enum CoreError {
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
+    /// An update named a stored item that does not exist. Nothing was written.
+    #[error("{0} not found")]
+    NotFound(String),
+
     #[error("{path} is corrupt and was not loaded: {reason}")]
     CorruptState { path: String, reason: String },
 

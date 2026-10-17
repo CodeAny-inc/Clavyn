@@ -48,12 +48,11 @@ fn is_false(value: &bool) -> bool {
 
 impl KnownHosts {
     pub fn load(path: PathBuf) -> Result<Self> {
-        let entries = if path.exists() {
-            // Fail closed. Treating an unreadable file as "no known hosts" would
-            // silently downgrade every pinned host back to trust-on-first-use.
-            normalize_entries(crate::fs_util::read_state_file(&path)?)
-        } else {
-            HashMap::new()
+        // Fail closed. Treating an unreadable file as "no known hosts" would
+        // silently downgrade every pinned host back to trust-on-first-use.
+        let entries = match crate::fs_util::read_state_file(&path)? {
+            Some(entries) => normalize_entries(entries),
+            None => HashMap::new(),
         };
         Ok(Self {
             path,
@@ -768,6 +767,30 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("is corrupt"), "unexpected error: {error}");
+    }
+
+    // `Path::exists` reads every stat error as "absent", which would turn each
+    // pinned host back into a first contact for the session.
+    #[test]
+    #[cfg(unix)]
+    fn pins_that_cannot_be_reached_are_not_loaded_as_empty() {
+        let Some(loaded) = crate::fs_util::load_from_unsearchable_dir(
+            "known_hosts.json",
+            r#"{"prod.example.com:22":{"key_type":"ssh-ed25519","key_base64":"AAAApinned","fingerprint":"SHA256:pinned"}}"#,
+            KnownHosts::load,
+        ) else {
+            return;
+        };
+        match loaded {
+            Err(crate::CoreError::UnreadableState { path, .. }) => {
+                assert!(
+                    path.ends_with("known_hosts.json"),
+                    "unexpected path: {path}"
+                );
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("unreachable pins loaded as empty"),
+        }
     }
 
     #[test]

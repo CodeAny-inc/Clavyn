@@ -23,6 +23,9 @@ const VAULT_FORMAT_VERSION: u32 = 1;
 
 const NONCE_LEN: usize = 12;
 
+/// Shortest passphrase a new vault accepts, counted in Unicode scalar values.
+const MIN_PASSPHRASE_CHARS: usize = 8;
+
 /// Domain separator so the associated data of a vault can never collide with
 /// authenticated bytes produced anywhere else.
 const AAD_DOMAIN: &[u8] = b"clavyn.vault.header";
@@ -136,11 +139,9 @@ impl Drop for SecretText {
 
 impl Vault {
     pub fn open(path: PathBuf) -> Result<Self> {
-        let file = if path.exists() {
-            crate::fs_util::read_state_file(&path)?
-        } else {
-            VaultFile::uninitialized()
-        };
+        // Fail closed. An unreadable vault reported as "not initialized" leads
+        // straight to creating a new one over it, and every stored key with it.
+        let file = crate::fs_util::read_state_file(&path)?.unwrap_or_else(VaultFile::uninitialized);
         Ok(Self {
             path,
             file,
@@ -206,8 +207,31 @@ impl Vault {
 
     /// Create the vault from a fresh random salt and return the derived master
     /// key, so an unlock that follows initialization does not pay the KDF twice.
+    ///
+    /// The passphrase must be at least eight characters. The UI checks the same
+    /// rule, but this is the check every caller goes through.
+    ///
+    /// Refuses whenever a file already sits at the vault path, or whether one
+    /// does cannot be determined: the new vault is renamed over that path, and
+    /// a vault there holds keys that exist nowhere else. Replacing a vault goes
+    /// through [`Vault::reset`] first, which deletes the file.
     pub async fn initialize(&mut self, passphrase: &str) -> Result<VaultKey> {
         self.ensure_writable()?;
+        if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
+            return Err(CoreError::InvalidInput(format!(
+                "vault passphrase must be at least {MIN_PASSPHRASE_CHARS} characters"
+            )));
+        }
+        match self.path.try_exists() {
+            Ok(false) => {}
+            Ok(true) => {
+                return Err(CoreError::Vault(format!(
+                    "{} already exists; reset the vault before creating a new one",
+                    self.path.display()
+                )))
+            }
+            Err(e) => return Err(crate::fs_util::unreadable_state(&self.path, e)),
+        }
         let mut salt = [0u8; 16];
         random_bytes(&mut salt)?;
         let key = derive_key_off_thread(passphrase, salt.to_vec()).await?;
@@ -1555,10 +1579,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_parent_creation_leaves_initialization_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let parent = dir.path().join("blocked-parent");
-        std::fs::write(&parent, b"not a directory").expect("block parent");
+        // A dangling symlink: the vault path below it reads as absent, but the
+        // directory cannot be created over the link, even by root.
+        std::os::unix::fs::symlink(dir.path().join("missing"), &parent).expect("block parent");
         let path = parent.join("vault.json");
         let mut vault = Vault::open(path.clone()).expect("open vault");
 
@@ -1584,20 +1611,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_file_write_leaves_initialization_retryable() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("vault.json");
+        let parent = dir.path().join("vault-dir");
+        std::fs::create_dir(&parent).expect("create parent");
+        let path = parent.join("vault.json");
         let mut vault = Vault::open(path.clone()).expect("open vault");
-        // Parent creation succeeds, but writing to a directory fails reliably
-        // even when tests run with permission to write anywhere in the tempdir.
-        std::fs::create_dir(&path).expect("block vault file");
+        // The vault path is free and its directory exists, but nothing can be
+        // created in that directory, so the failure is in the write itself.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        // Root ignores the mode, so there is no failing write to observe.
+        let enforced = std::fs::write(parent.join("probe"), b"").is_err();
+        let first = vault.initialize("first attempt passphrase").await;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).expect("repair");
+        if !enforced {
+            return;
+        }
 
-        assert!(vault.initialize("first attempt passphrase").await.is_err());
+        assert!(first.is_err());
         assert!(!vault.is_initialized());
         assert!(vault.binding_id().is_none());
         assert!(vault.keys_meta().is_empty());
 
-        std::fs::remove_dir(&path).expect("repair vault path");
         vault
             .initialize("retry passphrase")
             .await
@@ -1663,5 +1700,112 @@ mod tests {
             Err(other) => panic!("expected UnreadableState, got {other}"),
             Ok(_) => panic!("an unreadable vault opened"),
         }
+    }
+
+    /// `Path::exists` reads every stat error as "absent". A vault reported as
+    /// not initialized gets a Create Vault screen, and creating one renames a
+    /// fresh file over the one holding every key.
+    #[test]
+    #[cfg(unix)]
+    fn a_vault_that_cannot_be_reached_is_not_reported_as_absent() {
+        let Some(opened) = crate::fs_util::load_from_unsearchable_dir(
+            "vault.json",
+            r#"{"version":1,"salt":"","nonce":"","keys_meta":[],"ciphertext":"c2VhbGVk"}"#,
+            Vault::open,
+        ) else {
+            return;
+        };
+        match opened {
+            Err(crate::CoreError::UnreadableState { path, .. }) => {
+                assert!(path.ends_with("vault.json"), "unexpected path: {path}");
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("an unreachable vault opened as uninitialized"),
+        }
+    }
+
+    /// A handle that saw no vault must not replace one that has appeared since,
+    /// whatever sits at the path.
+    #[tokio::test]
+    async fn initialize_refuses_to_replace_an_existing_vault_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut stale = Vault::open(path.clone()).expect("open before the vault exists");
+        let (_, _) = initialized(path.clone(), "correct horse battery staple").await;
+        let on_disk = std::fs::read(&path).expect("read vault");
+
+        assert!(stale.initialize("another passphrase").await.is_err());
+        assert!(!stale.is_initialized());
+        assert_eq!(std::fs::read(&path).expect("read back"), on_disk);
+        Vault::open(path.clone())
+            .expect("reopen")
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("the original vault still opens");
+
+        let occupied = dir.path().join("occupied.json");
+        let mut vault = Vault::open(occupied.clone()).expect("open");
+        std::fs::create_dir(&occupied).expect("occupy the vault path");
+        assert!(vault
+            .initialize("correct horse battery staple")
+            .await
+            .is_err());
+        assert!(occupied.is_dir());
+    }
+
+    /// When whether a vault exists cannot be determined, initialization treats
+    /// it as one that does.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn initialize_refuses_when_the_vault_path_cannot_be_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open");
+        std::fs::write(&path, b"existing vault").expect("seed");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("chmod");
+        // Root ignores the mode, so the path can always be checked.
+        let enforced = std::fs::metadata(&path).is_err();
+        let result = vault.initialize("correct horse battery staple").await;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+        if !enforced {
+            return;
+        }
+
+        match result {
+            Err(crate::CoreError::UnreadableState { path: reported, .. }) => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("initialized over a vault path that could not be checked"),
+        }
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing vault");
+    }
+
+    #[tokio::test]
+    async fn initialize_refuses_a_passphrase_shorter_than_eight_characters() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open");
+
+        for short in ["", "1234567", "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"] {
+            match vault.initialize(short).await {
+                Err(crate::CoreError::InvalidInput(_)) => {}
+                Err(other) => panic!("expected InvalidInput for {short:?}, got {other}"),
+                Ok(_) => panic!("initialized with {short:?}"),
+            }
+            assert!(!vault.is_initialized());
+            assert!(!path.exists());
+        }
+
+        // Counted in characters, not bytes: eight two-byte characters pass.
+        let passphrase = "\u{e9}".repeat(8);
+        vault
+            .initialize(&passphrase)
+            .await
+            .expect("eight characters");
+        assert!(vault.verify_passphrase(&passphrase).await.is_ok());
     }
 }
