@@ -11,14 +11,23 @@ use russh::keys::{
 use russh::{mac, Preferred};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock, PoisonError};
 use std::time::Duration;
+use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
 /// Upper bound on opening the transport and on completing authentication.
 /// A peer that accepts the TCP connection and then stops responding otherwise
 /// leaves both futures pending forever.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Upper bound on the TCP handshake with one resolved address. A name that
+/// resolves to an unreachable address first — typically an IPv6 address on a
+/// network without IPv6 routing, where the SYN is silently dropped — would
+/// otherwise use up all of [`CONNECT_TIMEOUT`] before a working address is
+/// tried.
+const DIAL_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Client defaults shared by every session.
 ///
@@ -90,6 +99,37 @@ const MAC_ALGORITHMS: &[mac::Name] = &[
     mac::HMAC_SHA1_ETM,
     mac::HMAC_SHA1,
 ];
+
+/// Opens a TCP connection to the first of `addrs` that answers, trying them in
+/// resolver order, each for at most [`DIAL_ATTEMPT_TIMEOUT`]. On failure the
+/// error names every address with its own reason.
+///
+/// The stream has `TCP_NODELAY` set, as OpenSSH does for interactive sessions:
+/// with Nagle's algorithm on, a keystroke sent while the previous one is still
+/// unacknowledged waits for the server's delayed ACK, which adds tens to
+/// hundreds of milliseconds of lag on a high-latency link.
+async fn dial(addrs: &[SocketAddr]) -> std::result::Result<TcpStream, String> {
+    let mut failures = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        match tokio::time::timeout(DIAL_ATTEMPT_TIMEOUT, TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => {
+                if let Err(e) = stream.set_nodelay(true) {
+                    tracing::warn!("set_nodelay on {addr} failed: {e}");
+                }
+                return Ok(stream);
+            }
+            Ok(Err(e)) => failures.push(format!("{addr}: {e}")),
+            Err(_) => failures.push(format!(
+                "{addr}: timed out after {}s",
+                DIAL_ATTEMPT_TIMEOUT.as_secs()
+            )),
+        }
+    }
+    if failures.is_empty() {
+        return Err("the name resolved to no addresses".into());
+    }
+    Err(failures.join("; "))
+}
 
 fn timed_out(stage: &str, addr: &str) -> CoreError {
     CoreError::Ssh(format!(
@@ -301,10 +341,18 @@ pub async fn connect(
     // connect failure would hide the two fingerprints that make the change
     // legible. `CoreError::Ssh` only reaches here from `check_server_key`, which
     // already names the address, so it is passed through unwrapped too.
-    let mut session = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        client::connect(client_config(), &addr, handler),
-    )
+    // `CONNECT_TIMEOUT` caps the whole stage, so a name with many dead
+    // addresses still gives up in time even though each one gets its own bound.
+    let mut session = tokio::time::timeout(CONNECT_TIMEOUT, async {
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host(&addr)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?
+            .collect();
+        let stream = dial(&resolved)
+            .await
+            .map_err(|e| CoreError::Ssh(format!("connect {addr}: {e}")))?;
+        client::connect_stream(client_config(), stream, handler).await
+    })
     .await
     .map_err(|_| timed_out("connect", &addr))?
     .map_err(|e| match e {
@@ -316,7 +364,7 @@ pub async fn connect(
     })?;
 
     // Authentication is bounded separately, and the two bounds cover disjoint
-    // stages. `client::connect` does not return until russh has read the
+    // stages. `client::connect_stream` does not return until russh has read the
     // server's banner and the key exchange has completed, so a peer that
     // answers the TCP handshake and then goes silent trips the connect timeout
     // above and never reaches this point. What is left for this bound is a
@@ -498,6 +546,45 @@ mod tests {
     fn rsa_signs_with_the_sha2_hash_the_server_lists() {
         assert_eq!(rsa_hash_for(Some(Some(HashAlg::Sha512))), HashAlg::Sha512);
         assert_eq!(rsa_hash_for(Some(Some(HashAlg::Sha256))), HashAlg::Sha256);
+    }
+
+    /// An address that never answers the handshake. Packets to it are dropped
+    /// rather than refused wherever there is a default route.
+    const BLACK_HOLE: &str = "10.255.255.1:22";
+
+    #[tokio::test]
+    async fn a_silent_address_does_not_hold_up_the_next_one() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        let addrs = [BLACK_HOLE.parse().unwrap(), live];
+        let stream = tokio::time::timeout(CONNECT_TIMEOUT / 2, dial(&addrs))
+            .await
+            .expect("the dead address used up the connect timeout")
+            .expect("dial the live address");
+        assert_eq!(stream.peer_addr().unwrap(), live);
+    }
+
+    #[tokio::test]
+    async fn dialed_streams_disable_nagle() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stream = dial(&[listener.local_addr().unwrap()]).await.unwrap();
+        assert!(stream.nodelay().unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_dial_names_every_address() {
+        let closed = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let other = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap()
+        };
+        let error = dial(&[closed, other]).await.unwrap_err();
+        assert!(error.contains(&closed.to_string()), "{error}");
+        assert!(error.contains(&other.to_string()), "{error}");
+        assert!(dial(&[]).await.is_err());
     }
 
     #[test]
