@@ -57,6 +57,30 @@ describe("WorkspaceView", () => {
     expect(wrapper.find("#ws-name").exists()).toBe(false);
   });
 
+  it("does not retarget an open dialog when a create that started earlier settles", async () => {
+    await mountView([workspace("ws-other", "Other")]);
+    let finish!: () => void;
+    setInvokeHandler("create_workspace", ({ name }) => new Promise((resolve) => {
+      finish = () => resolve(workspace("ws-new", name));
+    }));
+    setInvokeHandler("save_workspace", ({ workspace: saved }) => saved);
+    await button("New Workspace").trigger("click");
+    await wrapper.get("#ws-name").setValue("Prod");
+    await button("Create workspace").trigger("click");
+    await flushPromises();
+
+    await button("Cancel").trigger("click");
+    await wrapper.get('[aria-label="Edit workspace"]').trigger("click");
+    await wrapper.get("#ws-name").setValue("Other, edited");
+    finish();
+    await flushPromises();
+
+    const vm = wrapper.vm as unknown as { editing: Workspace | null };
+    expect(vm.editing?.id).toBe("ws-other");
+    expect(wrapper.find("#ws-name").exists()).toBe(true);
+    expect((wrapper.get("#ws-name").element as HTMLInputElement).value).toBe("Other, edited");
+  });
+
   it("keeps the dialog open on a failed save and retries without creating another workspace", async () => {
     await mountView();
     setInvokeHandler("create_workspace", ({ name }) => workspace("ws-1", name));

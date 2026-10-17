@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
 import { useWorkspacesStore } from "../stores/workspaces";
 import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
@@ -36,6 +36,12 @@ const identities = useIdentitiesStore();
 const { maskAddress } = useMaskedAddress();
 
 const showForm = ref(false);
+// Changes whenever the dialog opens or closes. A save still in flight from one
+// opening must not retarget a later one.
+let formSession = 0;
+watch(showForm, () => {
+  formSession += 1;
+}, { flush: "sync" });
 const editing = ref<Workspace | null>(null);
 const saving = ref(false);
 const formError = ref("");
@@ -115,11 +121,12 @@ async function save() {
   if (!form.value.name.trim() || saving.value) return;
   saving.value = true;
   formError.value = "";
+  const session = formSession;
   try {
     await saveForm();
-    showForm.value = false;
+    if (session === formSession) showForm.value = false;
   } catch (e) {
-    formError.value = `Failed to save workspace: ${e}`;
+    if (session === formSession) formError.value = `Failed to save workspace: ${e}`;
   } finally {
     saving.value = false;
   }
@@ -139,16 +146,18 @@ async function saveForm() {
   if (editing.value) {
     await workspaces.saveWorkspace(wsData);
   } else {
+    const session = formSession;
     const created = await workspaces.createWorkspace(form.value.name.trim());
     // The workspace exists from here on. Should saving the remaining fields
-    // fail, a retry updates this one instead of creating another.
-    editing.value = created;
+    // fail, a retry updates this one instead of creating another, as long as
+    // the dialog that made it is still open.
+    if (session === formSession) editing.value = created;
     await workspaces.saveWorkspace({
       ...created,
-      description: form.value.description.trim() || null,
-      color: form.value.color || null,
-      host_ids: form.value.hostIds,
-      auto_connect: form.value.autoConnect,
+      description: wsData.description,
+      color: wsData.color,
+      host_ids: wsData.host_ids,
+      auto_connect: wsData.auto_connect,
     });
   }
 }
