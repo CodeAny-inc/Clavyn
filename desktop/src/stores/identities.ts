@@ -33,15 +33,23 @@ export const useIdentitiesStore = defineStore("identities", () => {
     return result;
   });
 
+  // A read that overlaps a local change is repeated, so the list that gets
+  // published includes the change and `loaded` still ends up true.
+  async function readCurrent(): Promise<Identity[]> {
+    for (;;) {
+      const startedAt = identitiesRevision;
+      const items = await api.listIdentities();
+      if (!Array.isArray(items)) throw new Error("Invalid identity list response");
+      if (identitiesRevision === startedAt) return items;
+    }
+  }
+
   function load(): Promise<void> {
     if (pendingLoad) return pendingLoad;
     loaded.value = false;
     loading.value = true;
     loadError.value = "";
-    const startedAt = identitiesRevision;
-    pendingLoad = api.listIdentities().then(items => {
-      if (!Array.isArray(items)) throw new Error("Invalid identity list response");
-      if (identitiesRevision !== startedAt) return;
+    pendingLoad = readCurrent().then(items => {
       identities.value = items;
       loaded.value = true;
     }).catch(() => {

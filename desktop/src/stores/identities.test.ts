@@ -46,14 +46,31 @@ describe("identities store", () => {
       await store.load();
 
       let resolveList: ((items: Identity[]) => void) | undefined;
-      vi.mocked(api.listIdentities).mockImplementationOnce(
-        () => new Promise((resolve) => { resolveList = resolve; }),
-      );
+      vi.mocked(api.listIdentities)
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveList = resolve; }))
+        .mockResolvedValueOnce([{ ...mockIdentity, group_id: null }]);
       const pending = store.load();
       store.ungroup("group-1");
       resolveList!([{ ...mockIdentity, group_id: "group-1" }]);
       await pending;
 
+      expect(store.identities[0].group_id).toBeNull();
+    });
+
+    it("repeats the read when a local change lands during it, so the list still loads", async () => {
+      const store = useIdentitiesStore();
+      let resolveFirst!: (items: Identity[]) => void;
+      vi.mocked(api.listIdentities)
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+        .mockResolvedValueOnce([{ ...mockIdentity, group_id: null }]);
+
+      const pending = store.load();
+      store.ungroup("group-1");
+      resolveFirst([{ ...mockIdentity, group_id: "group-1" }]);
+      await pending;
+
+      expect(api.listIdentities).toHaveBeenCalledTimes(2);
+      expect(store.loaded).toBe(true);
       expect(store.identities[0].group_id).toBeNull();
     });
   });
