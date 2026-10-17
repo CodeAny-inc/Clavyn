@@ -8,6 +8,7 @@ import Input from "./ui/Input.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
 import { Vault, Unlock, Fingerprint, AlertCircle, Loader2 } from "lucide-vue-next";
+import { useModalFocus } from "../composables/useModalFocus";
 
 const vault = useVaultStore();
 const ui = useUiStore();
@@ -97,6 +98,9 @@ function cancel() {
   error.value = "";
   ui.resolveVaultUnlock(false);
 }
+
+const panel = ref<HTMLElement | null>(null);
+useModalFocus(panel, () => ui.showVaultUnlockModal, cancel);
 </script>
 
 <template>
@@ -113,7 +117,8 @@ function cancel() {
         role="dialog"
         aria-modal="true"
         aria-labelledby="vault-unlock-title"
-        @keydown.escape.stop="cancel"
+        ref="panel"
+        tabindex="-1"
       >
         <div class="flex items-center gap-3 mb-4">
           <div class="flex h-10 w-10 items-center justify-center rounded-md bg-primary/10 shrink-0">

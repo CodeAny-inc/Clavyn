@@ -43,8 +43,9 @@ describe("VaultUnlockModal", () => {
     const request = ui.requestVaultUnlock().catch(() => "cancelled");
     await flushPromises();
 
-    const cancel = wrapper.findAll("button").find((b) => b.text() === "Cancel")!;
-    await cancel.trigger("keydown", { key: "Escape" });
+    // Taken at the document, so it works from any control in the prompt and
+    // even when focus has fallen out of it.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await flushPromises();
     expect(ui.showVaultUnlockModal).toBe(false);
     await request;

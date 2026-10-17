@@ -55,6 +55,17 @@ describe("Dialog keyboard and dismissal", () => {
     expect(closes.value).toBe(1);
   });
 
+  it("brings Tab back into the dialog when focus has fallen to the page", async () => {
+    mountForm();
+    document.getElementById("opener")!.click();
+    await flushPromises();
+    (document.activeElement as HTMLElement | null)?.blur();
+    const tab = new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true });
+    document.body.dispatchEvent(tab);
+    expect(tab.defaultPrevented).toBe(true);
+    expect(panel().contains(document.activeElement)).toBe(true);
+  });
+
   it("returns focus to the control that opened it", async () => {
     mountForm();
     const opener = document.getElementById("opener")!;
