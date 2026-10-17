@@ -11,19 +11,29 @@ export const useWorkspacesStore = defineStore("workspaces", () => {
   const loaded = ref(false);
   const loading = ref(false);
   const loadError = ref("");
+  let pendingLoad: Promise<void> | null = null;
 
-  async function load() {
+  // Startup and the view both call load(); they share one read, so a late
+  // failure from one cannot overwrite the other's success.
+  function load(): Promise<void> {
+    if (pendingLoad) return pendingLoad;
     loading.value = true;
     loadError.value = "";
-    try {
-      workspaces.value = await api.listWorkspaces();
-      loaded.value = true;
-    } catch (e) {
-      loadError.value = String(e);
-      throw e;
-    } finally {
-      loading.value = false;
-    }
+    pendingLoad = api
+      .listWorkspaces()
+      .then((items) => {
+        workspaces.value = items;
+        loaded.value = true;
+      })
+      .catch((e) => {
+        loadError.value = String(e);
+        throw e;
+      })
+      .finally(() => {
+        loading.value = false;
+        pendingLoad = null;
+      });
+    return pendingLoad;
   }
 
   async function createWorkspace(name: string) {

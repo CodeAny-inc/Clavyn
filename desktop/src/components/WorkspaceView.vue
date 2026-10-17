@@ -309,6 +309,10 @@ const colorOptions = [
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3 sm:p-4">
+      <div v-if="workspaces.loadError && workspaces.workspaces.length" class="mb-3 flex max-w-[800px] mx-auto items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">Workspaces could not be refreshed: {{ workspaces.loadError }}</span>
+        <button class="underline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</button>
+      </div>
       <div v-if="workspaces.workspaces.length" class="flex flex-col gap-3 max-w-[800px] mx-auto">
         <div
           v-for="ws in workspaces.workspaces"

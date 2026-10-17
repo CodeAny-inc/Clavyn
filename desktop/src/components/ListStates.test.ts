@@ -4,7 +4,9 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import HostList from "./HostList.vue";
 import IdentityManager from "./IdentityManager.vue";
 import WorkspaceView from "./WorkspaceView.vue";
-import { setInvokeHandler } from "../test/setup";
+import { getInvokeMock, setInvokeHandler } from "../test/setup";
+import { useHostsStore } from "../stores/hosts";
+import { useWorkspacesStore } from "../stores/workspaces";
 import type { Host } from "../types";
 
 const host: Host = {
@@ -77,6 +79,22 @@ describe("host list states", () => {
     expect(wrapper.text()).toContain("Atlas");
   });
 
+  it("reports a reload that failed while earlier rows are still shown", async () => {
+    let fail = false;
+    setInvokeHandler("list_hosts", () => {
+      if (fail) throw new Error("store.json: Input/output error");
+      return [host];
+    });
+    wrapper = mount(HostList, { attachTo: document.body });
+    await flushPromises();
+
+    fail = true;
+    await useHostsStore().load().catch(() => {});
+    await flushPromises();
+    expect(wrapper.text()).toContain("Atlas");
+    expect(wrapper.get('[role="alert"]').text()).toContain("Hosts could not be refreshed");
+  });
+
   it("keeps the first-run state for an account that really has no hosts", async () => {
     wrapper = mount(HostList, { attachTo: document.body });
     await flushPromises();
@@ -106,5 +124,19 @@ describe("identity and workspace list states", () => {
     expect(wrapper.text()).toContain("Workspaces could not be loaded");
     expect(wrapper.text()).toContain("Permission denied");
     expect(wrapper.text()).not.toContain("No workspaces yet");
+  });
+
+  it("shares one workspace read between overlapping loads", async () => {
+    let release!: () => void;
+    setInvokeHandler("list_workspaces", () => new Promise((resolve) => { release = () => resolve([]); }));
+    const store = useWorkspacesStore();
+    const first = store.load();
+    const second = store.load();
+    release();
+    await Promise.all([first, second]);
+    const reads = getInvokeMock().mock.calls.filter((call) => call[0] === "list_workspaces");
+    expect(reads).toHaveLength(1);
+    expect(store.loadError).toBe("");
+    expect(store.loaded).toBe(true);
   });
 });

@@ -326,6 +326,10 @@ function hostsUsingIdentity(identityId: string): number {
       <div class="border-t border-border/50 mx-2 my-1"></div>
 
       <!-- Identity list -->
+      <div v-if="identities.loadError && identities.identities.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">{{ identities.loadError }}</span>
+        <button class="underline" :disabled="identities.loading" @click="identities.load()">Retry</button>
+      </div>
       <div v-if="identities.filteredIdentities.length" class="px-2 pt-1">
         <div
           v-for="id in identities.filteredIdentities"

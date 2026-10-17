@@ -292,6 +292,12 @@ function authLabel(host: Host): string {
 
       <div class="border-t border-border/50 mx-2 my-1"></div>
 
+      <!-- A reload that failed while rows from an earlier read are still shown -->
+      <div v-if="hosts.loadError && hosts.hosts.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">Hosts could not be refreshed: {{ hosts.loadError }}</span>
+        <button class="underline" :disabled="hosts.loading" @click="loadHosts">Retry</button>
+      </div>
+
       <!-- Host list -->
       <div v-if="filteredHosts.length" class="px-2 pt-1">
         <div
