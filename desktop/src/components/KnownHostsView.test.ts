@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import * as api from "../api";
+import { useSettingsStore } from "../stores/settings";
 import KnownHostsView from "./KnownHostsView.vue";
 import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 
@@ -208,6 +209,18 @@ describe("KnownHostsView trusted hosts", () => {
     answerConfirmation(false);
     await flushPromises();
     expect(api.removeKnownHost).not.toHaveBeenCalled();
+  });
+
+  it("masks the host in the confirmation when addresses are masked", async () => {
+    useSettingsStore().maskAddresses = true;
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
+    await flushPromises();
+    expect(pendingConfirmation.value?.message).not.toContain("2001:db8");
+    answerConfirmation(false);
+    await flushPromises();
   });
 
   it("keeps the brackets of an IPv6 entry so the pair rebuilds it", async () => {

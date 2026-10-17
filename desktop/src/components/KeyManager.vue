@@ -135,7 +135,7 @@ function resetForm() {
 async function deleteKey(key: KeyMeta) {
   if (await confirmAction({
     title: "Delete key",
-    message: `Delete key "${key.label}"?`,
+    message: `Delete key "${key.label}"? It is removed from the vault for good, and servers that only accept this key will refuse it.`,
     confirmLabel: "Delete",
     destructive: true,
   })) {

@@ -107,7 +107,7 @@ describe("destructive actions wait for confirmation", () => {
     const args = await declineThenConfirm(
       () => wrapper!.get('button[aria-label="Delete key"]').trigger("click"),
       "delete_key",
-      'Delete key "laptop"?',
+      'Delete key "laptop"? It is removed from the vault for good, and servers that only accept this key will refuse it.',
     );
     expect(args).toEqual({ keyId: "key-1" });
   });

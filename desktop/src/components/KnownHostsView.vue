@@ -92,7 +92,7 @@ async function remove(entry: KnownHostEntry) {
   // "Forget permanently", which the backend confirms natively.
   const confirmed = await confirmAction({
     title: "Remove known host",
-    message: `Remove known host "${entry.host}"?`,
+    message: `Remove known host "${maskAddress(entry.host)}"?`,
     confirmLabel: "Remove",
     destructive: true,
   });
