@@ -22,6 +22,7 @@
 #
 set -euo pipefail
 
+CALLER_DIR="$PWD"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -30,6 +31,12 @@ REPO="CodeAny-inc/Clavyn"
 PRODUCT_NAME="Clavyn"
 _signing_key_default="$HOME/.config/clavyn/updater-private.key"
 SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$_signing_key_default}"
+# A relative key path means relative to where the script was started; the
+# signer later runs from desktop/, so it gets the path made absolute.
+case "$SIGNING_KEY_PATH" in
+  /*) ;;
+  *) SIGNING_KEY_PATH="$CALLER_DIR/$SIGNING_KEY_PATH" ;;
+esac
 # The key and its password are held in unexported shell variables and the
 # exported copies are dropped, so npm, vite, cargo build scripts and the
 # bundler never see them. Only the signer command in step 6 receives them.
