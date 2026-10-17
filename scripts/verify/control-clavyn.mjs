@@ -105,11 +105,11 @@ function loadPlaywright() {
   }
 }
 
-async function isPortResponding(port) {
+async function isDevServerResponding(url = CFG.url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 1500);
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal });
     return res.ok || res.status === 404;
   } catch {
     return false;
@@ -127,12 +127,12 @@ async function startHarnessServer({ detached = true } = {}) {
   if (!pw) {
     fail(
       "Playwright is not installed.",
-      "Run `npm install` inside desktop/e2e (pins playwright 1.56.1), or set NODE_PATH to a tree that contains the `playwright` package. Then install a browser with `npx playwright install chromium` or point CHROMIUM_EXECUTABLE_PATH at a system Chrome/Chromium."
+      "Run `npm install` inside desktop/e2e (it pins the playwright version), or set NODE_PATH to a tree that contains the `playwright` package. Then install a browser with `npx playwright install chromium` or point CHROMIUM_EXECUTABLE_PATH at a system Chrome/Chromium."
     );
   }
 
   // Ensure the Vite dev server is up so the renderer has something to load.
-  const devUp = await isPortResponding(1420);
+  const devUp = await isDevServerResponding();
   let devChild = null;
   if (!devUp) {
     if (process.env.CLAVYN_AUTO_START_DEV === "0") {
@@ -149,9 +149,9 @@ async function startHarnessServer({ detached = true } = {}) {
     // Wait for Vite to come up (up to ~30s).
     for (let i = 0; i < 60; i++) {
       await new Promise(r => setTimeout(r, 500));
-      if (await isPortResponding(1420)) break;
+      if (await isDevServerResponding()) break;
     }
-    if (!(await isPortResponding(1420))) {
+    if (!(await isDevServerResponding())) {
       fail("Vite dev server did not come up within 30s.", "Run `cd desktop && npm run dev` manually and inspect its output, then retry.");
     }
   }
@@ -218,7 +218,9 @@ async function startHarnessServer({ detached = true } = {}) {
       return { ok: true, app: info, view, url: page.url() };
     },
     async snapshot() {
-      const snap = await page.accessibility.snapshot();
+      // Playwright's ARIA snapshot: an indented YAML outline of roles and
+      // accessible names for everything under <body>.
+      const snap = await page.locator("body").ariaSnapshot();
       return { ok: true, snapshot: snap };
     },
     async screenshot({ path }) {
@@ -704,7 +706,7 @@ async function runDoctor(pretty) {
   }
 
   // Dev server
-  const devUp = await isPortResponding(1420);
+  const devUp = await isDevServerResponding();
   report.checks.devServer = { ok: devUp, url: CFG.url, remedy: devUp ? null : "Run `cd desktop && npm run dev`, or set CLAVYN_URL. The harness will auto-start Vite if CLAVYN_AUTO_START_DEV is unset." };
 
   // Fixture file
