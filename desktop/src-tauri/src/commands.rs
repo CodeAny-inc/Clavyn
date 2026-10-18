@@ -1143,6 +1143,10 @@ struct GithubAsset {
 const GITHUB_API_RELEASES_URL: &str =
     "https://api.github.com/repos/CodeAny-inc/Clavyn/releases?per_page=30";
 
+/// Where a release's own `latest.json` is served from. The tag is appended,
+/// followed by `/latest.json`.
+const RELEASE_DOWNLOAD_PREFIX: &str = "https://github.com/CodeAny-inc/Clavyn/releases/download/";
+
 /// Find the URL of the `latest.json` asset from the newest release
 /// (including prereleases). Returns `None` if no releases have one.
 ///
@@ -1172,21 +1176,29 @@ async fn find_latest_json_url() -> Result<Option<String>, String> {
         .await
         .map_err(|e| format!("parse github response: {e}"))?;
 
-    // Find the release with the highest semver version that has a latest.json
+    Ok(newest_manifest_url(&releases))
+}
+
+/// The `latest.json` URL of the highest-versioned release that carries one.
+///
+/// A manifest is only taken from this repository's download path for the
+/// release's own tag. The API response names the URL, and following any URL
+/// it names would let a release point the updater at a manifest from another
+/// tag or another host. What the manifest then offers is still bound by the
+/// updater's signature and signed-version checks.
+fn newest_manifest_url(releases: &[GithubRelease]) -> Option<String> {
     let mut best: Option<(semver::Version, String)> = None;
-    for release in &releases {
-        // Strip leading 'v' from tag name
-        let tag = release.tag_name.trim_start_matches('v');
-        let Ok(version) = semver::Version::parse(tag) else {
+    for release in releases {
+        let Ok(version) = semver::Version::parse(release.tag_name.trim_start_matches('v')) else {
             continue;
         };
-        // Find the latest.json asset
-        let json_url = release
+        let expected = format!("{RELEASE_DOWNLOAD_PREFIX}{}/latest.json", release.tag_name);
+        let Some(json_url) = release
             .assets
             .iter()
-            .find(|a| a.name == "latest.json")
-            .map(|a| a.browser_download_url.clone());
-        let Some(json_url) = json_url else {
+            .find(|a| a.name == "latest.json" && a.browser_download_url == expected)
+            .map(|a| a.browser_download_url.clone())
+        else {
             continue;
         };
         match &best {
@@ -1194,8 +1206,7 @@ async fn find_latest_json_url() -> Result<Option<String>, String> {
             _ => best = Some((version, json_url)),
         }
     }
-
-    Ok(best.map(|(_, url)| url))
+    best.map(|(_, url)| url)
 }
 
 /// Build an updater with a custom endpoint (the latest prerelease's
@@ -1301,17 +1312,22 @@ pub async fn install_update(app: AppHandle) -> ApiResult<()> {
         .map_err(|e| e.to_string())?
         .ok_or("No update available")?;
 
-    // Download and install
+    // The plugin reports each network chunk on its own. The page is told the
+    // running total, and only when the whole percentage moves, so a download
+    // costs about a hundred events instead of one per chunk.
+    let mut progress = DownloadProgress::default();
     update
         .download_and_install(
             |chunk_length, content_length| {
-                let _ = app.emit(
-                    "update-progress",
-                    serde_json::json!({
-                        "chunk_length": chunk_length,
-                        "content_length": content_length,
-                    }),
-                );
+                if let Some(downloaded) = progress.advance(chunk_length, content_length) {
+                    let _ = app.emit(
+                        "update-progress",
+                        serde_json::json!({
+                            "downloaded": downloaded,
+                            "content_length": content_length,
+                        }),
+                    );
+                }
             },
             || {
                 let _ = app.emit("update-extracting", serde_json::json!({}));
@@ -1325,6 +1341,30 @@ pub async fn install_update(app: AppHandle) -> ApiResult<()> {
     crate::restart_app_releasing_guard(&app);
 
     Ok(())
+}
+
+/// Running total of an update download, and when it is worth reporting.
+#[derive(Default)]
+struct DownloadProgress {
+    downloaded: u64,
+    reported: Option<u64>,
+}
+
+impl DownloadProgress {
+    /// Add a chunk and return the new total if the page should hear about it:
+    /// whenever the whole percentage changes, or every MiB when the size is
+    /// unknown.
+    fn advance(&mut self, chunk_length: usize, content_length: Option<u64>) -> Option<u64> {
+        self.downloaded += chunk_length as u64;
+        let step = match content_length {
+            Some(total) if total > 0 => self.downloaded.min(total) * 100 / total,
+            _ => self.downloaded / (1024 * 1024),
+        };
+        (self.reported != Some(step)).then(|| {
+            self.reported = Some(step);
+            self.downloaded
+        })
+    }
 }
 
 #[cfg(test)]
@@ -2214,5 +2254,70 @@ mod known_host_confirmation_tests {
             kh.check_mismatch(HOST, PORT, &pinned).is_ok(),
             "the original pin was replaced"
         );
+    }
+}
+#[cfg(test)]
+mod updater_tests {
+    use super::{newest_manifest_url, DownloadProgress, GithubAsset, GithubRelease};
+
+    fn release(tag: &str, manifest_url: &str) -> GithubRelease {
+        GithubRelease {
+            tag_name: tag.into(),
+            prerelease: false,
+            assets: vec![GithubAsset {
+                name: "latest.json".into(),
+                browser_download_url: manifest_url.into(),
+            }],
+        }
+    }
+
+    fn own(tag: &str) -> String {
+        format!("https://github.com/CodeAny-inc/Clavyn/releases/download/{tag}/latest.json")
+    }
+
+    #[test]
+    fn the_highest_version_with_a_manifest_wins() {
+        let releases = [
+            release("v0.1.2-alpha.5", &own("v0.1.2-alpha.5")),
+            release("v0.1.2-alpha.6", &own("v0.1.2-alpha.6")),
+            release("not-a-version", &own("not-a-version")),
+        ];
+        assert_eq!(newest_manifest_url(&releases), Some(own("v0.1.2-alpha.6")));
+    }
+
+    /// A release whose asset URL leaves this repository's download path for
+    /// its own tag is skipped, so the next genuine release is used instead.
+    #[test]
+    fn a_manifest_served_from_anywhere_else_is_ignored() {
+        let releases = [
+            release("v0.1.2-alpha.6", &own("v0.1.2-alpha.6")),
+            release("v9.0.0", "https://evil.example/latest.json"),
+            release("v9.0.1", &own("v0.1.2-alpha.5")),
+            release(
+                "v9.0.2",
+                "https://github.com/someone-else/Clavyn/releases/download/v9.0.2/latest.json",
+            ),
+        ];
+        assert_eq!(newest_manifest_url(&releases), Some(own("v0.1.2-alpha.6")));
+        assert_eq!(newest_manifest_url(&releases[1..]), None);
+    }
+
+    #[test]
+    fn progress_is_cumulative_and_reported_once_per_percent() {
+        let mut progress = DownloadProgress::default();
+        let total = Some(1000);
+        assert_eq!(progress.advance(4, total), Some(4));
+        assert_eq!(progress.advance(4, total), None);
+        assert_eq!(progress.advance(2, total), Some(10));
+        assert_eq!(progress.advance(990, total), Some(1000));
+        assert_eq!(progress.advance(0, total), None);
+    }
+
+    #[test]
+    fn progress_without_a_size_is_reported_per_mebibyte() {
+        let mut progress = DownloadProgress::default();
+        assert_eq!(progress.advance(10, None), Some(10));
+        assert_eq!(progress.advance(1024 * 1024, None), Some(1024 * 1024 + 10));
+        assert_eq!(progress.advance(10, None), None);
     }
 }
