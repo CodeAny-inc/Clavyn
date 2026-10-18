@@ -78,8 +78,7 @@ pub async fn update_host(
     Ok(host)
 }
 
-/// Removing hosts takes reach away and never adds it, so it asks nothing.
-
+/// Removing a host takes reach away and never adds it, so it asks nothing.
 #[tauri::command]
 pub async fn delete_host(state: State<'_, Arc<AppState>>, id: Uuid) -> ApiResult<()> {
     let mut store = state.store.lock().await;
@@ -541,10 +540,13 @@ pub struct SshConnectionInfo {
 /// What the saved store holds is in turn bounded by the user. The page can
 /// write hosts and identities, but a write that would let a vault key sign in
 /// as an account, at an address or on a port no saved host already uses it
-/// for, or run a startup command there that no saved host runs, waits for a
-/// native confirmation the page cannot answer (`host_change_prompt`). Writes
-/// are compared with what the store already allows, so a vault key reaches a
-/// destination the user confirmed or one the store file already held.
+/// for waits for a native confirmation the page cannot answer
+/// (`host_change_prompt`), and `Store` refuses that write from any caller that
+/// does not hand it what was confirmed. Writes are compared with what the store
+/// already allows, so a vault key reaches a destination the user confirmed or
+/// one the store file already held. A startup command is shown in that
+/// dialog but is not confirmed on its own: a session to an allowed destination
+/// can already run any command.
 ///
 /// That is the whole of the guarantee. It says nothing about hosts that sign in
 /// without a vault key: a password is typed into the page at connect time, so
@@ -1675,7 +1677,13 @@ mod connect_lock_tests {
         host.auth = AuthMethod::PublicKey;
         host.key_id = Some(key_id);
         let host_id = host.id;
-        state.store.lock().await.add_host(host).expect("save host");
+        {
+            let mut store = state.store.lock().await;
+            let confirmed = store.preview(|data| data.add_host(host.clone()));
+            store
+                .commit_confirmed(|data| data.add_host(host), &confirmed)
+                .expect("save host");
+        }
 
         app.manage(state);
         let connecting = connect_ssh(
