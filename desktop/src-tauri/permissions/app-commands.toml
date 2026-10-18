@@ -1,0 +1,255 @@
+# One permission per command in generate_handler! in src/main.rs, granted in
+# capabilities/default.json.
+#
+# Defining any app permission gives the app its own ACL manifest. Tauri checks
+# app commands invoked from the app's own pages against the capability files
+# only when that manifest exists; without it, any page the app serves, in any
+# window, can invoke every registered command. With it, a command runs only
+# for a window a capability grants it to.
+#
+# tests/app_command_acl.rs fails when this file, the handler list and the
+# capability disagree.
+
+[[permission]]
+identifier = "allow-startup-failure"
+commands.allow = ["startup_failure"]
+
+[[permission]]
+identifier = "allow-set-aside-unreadable-file"
+commands.allow = ["set_aside_unreadable_file"]
+
+[[permission]]
+identifier = "allow-restart-app"
+commands.allow = ["restart_app"]
+
+[[permission]]
+identifier = "allow-list-hosts"
+commands.allow = ["list_hosts"]
+
+[[permission]]
+identifier = "allow-add-host"
+commands.allow = ["add_host"]
+
+[[permission]]
+identifier = "allow-update-host"
+commands.allow = ["update_host"]
+
+[[permission]]
+identifier = "allow-delete-host"
+commands.allow = ["delete_host"]
+
+[[permission]]
+identifier = "allow-list-groups"
+commands.allow = ["list_groups"]
+
+[[permission]]
+identifier = "allow-add-group"
+commands.allow = ["add_group"]
+
+[[permission]]
+identifier = "allow-delete-group"
+commands.allow = ["delete_group"]
+
+[[permission]]
+identifier = "allow-list-identities"
+commands.allow = ["list_identities"]
+
+[[permission]]
+identifier = "allow-add-identity"
+commands.allow = ["add_identity"]
+
+[[permission]]
+identifier = "allow-update-identity"
+commands.allow = ["update_identity"]
+
+[[permission]]
+identifier = "allow-delete-identity"
+commands.allow = ["delete_identity"]
+
+[[permission]]
+identifier = "allow-vault-is-initialized"
+commands.allow = ["vault_is_initialized"]
+
+[[permission]]
+identifier = "allow-secure-initialize-vault"
+commands.allow = ["secure_initialize_vault"]
+
+[[permission]]
+identifier = "allow-secure-unlock-vault"
+commands.allow = ["secure_unlock_vault"]
+
+[[permission]]
+identifier = "allow-secure-lock-vault"
+commands.allow = ["secure_lock_vault"]
+
+[[permission]]
+identifier = "allow-secure-reset-vault"
+commands.allow = ["secure_reset_vault"]
+
+[[permission]]
+identifier = "allow-is-vault-unlocked"
+commands.allow = ["is_vault_unlocked"]
+
+[[permission]]
+identifier = "allow-biometric-available"
+commands.allow = ["biometric_available"]
+
+[[permission]]
+identifier = "allow-biometric-passphrase-stored"
+commands.allow = ["biometric_passphrase_stored"]
+
+[[permission]]
+identifier = "allow-store-biometric-passphrase"
+commands.allow = ["store_biometric_passphrase"]
+
+[[permission]]
+identifier = "allow-unlock-with-biometric"
+commands.allow = ["unlock_with_biometric"]
+
+[[permission]]
+identifier = "allow-clear-biometric-passphrase"
+commands.allow = ["clear_biometric_passphrase"]
+
+[[permission]]
+identifier = "allow-list-keys"
+commands.allow = ["list_keys"]
+
+[[permission]]
+identifier = "allow-generate-key"
+commands.allow = ["generate_key"]
+
+[[permission]]
+identifier = "allow-import-key"
+commands.allow = ["import_key"]
+
+[[permission]]
+identifier = "allow-delete-key"
+commands.allow = ["delete_key"]
+
+[[permission]]
+identifier = "allow-list-known-hosts"
+commands.allow = ["list_known_hosts"]
+
+[[permission]]
+identifier = "allow-remove-known-host"
+commands.allow = ["remove_known_host"]
+
+[[permission]]
+identifier = "allow-list-removed-known-hosts"
+commands.allow = ["list_removed_known_hosts"]
+
+[[permission]]
+identifier = "allow-forget-known-host"
+commands.allow = ["forget_known_host"]
+
+[[permission]]
+identifier = "allow-list-host-key-changes"
+commands.allow = ["list_host_key_changes"]
+
+[[permission]]
+identifier = "allow-replace-known-host"
+commands.allow = ["replace_known_host"]
+
+[[permission]]
+identifier = "allow-list-workspaces"
+commands.allow = ["list_workspaces"]
+
+[[permission]]
+identifier = "allow-create-workspace"
+commands.allow = ["create_workspace"]
+
+[[permission]]
+identifier = "allow-save-workspace"
+commands.allow = ["save_workspace"]
+
+[[permission]]
+identifier = "allow-delete-workspace"
+commands.allow = ["delete_workspace"]
+
+[[permission]]
+identifier = "allow-set-active-workspace"
+commands.allow = ["set_active_workspace"]
+
+[[permission]]
+identifier = "allow-connect-ssh"
+commands.allow = ["connect_ssh"]
+
+[[permission]]
+identifier = "allow-create-local-terminal"
+commands.allow = ["create_local_terminal"]
+
+[[permission]]
+identifier = "allow-session-write"
+commands.allow = ["session_write"]
+
+[[permission]]
+identifier = "allow-session-resize"
+commands.allow = ["session_resize"]
+
+[[permission]]
+identifier = "allow-close-session"
+commands.allow = ["close_session"]
+
+[[permission]]
+identifier = "allow-list-sessions"
+commands.allow = ["list_sessions"]
+
+[[permission]]
+identifier = "allow-sftp-connect"
+commands.allow = ["sftp_connect"]
+
+[[permission]]
+identifier = "allow-sftp-list-dir"
+commands.allow = ["sftp_list_dir"]
+
+[[permission]]
+identifier = "allow-sftp-canonicalize"
+commands.allow = ["sftp_canonicalize"]
+
+[[permission]]
+identifier = "allow-sftp-create-dir"
+commands.allow = ["sftp_create_dir"]
+
+[[permission]]
+identifier = "allow-sftp-remove-file"
+commands.allow = ["sftp_remove_file"]
+
+[[permission]]
+identifier = "allow-sftp-remove-dir"
+commands.allow = ["sftp_remove_dir"]
+
+[[permission]]
+identifier = "allow-sftp-rename"
+commands.allow = ["sftp_rename"]
+
+[[permission]]
+identifier = "allow-sftp-close"
+commands.allow = ["sftp_close"]
+
+[[permission]]
+identifier = "allow-sftp-pick-upload-file"
+commands.allow = ["sftp_pick_upload_file"]
+
+[[permission]]
+identifier = "allow-sftp-download-to-local"
+commands.allow = ["sftp_download_to_local"]
+
+[[permission]]
+identifier = "allow-sftp-upload-from-local"
+commands.allow = ["sftp_upload_from_local"]
+
+[[permission]]
+identifier = "allow-pick-key-file"
+commands.allow = ["pick_key_file"]
+
+[[permission]]
+identifier = "allow-get-app-info"
+commands.allow = ["get_app_info"]
+
+[[permission]]
+identifier = "allow-check-for-updates"
+commands.allow = ["check_for_updates"]
+
+[[permission]]
+identifier = "allow-install-update"
+commands.allow = ["install_update"]

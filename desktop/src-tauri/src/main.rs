@@ -3,9 +3,12 @@
 mod app_data_migration;
 mod biometric;
 mod biometric_commands;
+#[cfg(test)]
+mod command_acl_tests;
 mod commands;
 mod host_key_prompt;
 mod local_files;
+mod navigation;
 mod sftp_transfer;
 mod startup_recovery;
 mod state;
@@ -119,9 +122,9 @@ fn main() {
     }
 
     builder
+        .plugin(navigation::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
