@@ -13,9 +13,7 @@ clavyn-core = { path = "../../core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "2"
-tauri-plugin-os = "2"
 tauri-plugin-updater = "2"
-tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -40,6 +38,11 @@ tauri = { version = "2", features = ["test"] }
 # them through clavyn_core and parse them into `russh::keys::PublicKey`, the type
 # the known hosts store takes; the workspace pin keeps it the same russh.
 russh = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Sends a closed tab's shell SIGHUP directly; already in the tree through
+# portable-pty and tokio.
+libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # Resolves the D-Bus session address before the single-instance plugin does,
