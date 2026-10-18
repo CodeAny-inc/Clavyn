@@ -869,7 +869,7 @@ pub async fn session_write(
     data: Vec<u8>,
 ) -> ApiResult<()> {
     // Try SSH session first
-    if state.sessions.list().await.contains(&session_id) {
+    if state.sessions.contains(&session_id).await {
         return state.sessions.write(&session_id, &data).await.map_err(err);
     }
     // Try local terminal. The writer is taken out from under the map lock and
@@ -928,7 +928,7 @@ pub async fn session_resize(
     let cols = pty_dimension("cols", cols)?;
     let rows = pty_dimension("rows", rows)?;
     // Try SSH session first
-    if state.sessions.list().await.contains(&session_id) {
+    if state.sessions.contains(&session_id).await {
         return state
             .sessions
             .resize(&session_id, cols.into(), rows.into())
@@ -959,7 +959,7 @@ pub async fn close_session(state: State<'_, Arc<AppState>>, session_id: String) 
     // stream. Releasing it here would drop the sink first and discard the tail,
     // which also happens on the reconnect path.
     // Try SSH session
-    if state.sessions.list().await.contains(&session_id) {
+    if state.sessions.contains(&session_id).await {
         return state.sessions.close(&session_id).await.map_err(err);
     }
     // Try local terminal

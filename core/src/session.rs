@@ -8,8 +8,14 @@ use russh::client::Handle;
 use russh::ChannelMsg;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
+
+/// How long a polite disconnect may take before the connection is simply
+/// dropped. A peer that has stopped reading never acknowledges one.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(5);
+
+type SessionMap = HashMap<String, Arc<SshSession>>;
 
 /// Callback invoked when a session receives data from the remote end.
 /// The Tauri layer uses this to forward a batch of output to the frontend.
@@ -28,7 +34,11 @@ async fn sleep_until(deadline: Option<Instant>) {
 
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, SshSession>>,
+    /// Live sessions by id. Held only to look an entry up, insert or remove
+    /// it, never across network I/O: one peer that stops reading would
+    /// otherwise stall writes, resizes and closes on every other session, and
+    /// keep a vault reset from draining the map.
+    sessions: Arc<Mutex<SessionMap>>,
     /// Every id held by an SSH session, from the moment it is claimed — before
     /// the connection exists — until the session is closed. `sessions` only
     /// learns an id once the connection is up, seconds later, so it cannot tell
@@ -106,14 +116,39 @@ fn lock_claims(
 }
 
 struct SshSession {
-    #[allow(dead_code)]
-    id: String,
-    handle: Arc<Mutex<Handle<connection::SshHandler>>>,
+    /// Shared with the goodbye sent after the session is closed, which needs
+    /// nothing else from it, so that goodbye does not keep the id claimed.
+    handle: Arc<Handle<connection::SshHandler>>,
+    /// Flipped once the session is closed. A write stuck behind a peer that
+    /// stopped reading watches it and gives up, so it cannot keep the session,
+    /// its connection and its id alive after the close.
+    closed: tokio::sync::watch::Sender<bool>,
     channel_id: russh::ChannelId,
+    /// Serializes writes to this session so keystrokes reach the channel in
+    /// the order they were sent. Per session, so a stalled peer only holds up
+    /// its own input.
+    writes: Mutex<()>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
     claim: Arc<ClaimedId>,
+}
+
+impl SshSession {
+    /// Resolves once the session has been closed.
+    async fn closed(&self) {
+        let mut closed = self.closed.subscribe();
+        let _ = closed.wait_for(|closed| *closed).await;
+    }
+
+    /// Mark the session closed and say goodbye to the peer. The goodbye holds
+    /// only the connection handle, so the id is released as soon as the map
+    /// entry and the reader are gone, however long the peer takes.
+    fn retire(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.closed.send_replace(true);
+        let handle = self.handle.clone();
+        async move { disconnect(&handle).await }
+    }
 }
 
 // Re-export the handler type so the session manager can use it.
@@ -122,7 +157,7 @@ pub use connection::SshHandler;
 impl SessionManager {
     pub fn new(data_callback: DataCallback, close_callback: CloseCallback) -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             claimed: Arc::new(std::sync::Mutex::new(HashSet::new())),
             data_callback,
             close_callback,
@@ -207,19 +242,20 @@ impl SessionManager {
             }
         }
 
-        let handle = Arc::new(Mutex::new(handle));
         let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
 
         let held = claim.commit();
-        let session = SshSession {
-            id: session_id.clone(),
-            handle: handle.clone(),
+        let session = Arc::new(SshSession {
+            handle: Arc::new(handle),
+            closed: tokio::sync::watch::Sender::new(false),
             channel_id,
+            writes: Mutex::new(()),
             resize_tx,
             claim: held.clone(),
-        };
+        });
 
         self.sessions.lock().await.insert(session_id.clone(), session);
+        let sessions = self.sessions.clone();
 
         // Spawn the reading task
         let sid = session_id.clone();
@@ -230,7 +266,7 @@ impl SessionManager {
         tokio::spawn(async move {
             // Dropped when this task ends, after the close has been announced,
             // which is the moment the id is free for another session.
-            let _held = held;
+            let held = held;
             let mut pending_resize: Option<(u32, u32)> = None;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
@@ -259,13 +295,23 @@ impl SessionManager {
                                 // order; see `AppState::init`.
                                 flush(&mut batcher);
                                 close_cb(&sid, "session closed");
+                                // A shell that exits leaves the connection up;
+                                // end it, unless a close already took the entry.
+                                // The goodbye runs on its own so the id is free
+                                // for a reconnect as soon as this task ends.
+                                if let Some(session) = take_if_held(&sessions, &sid, &held).await {
+                                    tokio::spawn(session.retire());
+                                }
                                 break;
                             }
                             _ => {}
                         }
                     }
-                    resize = resize_rx.recv() => {
-                        pending_resize = resize;
+                    // Once the entry is gone the sender is dropped and `recv`
+                    // answers `None` at once; the pattern disables the branch
+                    // then, so the loop waits on the channel instead of spinning.
+                    Some(size) = resize_rx.recv() => {
+                        pending_resize = Some(size);
                     }
                     () = sleep_until(flush_at) => {
                         flush(&mut batcher);
@@ -280,26 +326,40 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write data to a session's terminal.
-    pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
-        let handle = session.handle.lock().await;
-        handle
-            .data(session.channel_id, data.to_vec())
+    /// The live session behind `session_id`, taken out from under the map lock.
+    async fn get(&self, session_id: &str) -> Result<Arc<SshSession>> {
+        self.sessions
+            .lock()
             .await
-            .map_err(|_| CoreError::Ssh("write failed".into()))?;
-        Ok(())
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
+    }
+
+    /// Whether an SSH session is live under `session_id`.
+    pub async fn contains(&self, session_id: &str) -> bool {
+        self.sessions.lock().await.contains_key(session_id)
+    }
+
+    /// Write data to a session's terminal.
+    ///
+    /// The send waits for as long as the peer leaves the connection unread,
+    /// and only this session's writes wait behind it.
+    pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
+        let session = self.get(session_id).await?;
+        let send = async {
+            let _order = session.writes.lock().await;
+            session.handle.data(session.channel_id, data.to_vec()).await
+        };
+        tokio::select! {
+            sent = send => sent.map_err(|_| CoreError::Ssh("write failed".into())),
+            () = session.closed() => Err(CoreError::SessionNotFound(session_id.to_string())),
+        }
     }
 
     /// Resize a session's terminal.
     pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+        let session = self.get(session_id).await?;
         session
             .resize_tx
             .send((cols, rows))
@@ -309,13 +369,15 @@ impl SessionManager {
     }
 
     /// Close a session.
+    ///
+    /// The entry leaves the map before the disconnect is sent, so the session
+    /// stops being addressable at once even if the peer never answers. The
+    /// entry's share of the id goes with it; the reader task still holds one
+    /// until it has flushed and announced the close.
     pub async fn close(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.remove(session_id) {
-            // The entry's share of the id goes with it; the reader task still
-            // holds one until it has flushed and announced the close.
-            let handle = session.handle.lock().await;
-            let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+        let removed = self.sessions.lock().await.remove(session_id);
+        if let Some(session) = removed {
+            session.retire().await;
         }
         Ok(())
     }
@@ -329,22 +391,49 @@ impl SessionManager {
     ///
     /// The map is drained under the lock and the guard is released before any
     /// network work, so a session stops being addressable the moment this is
-    /// called. A remote that never acknowledges the disconnect can therefore
-    /// only delay the polite goodbye, never keep a session reachable.
+    /// called. The disconnects then run side by side, each bounded by
+    /// [`DISCONNECT_GRACE`], so one peer that never acknowledges cannot hold
+    /// up the goodbye to the others.
     pub async fn close_all(&self) -> usize {
-        let drained: Vec<SshSession> = {
+        let drained: Vec<Arc<SshSession>> = {
             let mut sessions = self.sessions.lock().await;
             sessions.drain().map(|(_, session)| session).collect()
         };
         let count = drained.len();
-        for session in &drained {
-            let handle = session.handle.lock().await;
-            let _ = handle
-                .disconnect(russh::Disconnect::ByApplication, "", "en")
-                .await;
+        let goodbyes: Vec<_> = drained
+            .into_iter()
+            .map(|session| tokio::spawn(session.retire()))
+            .collect();
+        for goodbye in goodbyes {
+            let _ = goodbye.await;
         }
         count
     }
+}
+
+/// Remove `session_id` from the map if the entry there is still the session
+/// `held` belongs to. An id is reused once its session has ended, and a
+/// reader finishing late must not take a newer session's entry.
+async fn take_if_held(
+    sessions: &Mutex<SessionMap>,
+    session_id: &str,
+    held: &Arc<ClaimedId>,
+) -> Option<Arc<SshSession>> {
+    let mut sessions = sessions.lock().await;
+    match sessions.get(session_id) {
+        Some(session) if Arc::ptr_eq(&session.claim, held) => sessions.remove(session_id),
+        _ => None,
+    }
+}
+
+/// Say goodbye to the peer, giving up after [`DISCONNECT_GRACE`]. The
+/// connection ends either way once the last reference to the handle is gone.
+async fn disconnect(handle: &Handle<connection::SshHandler>) {
+    let _ = tokio::time::timeout(
+        DISCONNECT_GRACE,
+        handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
+    )
+    .await;
 }
 
 #[cfg(test)]
