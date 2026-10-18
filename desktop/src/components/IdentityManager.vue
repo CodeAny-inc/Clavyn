@@ -27,7 +27,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
-import { isDeclinedHostChange, saveFailure } from "../lib/hostChange";
+import { deleteFailure, isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
 const identities = useIdentitiesStore();
@@ -241,7 +241,7 @@ async function deleteIdentity(id: Identity) {
   } catch (e) {
     // Cancelling the native confirmation was the user's answer, and the
     // identity is still listed, so there is nothing more to say.
-    if (!isDeclinedHostChange(e)) alert(`Failed to delete identity: ${e}`);
+    if (!isDeclinedHostChange(e)) alert(deleteFailure(e));
   }
 }
 

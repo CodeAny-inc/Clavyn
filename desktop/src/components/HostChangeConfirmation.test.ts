@@ -11,6 +11,9 @@ import type { Identity } from "../types";
 // The backend refuses a host or identity write whose native confirmation was
 // cancelled, and tags the error so the form can tell it from a failure.
 const DECLINED = "[host-change-confirmation-declined] Allow a vault key to be used: cancelled";
+// For a few seconds after a Cancel the backend refuses to reopen the dialog.
+const COOLING_DOWN =
+  "[confirmation-cooling-down] a host change confirmation was declined; no further host change confirmations will be offered for 4s";
 
 const calls = (command: string) => getInvokeMock().mock.calls.filter(([name]) => name === command);
 let wrapper: VueWrapper | undefined;
@@ -83,6 +86,25 @@ describe("HostForm when a save is not confirmed", () => {
     await vi.waitFor(() => expect(wrapper!.emitted("close")).toHaveLength(1));
     expect(calls("add_host")).toHaveLength(2);
     expect(useHostsStore().hosts.map(host => host.hostname)).toEqual(["prod.example.test"]);
+  });
+
+  it("asks for a retry, rather than reporting a failure, while a recent Cancel holds the dialog shut", async () => {
+    let answer: "cooling" | "allow" = "cooling";
+    setInvokeHandler("add_host", ({ host }) => {
+      if (answer === "cooling") return Promise.reject(COOLING_DOWN);
+      return host;
+    });
+    await fillNewHost();
+
+    button("Add host")!.click();
+    await vi.waitFor(() => expect(alertText()).toContain("try again in a few seconds"));
+    expect(alertText()).not.toContain("Could not save");
+    expect(alertText()).not.toContain("[confirmation-cooling-down]");
+    expect(wrapper!.emitted("close")).toBeUndefined();
+
+    answer = "allow";
+    button("Add host")!.click();
+    await vi.waitFor(() => expect(wrapper!.emitted("close")).toHaveLength(1));
   });
 
   it("reports a failure that is not a cancellation as one", async () => {
