@@ -16,7 +16,7 @@ authors = ["Clavyn Contributors"]
 # crypto backend is `ring`, already in the tree through rustls, rather than the
 # default `aws-lc-rs`, which needs CMake and NASM to build on Windows. `rsa`
 # stays on so existing RSA keys keep working.
-russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa"] }
 # Enumerate the runtime pieces Clavyn and its dependencies actually use. `full`
 # additionally compiles the process, signal and io-std drivers, none of which
 # any crate in this workspace requires. `net` would be switched on regardless by
