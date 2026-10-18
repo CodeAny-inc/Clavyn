@@ -11,6 +11,7 @@ import Select from "./ui/Select.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
 import { FolderPlus } from "lucide-vue-next";
+import { saveFailure } from "../lib/hostChange";
 import type { Host, AuthMethod } from "../types";
 
 const props = defineProps<{ host: Host | null }>();
@@ -23,6 +24,10 @@ const identities = useIdentitiesStore();
 
 const showInlineGroup = ref(false);
 const inlineGroupName = ref("");
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
+const saving = ref(false);
+const saveError = ref("");
 
 const form = ref({
   label: "",
@@ -127,7 +132,7 @@ async function createInlineGroup() {
 }
 
 async function save() {
-  if (!isValid.value) return;
+  if (!isValid.value || saving.value) return;
   const host: Host = {
     id: props.host?.id ?? crypto.randomUUID(),
     label: form.value.label.trim(),
@@ -150,10 +155,21 @@ async function save() {
     jump_host_id: props.host?.jump_host_id ?? null,
     identity_id: form.value.useIdentity ? form.value.identityId || null : null,
   };
-  if (props.host) {
-    await hosts.updateHost(host);
-  } else {
-    await hosts.addHost(host);
+  saving.value = true;
+  saveError.value = "";
+  try {
+    if (props.host) {
+      await hosts.updateHost(host);
+    } else {
+      await hosts.addHost(host);
+    }
+  } catch (cause) {
+    // The form stays open with what was typed, so the user can adjust it or
+    // try again.
+    saveError.value = saveFailure(cause);
+    return;
+  } finally {
+    saving.value = false;
   }
   emit("close");
 }
@@ -305,8 +321,9 @@ async function save() {
     </div>
 
     <template #footer>
+      <p v-if="saveError" role="alert" class="basis-full text-[12px] text-destructive">{{ saveError }}</p>
       <Button variant="ghost" @click="emit('close')">Cancel</Button>
-      <Button :disabled="!isValid" @click="save">
+      <Button :disabled="!isValid || saving" @click="save">
         {{ host ? "Save changes" : "Add host" }}
       </Button>
     </template>

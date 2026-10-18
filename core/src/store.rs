@@ -1,5 +1,6 @@
 use crate::host::{Host, HostGroup};
 use crate::identity::Identity;
+use crate::key_reach::{self, NewReach};
 use crate::workspace::Workspace;
 use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
@@ -21,6 +22,58 @@ pub struct StoreData {
     pub active_workspace_id: Option<uuid::Uuid>,
 }
 
+/// The host and identity edits, as plain operations on the data, so a write can
+/// be applied to a copy first to see what it would change.
+impl StoreData {
+    pub fn add_host(&mut self, host: Host) {
+        self.hosts.push(host);
+    }
+
+    pub fn update_host(&mut self, host: Host) {
+        if let Some(h) = self.hosts.iter_mut().find(|h| h.id == host.id) {
+            *h = host;
+        }
+    }
+
+    pub fn add_identity(&mut self, identity: Identity) {
+        self.identities.push(identity);
+    }
+
+    pub fn update_identity(&mut self, identity: Identity) {
+        if let Some(i) = self.identities.iter_mut().find(|i| i.id == identity.id) {
+            *i = identity;
+        }
+    }
+
+    /// Hosts that linked the identity go back to their own username, auth and
+    /// key.
+    pub fn remove_identity(&mut self, id: uuid::Uuid) {
+        self.identities.retain(|i| i.id != id);
+        self.hosts.iter_mut().for_each(|h| {
+            if h.identity_id == Some(id) {
+                h.identity_id = None;
+            }
+        });
+    }
+
+    /// The identity `host` links to, looked up the way a connection looks it
+    /// up: the first identity with that id. `None` both when the host links
+    /// nothing and when the link points at an identity that is not stored.
+    pub fn linked_identity(&self, host: &Host) -> Option<&Identity> {
+        let id = host.identity_id?;
+        self.identities.iter().find(|i| i.id == id)
+    }
+}
+
+/// The saved store, and the only way to change it.
+///
+/// Every write goes through `commit_confirmed`, which refuses any write that
+/// lets a vault key sign in where no saved host lets it sign in yet unless it
+/// is handed exactly what the user confirmed. The typed writers below confirm
+/// nothing, so they make every change except that one and fail with
+/// `UnconfirmedKeyReach` on it. Making such a write takes `preview` to see what
+/// it would allow, the user's confirmation of that, and `commit_confirmed` with
+/// what was confirmed.
 pub struct Store {
     path: PathBuf,
     data: StoreData,
@@ -59,37 +112,66 @@ impl Store {
         crate::fs_util::write_private(&self.path, &raw)
     }
 
-    /// Apply `f` to the in-memory data and persist the result, rolling the
-    /// change back when the write does not happen.
+    /// Every place `edit` would let a vault key sign in where no saved host lets
+    /// it sign in now; see `key_reach::introduced`. Nothing is written.
+    pub fn preview(&self, edit: impl FnOnce(&mut StoreData)) -> Vec<NewReach> {
+        let mut after = self.data.clone();
+        edit(&mut after);
+        key_reach::introduced(&self.data, &after)
+    }
+
+    /// Apply `edit` to the in-memory data and persist the result, provided
+    /// every key reach it introduces is one of `confirmed`, rolling the change
+    /// back when the write does not happen.
+    ///
+    /// A saved host that signs in with a vault key aims that key at a server,
+    /// and the store is written from the webview. `confirmed` is what the user
+    /// was shown and allowed; an empty list admits only writes that let a key
+    /// sign in nowhere new. Anything outside it fails with
+    /// `UnconfirmedKeyReach` and nothing is written. The check runs against the
+    /// store as it is when the write lands, so a write that has come to allow
+    /// more than was confirmed, because the store changed while the user was
+    /// deciding, is refused as well.
     ///
     /// The file is the authority for what survives the session, so memory must
     /// not run ahead of it. A refused write is the case that matters: the
     /// rejected value would otherwise sit in memory and fail every later save
     /// for the rest of the session, so one bad mutation would take every
     /// unrelated edit down with it.
-    fn commit(&mut self, f: impl FnOnce(&mut StoreData)) -> Result<()> {
+    pub fn commit_confirmed(
+        &mut self,
+        edit: impl FnOnce(&mut StoreData),
+        confirmed: &[NewReach],
+    ) -> Result<()> {
         let previous = self.data.clone();
-        f(&mut self.data);
-        match self.save() {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                self.data = previous;
-                Err(e)
-            }
+        edit(&mut self.data);
+        let unconfirmed = key_reach::introduced(&previous, &self.data)
+            .iter()
+            .any(|reach| !confirmed.contains(reach));
+        let written = if unconfirmed {
+            Err(CoreError::UnconfirmedKeyReach)
+        } else {
+            self.save()
+        };
+        if written.is_err() {
+            self.data = previous;
         }
+        written
+    }
+
+    /// A write that confirms nothing, so it cannot let a vault key sign in
+    /// anywhere new.
+    fn commit(&mut self, f: impl FnOnce(&mut StoreData)) -> Result<()> {
+        self.commit_confirmed(f, &[])
     }
 
     // --- hosts ---
     pub fn add_host(&mut self, host: Host) -> Result<()> {
-        self.commit(|data| data.hosts.push(host))
+        self.commit(|data| data.add_host(host))
     }
 
     pub fn update_host(&mut self, host: Host) -> Result<()> {
-        self.commit(|data| {
-            if let Some(h) = data.hosts.iter_mut().find(|h| h.id == host.id) {
-                *h = host;
-            }
-        })
+        self.commit(|data| data.update_host(host))
     }
 
     pub fn remove_host(&mut self, id: uuid::Uuid) -> Result<()> {
@@ -127,27 +209,15 @@ impl Store {
 
     // --- identities ---
     pub fn add_identity(&mut self, identity: Identity) -> Result<()> {
-        self.commit(|data| data.identities.push(identity))
+        self.commit(|data| data.add_identity(identity))
     }
 
     pub fn update_identity(&mut self, identity: Identity) -> Result<()> {
-        self.commit(|data| {
-            if let Some(i) = data.identities.iter_mut().find(|i| i.id == identity.id) {
-                *i = identity;
-            }
-        })
+        self.commit(|data| data.update_identity(identity))
     }
 
     pub fn remove_identity(&mut self, id: uuid::Uuid) -> Result<()> {
-        self.commit(|data| {
-            data.identities.retain(|i| i.id != id);
-            // Unset identity_id on any hosts that referenced it
-            data.hosts.iter_mut().for_each(|h| {
-                if h.identity_id == Some(id) {
-                    h.identity_id = None;
-                }
-            });
-        })
+        self.commit(|data| data.remove_identity(id))
     }
 
     pub fn identities(&self) -> &[Identity] {
@@ -193,8 +263,10 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::Store;
-    use crate::host::HostGroup;
+    use crate::host::{AuthMethod, Host, HostGroup};
+    use crate::identity::Identity;
     use crate::workspace::{PaneLayout, SplitDirection, TabLayout, Workspace};
+    use crate::CoreError;
 
     fn workspace_with_ratio(ratio: f32) -> Workspace {
         let mut ws = Workspace::new("hostile");
@@ -276,6 +348,84 @@ mod tests {
             PaneLayout::Split { ratio, .. } => assert_eq!(*ratio, 0.9),
             PaneLayout::Pane { .. } => panic!("expected a split"),
         }
+    }
+
+    fn key_host(hostname: &str) -> Host {
+        let mut host = Host::new("prod", hostname, 22, "deploy");
+        host.auth = AuthMethod::PublicKey;
+        host.key_id = Some(uuid::Uuid::new_v4());
+        host
+    }
+
+    #[test]
+    fn a_writer_that_confirms_nothing_cannot_aim_a_vault_key_somewhere_new() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        let mut store = Store::load(path.clone()).expect("load");
+        let host = key_host("attacker.example");
+
+        let error = store
+            .add_host(host.clone())
+            .expect_err("a key host was saved without a confirmation");
+        assert!(matches!(error, CoreError::UnconfirmedKeyReach), "{error}");
+        assert!(store.hosts().is_empty());
+        assert!(!path.exists(), "a refused write reached the disk");
+
+        // The same write goes through once it carries what was confirmed.
+        let confirmed = store.preview(|data| data.add_host(host.clone()));
+        assert_eq!(confirmed.len(), 1);
+        store
+            .commit_confirmed(|data| data.add_host(host.clone()), &confirmed)
+            .expect("a confirmed write saves");
+        assert_eq!(Store::load(path).expect("reload").hosts()[0].id, host.id);
+    }
+
+    #[test]
+    fn a_write_that_allows_more_than_was_confirmed_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = Store::load(dir.path().join("store.json")).expect("load");
+        let mut identity = Identity::new("ops", "root");
+        identity.auth = AuthMethod::PublicKey;
+        identity.key_id = Some(uuid::Uuid::new_v4());
+        for hostname in ["web.example", "db.example"] {
+            let mut host = Host::new(hostname, hostname, 22, "deploy");
+            host.identity_id = Some(identity.id);
+            store
+                .add_host(host)
+                .expect("a host linking nothing stored saves");
+        }
+
+        // Only one of the two hosts the identity gives a key to was confirmed.
+        let mut confirmed = store.preview(|data| data.add_identity(identity.clone()));
+        assert_eq!(confirmed.len(), 2);
+        confirmed.truncate(1);
+        let error = store
+            .commit_confirmed(|data| data.add_identity(identity.clone()), &confirmed)
+            .expect_err("a write broader than its confirmation went through");
+        assert!(matches!(error, CoreError::UnconfirmedKeyReach), "{error}");
+        assert!(store.identities().is_empty());
+    }
+
+    #[test]
+    fn writes_that_aim_no_key_anywhere_new_need_no_confirmation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = Store::load(dir.path().join("store.json")).expect("load");
+        let host = key_host("prod.example");
+        let confirmed = store.preview(|data| data.add_host(host.clone()));
+        store
+            .commit_confirmed(|data| data.add_host(host.clone()), &confirmed)
+            .expect("save");
+
+        let mut renamed = host.clone();
+        renamed.label = "production".into();
+        renamed.startup_command = Some("uptime".into());
+        store
+            .update_host(renamed)
+            .expect("a rename saves unconfirmed");
+        store
+            .remove_host(host.id)
+            .expect("a removal saves unconfirmed");
+        assert!(store.hosts().is_empty());
     }
 
     // A refused write must not leave the rejected value in memory: it would
