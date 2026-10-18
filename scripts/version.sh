@@ -33,6 +33,13 @@ set_version() {
   sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$PACKAGE_JSON" && rm -f "$PACKAGE_JSON.bak"
   # tauri.conf.json
   sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
+  # Cargo.lock records the workspace crates' own versions, and CI builds with
+  # --locked, which rejects a lockfile that disagrees with Cargo.toml. Only the
+  # workspace entries are rewritten; no dependency moves. The offline attempt
+  # needs nothing beyond the local registry cache and is usually enough.
+  if ! cargo update -w --offline --manifest-path "$CARGO_TOML" 2>/dev/null; then
+    cargo update -w --manifest-path "$CARGO_TOML"
+  fi
   echo "Bumped version to $new"
 }
 
@@ -59,6 +66,12 @@ cmd_get() {
 cmd_bump_explicit() {
   local new="$1"
   local current
+  # The value is spliced into sed expressions and JSON, so anything other
+  # than a plain semantic version is refused before it reaches them.
+  if [[ ! "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+    echo "Not a semantic version: '$new' (expected MAJOR.MINOR.PATCH[-PRERELEASE])" >&2
+    exit 1
+  fi
   current=$(get_version)
   if [[ "$current" == "$new" ]]; then
     echo "Version is already $new"

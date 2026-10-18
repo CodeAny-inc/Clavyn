@@ -23,12 +23,22 @@ on:
 permissions:
   contents: read
 
+# Runs that publish the same release queue behind each other instead of racing
+# on `--clobber` uploads to one tag. A dispatch names its release through the
+# `version` input while `github.ref` is the branch it was started from, so the
+# group is keyed on the tag the run publishes: a dispatch for 1.2.3 and the
+# push of tag v1.2.3 share a group.
+concurrency:
+  group: release-${{ inputs.version && format('refs/tags/v{0}', inputs.version) || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ──────────────────────────────────────────────
   # Determine version and release type
   # ──────────────────────────────────────────────
   prepare:
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
+    timeout-minutes: 5
     permissions: {}
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -107,6 +117,7 @@ jobs:
     # Tag pushes and ordinary manual releases use GitHub-hosted runners. A failed
     # trusted release can be retried via workflow_dispatch with runner_mode=self-hosted.
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && matrix.self_hosted_runner || matrix.github_runner) }}
+    timeout-minutes: 90
     permissions:
       contents: write
     steps:
@@ -263,7 +274,10 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
           uploadUpdaterJson: false
-          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }}
+          # Everything after `--` goes to cargo; `--locked` builds against the
+          # committed Cargo.lock and fails if it is out of date. It stays last
+          # so every tauri option, including SIGNING_CONFIG_ARGS, precedes it.
+          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }} -- --locked
 
       - name: Remove the Authenticode certificate from the runner store
         # The macOS keychain the bundler creates is temporary and goes with the
@@ -307,6 +321,7 @@ jobs:
   signer-tool:
     needs: prepare
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     permissions: {}
     outputs:
       signer_sha256: ${{ steps.digest.outputs.sha256 }}
@@ -341,6 +356,7 @@ jobs:
   sign:
     needs: [prepare, build, signer-tool]
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -480,6 +496,7 @@ jobs:
   publish-manifest:
     needs: [prepare, sign]
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
