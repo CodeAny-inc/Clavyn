@@ -31,6 +31,7 @@ vi.mock("@xterm/xterm", () => ({
       container.append(root);
     }
     onData() { return { dispose() {} }; }
+    onBinary() { return { dispose() {} }; }
     focus() { this.textarea.focus(); }
     write(data: string | Uint8Array, callback?: () => void) { terminalMock.write(data, callback); }
     reset() { terminalMock.reset(); }

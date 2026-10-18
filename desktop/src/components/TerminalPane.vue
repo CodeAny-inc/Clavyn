@@ -15,6 +15,7 @@ import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 import { acquireWebglRenderer, releaseWebglRenderer } from "../lib/terminalRenderer";
+import { sanitizePaste } from "../lib/terminalPaste";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
@@ -117,9 +118,74 @@ function fit() {
   try {
     if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
       fitAddon.fit();
-      if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
+      if (currentSessionId && props.pane.connected) sendSize(currentSessionId, term.cols, term.rows);
     }
   } catch { /* ResizeObserver can run during teardown. */ }
+}
+// Every resize reaches the remote as a window-change and the shell redraws, so
+// only a size the session does not already have is sent. Session creation
+// records the size it opened with; a failed resize forgets it so the next fit
+// retries. Like writes, resizes go out one at a time: two in flight could land
+// in either order and leave the remote at the older size. While one is in
+// flight only the most recent size is kept, and it follows once the first
+// settles.
+let sentSize: { sessionId: string; cols: number; rows: number } | null = null;
+let resizingSession: string | null = null;
+let wantedSize: { sessionId: string; cols: number; rows: number } | null = null;
+function recordSize(sessionId: string, cols: number, rows: number) {
+  sentSize = { sessionId, cols, rows };
+}
+function sendSize(sessionId: string, cols: number, rows: number) {
+  if (resizingSession === sessionId) {
+    wantedSize = { sessionId, cols, rows };
+    return;
+  }
+  if (sentSize?.sessionId === sessionId && sentSize.cols === cols && sentSize.rows === rows) return;
+  const sent = { sessionId, cols, rows };
+  sentSize = sent;
+  resizingSession = sessionId;
+  wantedSize = null;
+  void api.sessionResize(sessionId, cols, rows).catch(() => {
+    if (sentSize === sent) sentSize = null;
+  }).finally(() => {
+    if (resizingSession !== sessionId) return;
+    resizingSession = null;
+    const next = wantedSize;
+    wantedSize = null;
+    if (next && currentSessionId === sessionId) sendSize(next.sessionId, next.cols, next.rows);
+  });
+}
+// Tauri runs each command as its own task, so two writes in flight at once can
+// reach the session out of order. One write per pane is in flight at a time;
+// input arriving meanwhile is held and sent as a single write once it settles.
+let writingSession: string | null = null;
+let heldInput: number[] = [];
+function inputAccepted(sessionId: string | null): sessionId is string {
+  return !disposed && !props.pane.closing && !sessionEnded && !!sessionId && currentSessionId === sessionId
+    && props.pane.connected && !connecting.value;
+}
+function sendInput(bytes: number[]) {
+  const sessionId = currentSessionId;
+  if (!inputAccepted(sessionId)) return;
+  if (writingSession === sessionId) {
+    for (const byte of bytes) heldInput.push(byte);
+    return;
+  }
+  // Held input belongs to the session whose write is still in flight; a
+  // replacement session never inherits it.
+  heldInput = [];
+  writingSession = sessionId;
+  void api.sessionWrite(sessionId, bytes).catch(cause => {
+    // An old write may settle after EOF or after xterm has a new session.
+    // Preserve that owner's transcript/status; only report a live owner's error.
+    if (inputAccepted(sessionId)) writeError(`Write failed: ${String(cause)}`);
+  }).finally(() => {
+    if (writingSession !== sessionId) return;
+    writingSession = null;
+    const next = heldInput;
+    heldInput = [];
+    if (next.length && currentSessionId === sessionId) sendInput(next);
+  });
 }
 function controlHasFocus() {
   const focused = document.activeElement;
@@ -290,6 +356,7 @@ async function connectSession() {
     }
     fit();
     if (props.pane.terminalType === "local") {
+      recordSize(sessionId, terminal.cols, terminal.rows);
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows, outputSink);
     } else {
       // Direct hosts do not depend on the identity list. Linked hosts still fail
@@ -333,6 +400,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
+          recordSize(sessionId, terminal.cols, terminal.rows);
           const request = api.connectSsh(sessionId, host.id, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
@@ -386,7 +454,12 @@ onMounted(async () => {
     // Builds xterm's accessibility layer: its own row elements and a live
     // region, read from the buffer rather than from whatever is drawing, so it
     // works the same on the GPU renderer as on the DOM one.
-    screenReaderMode: settings.screenReaderMode });
+    screenReaderMode: settings.screenReaderMode,
+    // OSC 8 hyperlinks come from the remote. Without a handler xterm confirms
+    // and then calls window.open(), which opens an in-app window the shell
+    // does not manage, and the shell-open permission only covers the project's
+    // own URLs. Activating a link therefore does nothing.
+    linkHandler: { activate() {} } });
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.attachCustomKeyEventHandler(event => {
@@ -408,17 +481,22 @@ onMounted(async () => {
     }
     return true;
   });
+  // xterm's own paste listeners sit on its textarea and root element, both
+  // inside the container, so a capture listener here sees the event first and
+  // hands xterm the sanitized text to bracket and send.
+  containerRef.value.addEventListener("paste", event => {
+    if (!term) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const text = event.clipboardData?.getData("text/plain");
+    if (text) term.paste(sanitizePaste(text));
+  }, { capture: true });
   term.open(containerRef.value);
-  term.onData(data => {
-    const sessionId = currentSessionId;
-    if (!disposed && !props.pane.closing && !sessionEnded && sessionId && props.pane.connected && !connecting.value)
-      void api.sessionWrite(sessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
-        // An old write may settle after EOF or after xterm has a new session.
-        // Preserve that owner's transcript/status; only report a live owner's error.
-        if (!disposed && !props.pane.closing && !sessionEnded && currentSessionId === sessionId && props.pane.connected && !connecting.value)
-          writeError(`Write failed: ${String(cause)}`);
-      });
-  });
+  term.onData(data => sendInput(Array.from(new TextEncoder().encode(data))));
+  // Binary strings carry one byte per character. X10-encoded mouse reports
+  // arrive this way because a coordinate byte above 127 has to reach the
+  // remote as that byte, not as its UTF-8 encoding.
+  term.onBinary(data => sendInput(Array.from(data, char => char.charCodeAt(0) & 0xff)));
   observer = new ResizeObserver(() => fit());
   observer.observe(containerRef.value);
   fit();
