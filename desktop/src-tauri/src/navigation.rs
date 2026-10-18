@@ -13,6 +13,15 @@
 //! A cancelled navigation is not handed to the system browser instead. That
 //! would let any script in the page open arbitrary URLs outside the scope the
 //! shell plugin is configured with.
+//!
+//! A request for a new window is not a navigation of this webview, so
+//! `window.open` and `target="_blank"` links never reach this hook. They open
+//! nothing because no webview registers `on_new_window`: without that handler,
+//! wry marks a WebView2 `NewWindowRequested` as handled without supplying a
+//! window, its WKWebView UI delegate returns no webview, and WebKitGTK's
+//! `create` signal is left to its default, which creates none. A webview that
+//! registers one opens whatever its handler allows, so that handler has to
+//! refuse URLs outside the app the way this hook does.
 
 use tauri::plugin::{Builder, TauriPlugin};
 use tauri::{Manager, Runtime, Url};
