@@ -317,8 +317,9 @@ mod tests {
             );
         }
 
-        // A future dropped mid-dialog used to leave `open` set for the life of
-        // the process, which refused every later confirmation.
+        // A future dropped mid-dialog must release the gate; otherwise `open`
+        // would stay set for the life of the process and refuse every later
+        // confirmation.
         gate.open()
             .expect("a dropped confirmation wedged the gate closed");
     }
