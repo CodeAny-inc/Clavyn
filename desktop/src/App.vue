@@ -17,6 +17,7 @@ import AppSidebar from "./components/AppSidebar.vue";
 import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 
 // Everything else is reachable only through navigation or a shortcut, so it is
 // split out of the entry chunk and fetched when first rendered.
@@ -115,5 +116,6 @@ onUnmounted(() => {
       @navigate="activeView = $event; commandPaletteOpen = false" />
     <UpdateModal />
     <VaultUnlockModal />
+    <ConfirmDialog />
   </div>
 </template>

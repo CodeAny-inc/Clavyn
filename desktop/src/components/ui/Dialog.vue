@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useId } from "vue";
 import { cn } from "../../lib/cn";
 import Overlay from "./Overlay.vue";
 
@@ -9,13 +10,17 @@ const props = withDefaults(
     description?: string;
     width?: string;
     class?: string;
+    role?: "dialog" | "alertdialog";
   }>(),
   {
     width: "480px",
+    role: "dialog",
   },
 );
 
 const emit = defineEmits<{ close: [] }>();
+const titleId = useId();
+const descriptionId = useId();
 </script>
 
 <template>
@@ -32,17 +37,21 @@ const emit = defineEmits<{ close: [] }>();
           props.class,
         )"
         :style="{ maxWidth: props.width }"
+        :role="props.role"
+        aria-modal="true"
+        :aria-labelledby="props.title && !$slots.header ? titleId : undefined"
+        :aria-describedby="props.description && !$slots.header ? descriptionId : undefined"
         @click.stop
       >
         <div v-if="props.title || $slots.header" class="px-4 sm:px-5 pt-4 sm:pt-5 pb-3">
           <slot name="header">
-            <h2 class="text-[15px] font-semibold leading-tight">{{ props.title }}</h2>
-            <p v-if="props.description" class="mt-1 text-[13px] text-muted-foreground">
+            <h2 :id="titleId" class="text-[15px] font-semibold leading-tight">{{ props.title }}</h2>
+            <p v-if="props.description" :id="descriptionId" class="mt-1 text-[13px] text-muted-foreground">
               {{ props.description }}
             </p>
           </slot>
         </div>
-        <div class="px-4 sm:px-5 py-3 overflow-y-auto flex-1">
+        <div v-if="$slots.default" class="px-4 sm:px-5 py-3 overflow-y-auto flex-1">
           <slot />
         </div>
         <div

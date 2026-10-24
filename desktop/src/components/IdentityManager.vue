@@ -27,6 +27,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { confirmAction } from "../composables/useConfirm";
 import type { Identity, AuthMethod } from "../types";
 
 const identities = useIdentitiesStore();
@@ -46,6 +47,7 @@ const importKeyText = ref("");
 const importKeyPassphrase = ref("");
 const creatingKey = ref(false);
 const browsingFile = ref(false);
+const formError = ref("");
 
 const form = ref({
   label: "",
@@ -75,7 +77,12 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (confirm(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Identities in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     await hosts.deleteGroup(groupId);
     if (identities.selectedGroupId === groupId) {
       identities.selectedGroupId = null;
@@ -104,6 +111,7 @@ function addIdentity() {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  formError.value = "";
   showForm.value = true;
 }
 
@@ -130,6 +138,7 @@ function editIdentity(id: Identity) {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  formError.value = "";
   showForm.value = true;
 }
 
@@ -161,7 +170,7 @@ async function ensureKey(): Promise<string | null> {
       const key = await keys.generateKey(newKeyLabel.value.trim());
       return key.id;
     } catch (e) {
-      alert(`Failed to generate key: ${e}`);
+      formError.value = `Failed to generate key: ${e}`;
       return null;
     } finally {
       creatingKey.value = false;
@@ -178,7 +187,7 @@ async function ensureKey(): Promise<string | null> {
       );
       return key.id;
     } catch (e) {
-      alert(`Failed to import key: ${e}`);
+      formError.value = `Failed to import key: ${e}`;
       return null;
     } finally {
       creatingKey.value = false;
@@ -189,6 +198,7 @@ async function ensureKey(): Promise<string | null> {
 
 async function save() {
   if (!canSave.value) return;
+  formError.value = "";
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
     keyId = await ensureKey();
@@ -214,18 +224,24 @@ async function save() {
     }
     showForm.value = false;
   } catch (e) {
-    alert(`Failed to save identity: ${e}`);
+    formError.value = `Failed to save identity: ${e}`;
   }
 }
 
 async function deleteIdentity(id: Identity) {
-  if (confirm(`Delete identity "${id.label}"?`)) {
+  if (await confirmAction({
+    title: "Delete identity",
+    message: `Delete identity "${id.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     await identities.deleteIdentity(id.id);
   }
 }
 
 async function browseForKeyFile() {
   browsingFile.value = true;
+  formError.value = "";
   try {
     const content = await api.pickKeyFile();
     if (content !== null) {
@@ -233,7 +249,7 @@ async function browseForKeyFile() {
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    alert(`Failed to read key file: ${e}`);
+    formError.value = `Failed to read key file: ${e}`;
   } finally {
     browsingFile.value = false;
   }
@@ -554,6 +570,8 @@ function hostsUsingIdentity(identityId: string): number {
           <Label for="id-tags">Tags (comma-separated)</Label>
           <Input id="id-tags" v-model="form.tags" placeholder="work, production" />
         </FormGroup>
+
+        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
