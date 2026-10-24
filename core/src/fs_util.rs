@@ -9,8 +9,16 @@ use std::time::Duration;
 /// that did not finish.
 const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
 
-/// Load a state file, keeping "could not be read" and "is not valid state"
-/// apart and naming the file in both.
+/// Load a state file, keeping "absent", "could not be read" and "is not valid
+/// state" apart and naming the file in the last two.
+///
+/// Only `NotFound` reads as absent (`Ok(None)`). Every other failure — a
+/// permission problem on the file or a directory above it, an I/O error, a
+/// stale network handle, a symlink loop — is `UnreadableState`. `Path::exists`
+/// cannot be used to decide this: it answers false for all of those, and a
+/// caller that then starts from empty state loses pinned host keys for the
+/// session, and offers to create a vault whose first save replaces the one
+/// that could not be read.
 ///
 /// The bytes are read and parsed as bytes rather than through a `String`: a
 /// file that is not valid UTF-8 — hand-edited in an ANSI or UTF-16 editor, or
@@ -19,15 +27,42 @@ const LEFTOVER_MIN_AGE: Duration = Duration::from_secs(300);
 /// screen as a failure it can only offer to retry, forever. As a parse failure
 /// it is `CorruptState`, which is what makes moving the file aside the right
 /// offer.
-pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let bytes = std::fs::read(path).map_err(|e| crate::CoreError::UnreadableState {
+pub(crate) fn read_state_file<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        // A symbolic link whose target is missing also reads as NotFound, but
+        // the state is not absent: something is configured there, and treating
+        // it as nothing would offer to create a file the link then blocks.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return match std::fs::symlink_metadata(path) {
+                Ok(_) => Err(unreadable_state(
+                    path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "it is a symbolic link to a file that does not exist",
+                    ),
+                )),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                // The second look failed for another reason, so whether the
+                // file is there is unknown again.
+                Err(e) => Err(unreadable_state(path, e)),
+            };
+        }
+        Err(e) => return Err(unreadable_state(path, e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| crate::CoreError::CorruptState {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })
+}
+
+pub(crate) fn unreadable_state(path: &Path, error: std::io::Error) -> crate::CoreError {
+    crate::CoreError::UnreadableState {
         path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
-    serde_json::from_slice(&bytes).map_err(|e| crate::CoreError::CorruptState {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })
+        reason: error.to_string(),
+    }
 }
 
 /// Write `contents` to `path` atomically, readable only by the owner.
@@ -100,6 +135,47 @@ pub fn write_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
     }
     if let Err(e) = sync_parent_directory(path) {
         tracing::warn!("saved {} but could not sync its directory: {e}", path.display());
+    }
+    Ok(())
+}
+
+/// Write `contents` to `path` only if nothing is there yet. An existing file
+/// is left as it was and the error is `AlreadyExists`.
+///
+/// The bytes are staged and synced exactly as `write_private_bytes` does, but
+/// the file is published with a hard link instead of a rename. Linking fails
+/// when the name is taken, so a file that appears after the caller looked and
+/// found nothing is never replaced. On a volume without hard links the file is
+/// created in place with `create_new`, which refuses an existing name too.
+pub fn create_private_bytes(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| save_failed(path, e))?;
+    }
+
+    let tmp = temp_path(path);
+    let published = write_temp(&tmp, contents).and_then(|()| std::fs::hard_link(&tmp, path));
+    let _ = std::fs::remove_file(&tmp);
+    let published = match published {
+        // Some volumes have no hard links (FAT and exFAT, some network
+        // shares). Creating the file in place with `create_new` is just as
+        // unwilling to replace an existing one. What it gives up is that a
+        // failed or interrupted write leaves a partial file. That file is not
+        // removed by name, which could delete one another process created
+        // there in the meantime; it loads as corrupt state, which startup
+        // recovery offers to move aside.
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::Unsupported | std::io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            write_temp(path, contents)
+        }
+        other => other,
+    };
+    published.map_err(|e| save_failed(path, e))?;
+    if let Err(e) = sync_parent_directory(path) {
+        tracing::warn!("created {} but could not sync its directory: {e}", path.display());
     }
     Ok(())
 }
@@ -493,9 +569,36 @@ mod owner_only {
     }
 }
 
+/// Seed `name` with `contents` in a fresh directory, take the search bit off
+/// that directory, and hand the path to `load`. The file is there, but neither
+/// it nor its metadata can be reached, which is what an inherited ACL or an
+/// unreachable network share looks like to a loader. Returns `None` when the
+/// restriction is not enforced — root ignores it — so there is nothing to
+/// observe.
+#[cfg(all(test, unix))]
+pub(crate) fn load_from_unsearchable_dir<T>(
+    name: &str,
+    contents: &str,
+    load: impl FnOnce(PathBuf) -> Result<T>,
+) -> Option<Result<T>> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join(name);
+    std::fs::write(&path, contents).expect("seed");
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    let enforced = std::fs::metadata(&path).is_err();
+    let loaded = load(path);
+    // Restore the directory so the tempdir can be removed.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).expect("restore");
+    enforced.then_some(loaded)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{remove_private, remove_private_with_sync, temp_path, write_private, LEFTOVER_MIN_AGE};
+    use super::{
+        create_private_bytes, leftover_temp_files, remove_private, remove_private_with_sync,
+        temp_path, write_private, LEFTOVER_MIN_AGE,
+    };
 
     /// Backdate a file so the sweep after a save counts it as a leftover rather
     /// than as a staging file some other writer is still filling in.
@@ -678,6 +781,63 @@ mod tests {
         write_private(&path, "{}").expect("write");
 
         let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "unexpected mode {:o}", mode & 0o777);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_missing_file_is_unreadable_not_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &path).expect("symlink");
+
+        let read: crate::Result<Option<serde_json::Value>> = super::read_state_file(&path);
+        assert!(
+            matches!(read, Err(crate::CoreError::UnreadableState { .. })),
+            "a dangling link loaded as {read:?}"
+        );
+    }
+
+    #[test]
+    fn create_refuses_an_existing_file_and_leaves_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::fs::write(&path, b"existing bytes").expect("seed");
+
+        let err = create_private_bytes(&path, b"replacement").expect_err("existing file");
+        assert!(
+            matches!(&err, crate::CoreError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists),
+            "unexpected error: {err}"
+        );
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing bytes");
+        assert!(leftover_temp_files(&path, None).is_empty());
+    }
+
+    #[test]
+    fn create_publishes_a_missing_file_without_a_staging_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+
+        create_private_bytes(&path, b"new bytes").expect("create");
+
+        assert_eq!(std::fs::read(&path).expect("read back"), b"new bytes");
+        assert!(leftover_temp_files(&path, None).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_created_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+
+        create_private_bytes(&path, b"{}").expect("create");
+
+        let mode = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600, "unexpected mode {:o}", mode & 0o777);
     }
 }
