@@ -21,6 +21,7 @@ import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { isTerminalShortcut, terminalShortcutLabel } from "../lib/shortcuts";
 
 const props = withDefaults(defineProps<{ pane: Pane; tabId: string; visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ "split-h": []; "split-v": []; close: [] }>();
@@ -395,14 +396,19 @@ onMounted(async () => {
     // fullscreen so the event bubbles up and exits fullscreen without being
     // sent to the remote shell.
     if (event.key === "Escape" && isFullscreen.value) return false;
-    const command = event.metaKey || event.ctrlKey;
-    if (command && event.key.toLowerCase() === "f") {
+    // Only the terminal-safe modifier is taken; plain Ctrl+F, Ctrl+K and
+    // Ctrl+arrows stay with the shell on Linux and Windows.
+    const command = isTerminalShortcut(event);
+    const key = event.key.toLowerCase();
+    if (command && key === "f") {
       if (event.type === "keydown") { event.preventDefault(); openSearch(); }
       return false;
     }
+    // Not sent to the shell, so it reaches the window and opens the palette.
+    if (command && key === "k") return false;
     const directions = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as const;
     const direction = directions[event.key as keyof typeof directions];
-    if (command && !event.shiftKey && !event.altKey && direction) {
+    if (command && direction) {
       if (event.type === "keydown") { event.preventDefault(); tabs.navigatePane(direction); }
       return false;
     }
@@ -564,7 +570,7 @@ function drop(event: DragEvent) {
 const actions = computed<MenuAction[]>(() => [
   { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
   { id: "split-v", label: "Split below…", icon: SplitSquareVertical },
-  { id: "search", label: "Find in terminal", icon: Search, shortcut: "⌘ / Ctrl F", separator: true },
+  { id: "search", label: "Find in terminal", icon: Search, shortcut: terminalShortcutLabel("F"), separator: true },
   { id: "fullscreen", label: isFullscreen.value ? "Restore pane" : "Maximize pane", icon: isFullscreen.value ? Minimize2 : Maximize2 },
   ...otherTabs.value.map((tab, index) => ({ id: `move:${tab.id}`, label: `Move to ${tab.title}`, icon: ArrowUpRight, separator: index === 0 })),
   ...(!props.pane.connected ? [{ id: "reconnect", label: "Reconnect", icon: RotateCw, disabled: busy.value, separator: true }] : []),
@@ -600,7 +606,7 @@ function selectAction(id: string) {
       </div>
       <div class="flex shrink-0 items-center gap-0.5 text-muted-foreground" @click.stop
         @pointerdown.capture="activatePane()" @focusin="activatePane()">
-        <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
+        <button class="pane-button" aria-label="Search in terminal" :title="`Search (${terminalShortcutLabel('F')})`" @click="openSearch"><Search class="size-3.5" /></button>
         <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
         <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
       </div>
