@@ -328,7 +328,7 @@ const showBiometricButton = computed(
 
           <!-- Reconciliation fails closed by hiding biometric settings. Keep
                its error visible independently of those capability flags. -->
-          <p v-if="displayRuntimeError" role="alert" class="text-[12px] text-destructive">
+          <p v-if="displayRuntimeError" role="alert" class="text-[12px] text-destructive select-text">
             {{ displayRuntimeError }}
           </p>
 

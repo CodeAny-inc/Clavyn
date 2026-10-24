@@ -234,7 +234,7 @@ function authLabel(host: Host): string {
       <p v-if="identities.loading" class="mt-2 text-[11px] text-muted-foreground" role="status">
         Loading linked SSH identities… Direct hosts remain available.
       </p>
-      <div v-else-if="identities.loadError" class="mt-2 text-[11px] text-destructive" role="alert">
+      <div v-else-if="identities.loadError" class="mt-2 text-[11px] text-destructive select-text" role="alert">
         {{ identities.loadError }} Direct hosts remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
@@ -264,7 +264,7 @@ function authLabel(host: Host): string {
           <span class="truncate flex-1">{{ group.name }}</span>
           <span class="text-[10px] text-muted-foreground">{{ hosts.hosts.filter(h => h.group_id === group.id).length }}</span>
           <button
-            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100"
+            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Delete group"
             @click.stop="deleteGroup(group.id, group.name)"
           >
@@ -314,7 +314,7 @@ function authLabel(host: Host): string {
             Identity
           </Badge>
           <!-- Action buttons -->
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100">
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <button
               class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100"
               aria-label="Connect"
@@ -340,7 +340,7 @@ function authLabel(host: Host): string {
               <Trash2 class="size-3" :stroke-width="1.75" />
             </button>
           </div>
-          <ChevronRight class="size-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block" :stroke-width="1.75" />
+          <ChevronRight class="size-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" :stroke-width="1.75" />
         </div>
       </div>
 

@@ -393,11 +393,11 @@ async function upload() {
           <p v-if="selectedHost?.identity_id && identities.loading" class="text-[12px] text-muted-foreground" role="status">
             Loading linked SSH identity… Direct hosts remain available.
           </p>
-          <div v-else-if="selectedHost?.identity_id && identities.loadError" class="text-[12px] text-destructive" role="alert">
+          <div v-else-if="selectedHost?.identity_id && identities.loadError" class="text-[12px] text-destructive select-text" role="alert">
             {{ identities.loadError }}
             <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
           </div>
-          <div v-else-if="selectedIdentityMissing" class="text-[12px] text-destructive" role="alert">
+          <div v-else-if="selectedIdentityMissing" class="text-[12px] text-destructive select-text" role="alert">
             Missing SSH identity. Repair this host before connecting.
           </div>
           <p v-else-if="selectedEndpoint" class="text-[11px] font-mono text-muted-foreground">

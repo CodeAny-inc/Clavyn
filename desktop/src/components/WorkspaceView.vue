@@ -470,6 +470,8 @@ const colorOptions = [
               class="flex h-8 w-8 items-center justify-center rounded-md border transition-all duration-100"
               :class="form.color === opt.value ? 'border-foreground ring-2 ring-ring/20' : 'border-border hover:border-muted-foreground'"
               :style="opt.value ? { backgroundColor: opt.value } : {}"
+              :aria-label="`Colour ${opt.label}`"
+              :aria-pressed="form.color === opt.value"
               @click="form.color = opt.value"
             >
               <span v-if="!opt.value" class="text-[10px] text-muted-foreground">None</span>
@@ -486,6 +488,9 @@ const colorOptions = [
               </p>
             </div>
             <button
+              role="switch"
+              aria-label="Auto-connect"
+              :aria-checked="form.autoConnect"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
               :class="form.autoConnect ? 'bg-primary' : 'bg-muted'"
               @click="form.autoConnect = !form.autoConnect"

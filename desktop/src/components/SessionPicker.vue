@@ -83,7 +83,7 @@ defineExpose({ show });
           class="h-10 min-w-0 flex-1 bg-transparent text-sm outline-none" @keydown="enterSearch" />
       </div>
       <p v-if="identities.loading" class="text-xs text-muted-foreground" role="status">Loading linked SSH identities… Direct hosts and local shells remain available.</p>
-      <div v-else-if="identities.loadError" class="text-xs text-destructive" role="alert">
+      <div v-else-if="identities.loadError" class="text-xs text-destructive select-text" role="alert">
         {{ identities.loadError }} Direct hosts and local shells remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>

@@ -38,7 +38,7 @@ async function restart() {
 
 <template>
   <div class="flex h-screen w-screen items-center justify-center overflow-y-auto bg-background p-6 text-foreground">
-    <div class="w-full max-w-[520px] rounded-lg border border-border bg-card p-6" role="alert">
+    <div class="w-full max-w-[520px] rounded-lg border border-border bg-card p-6 select-text" role="alert">
       <div class="mb-4 flex items-center gap-3">
         <AlertTriangle class="size-5 text-destructive" :stroke-width="1.75" />
         <h1 class="text-[15px] font-semibold">
