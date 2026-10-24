@@ -1,6 +1,6 @@
 use crate::{CoreError, Result};
 use base64::Engine;
-use russh::keys::ssh_key::{self, Algorithm, HashAlg, PrivateKey, PublicKey};
+use russh::keys::ssh_key::{self, Algorithm, HashAlg, Kdf, PrivateKey, PublicKey};
 use russh::keys::{decode_secret_key, PublicKeyBase64};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -47,6 +47,15 @@ fn key_type_of(algorithm: &Algorithm) -> Result<KeyType> {
     }
 }
 
+/// Most bcrypt-pbkdf rounds an OpenSSH key may ask for.
+///
+/// The round count is read from the key file and all of it is paid before the
+/// passphrase can even be checked, so it bounds the work an imported file can
+/// demand: the format allows up to 2^32 - 1 rounds, which would never finish.
+/// `ssh-keygen` uses 16 unless told otherwise with `-a`, and hardening guides
+/// stay within a few hundred.
+pub const MAX_BCRYPT_ROUNDS: u32 = 1000;
+
 /// Parse an OpenSSH-formatted private key string, returning metadata + the
 /// private key. Does NOT persist anything.
 ///
@@ -57,13 +66,10 @@ pub fn parse_openssh_private(
     openssh: &str,
     passphrase: Option<&str>,
 ) -> Result<(KeyMeta, PrivateKey)> {
-    if passphrase.is_some() && decode_secret_key(openssh, None).is_ok() {
-        return Err(CoreError::Key(
-            "parse: this key is not protected by a passphrase; leave the passphrase empty".into(),
-        ));
-    }
-    let pair = decode_secret_key(openssh, passphrase)
-        .map_err(|e| CoreError::Key(format!("parse: {e}")))?;
+    let pair = match openssh_body(openssh) {
+        Some(body) => decode_openssh(&body, passphrase)?,
+        None => decode_other(openssh, passphrase)?,
+    };
     let public = pair.public_key();
     let key_type = key_type_of(&public.algorithm())?;
     let fingerprint = fingerprint(public);
@@ -78,6 +84,96 @@ pub fn parse_openssh_private(
     Ok((meta, pair))
 }
 
+/// The base64 body of an OpenSSH-format private key, or `None` for any other
+/// format.
+///
+/// Gathered the way `decode_secret_key` gathers it, so text russh would read as
+/// an OpenSSH key is read as one here too and never reaches russh's own
+/// decryption, which puts no limit on the KDF rounds.
+fn openssh_body(text: &str) -> Option<String> {
+    if text.trim().starts_with("PuTTY-User-Key-File-") {
+        return None;
+    }
+    let mut started = false;
+    let mut openssh = false;
+    let mut body = String::new();
+    for line in text.lines() {
+        if started {
+            if line.starts_with("-----END ") {
+                break;
+            }
+            if line
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+            {
+                body.push_str(line);
+            }
+        }
+        match line {
+            "-----BEGIN OPENSSH PRIVATE KEY-----" => {
+                started = true;
+                openssh = true;
+            }
+            "-----BEGIN RSA PRIVATE KEY-----"
+            | "-----BEGIN ENCRYPTED PRIVATE KEY-----"
+            | "-----BEGIN PRIVATE KEY-----"
+            | "-----BEGIN EC PRIVATE KEY-----" => {
+                started = true;
+                openssh = false;
+            }
+            _ => {}
+        }
+    }
+    openssh.then_some(body)
+}
+
+/// Decode an OpenSSH key body, decrypting it with `passphrase` when it is
+/// protected. The KDF rounds are checked before any key derivation runs.
+fn decode_openssh(body: &str, passphrase: Option<&str>) -> Result<PrivateKey> {
+    // As lenient as russh's MIME decoder, so no key it reads is refused here.
+    const BODY: base64::engine::GeneralPurpose = base64::engine::GeneralPurpose::new(
+        &base64::alphabet::STANDARD,
+        base64::engine::GeneralPurposeConfig::new()
+            .with_decode_allow_trailing_bits(true)
+            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
+    );
+    let bytes = Zeroizing::new(
+        BODY.decode(body)
+            .map_err(|e| CoreError::Key(format!("parse: {e}")))?,
+    );
+    let key = PrivateKey::from_bytes(&bytes).map_err(|e| CoreError::Key(format!("parse: {e}")))?;
+    if let Kdf::Bcrypt { rounds, .. } = key.kdf() {
+        if *rounds > MAX_BCRYPT_ROUNDS {
+            return Err(CoreError::InvalidInput(format!(
+                "this key's passphrase protection asks for {rounds} bcrypt rounds; \
+                 at most {MAX_BCRYPT_ROUNDS} are accepted"
+            )));
+        }
+    }
+    match (key.is_encrypted(), passphrase) {
+        (false, None) => Ok(key),
+        (false, Some(_)) => Err(not_protected()),
+        (true, Some(passphrase)) => key
+            .decrypt(passphrase)
+            .map_err(|e| CoreError::Key(format!("parse: {e}"))),
+        (true, None) => Err(CoreError::Key("parse: the key is encrypted".into())),
+    }
+}
+
+/// Decode a PEM or PuTTY key through russh.
+fn decode_other(text: &str, passphrase: Option<&str>) -> Result<PrivateKey> {
+    if passphrase.is_some() && decode_secret_key(text, None).is_ok() {
+        return Err(not_protected());
+    }
+    decode_secret_key(text, passphrase).map_err(|e| CoreError::Key(format!("parse: {e}")))
+}
+
+fn not_protected() -> CoreError {
+    CoreError::Key(
+        "parse: this key is not protected by a passphrase; leave the passphrase empty".into(),
+    )
+}
+
 /// Parse a private key for storage in the vault, returning its metadata and the
 /// text to store.
 ///
@@ -85,12 +181,20 @@ pub fn parse_openssh_private(
 /// without a passphrase, and the key's own passphrase is not kept. A key given
 /// with its passphrase is therefore stored with that protection removed; one
 /// without a passphrase is stored exactly as given.
+///
+/// Every decryption repeats the key's KDF, so the key is decrypted once and both
+/// the metadata and the stored text come from that one decrypted key.
 pub fn import_openssh_private(
     openssh: &str,
     passphrase: Option<&str>,
 ) -> Result<(KeyMeta, Zeroizing<String>)> {
-    let (meta, _) = parse_openssh_private(openssh, passphrase)?;
-    let stored = unprotected_private_key(openssh, passphrase)?;
+    let (meta, decrypted) = parse_openssh_private(openssh, passphrase)?;
+    // Parsing refuses a passphrase for a key that has none, so a key that
+    // parsed with one was decrypted with it.
+    let stored = match passphrase {
+        None => Zeroizing::new(openssh.to_owned()),
+        Some(_) => unprotected_form(openssh, &decrypted)?,
+    };
     Ok((meta, stored))
 }
 
@@ -133,45 +237,21 @@ pub fn generate_ed25519() -> Result<(Zeroizing<String>, String)> {
     Ok((pem, private.public_key().public_key_base64()))
 }
 
-/// The private key text to store in the vault: `openssh` itself, or, when it
-/// carries its own passphrase, the same key with that protection removed.
+/// The text to store for a key that carried its own passphrase, written from
+/// the already decrypted key.
 ///
 /// The vault is what protects stored keys, and the connect path reads a stored
-/// key without a passphrase, so a key kept in its encrypted form imports
-/// without complaint and can then never be used. An OpenSSH key is decrypted
-/// and written back in OpenSSH form; an encrypted PEM key is decoded and
-/// written as unencrypted PKCS#8. A key still encrypted for want of the
-/// passphrase is an error, not stored text.
-pub fn unprotected_private_key(openssh: &str, passphrase: Option<&str>) -> Result<Zeroizing<String>> {
-    let passphrase = passphrase.filter(|p| !p.is_empty());
-    if let Ok(private) = PrivateKey::from_openssh(openssh) {
-        if !private.is_encrypted() {
-            return Ok(Zeroizing::new(openssh.to_owned()));
-        }
-        let passphrase = passphrase.ok_or_else(|| {
-            CoreError::Key("this key is protected by its own passphrase".into())
-        })?;
-        return private
-            .decrypt(passphrase)
-            .map_err(|e| CoreError::Key(format!("decrypt: {e}")))?
+/// key without a passphrase, so a key kept in its encrypted form would import
+/// without complaint and could then never be used. An OpenSSH key is written
+/// back in OpenSSH form; a PEM or PuTTY key is written as unencrypted PKCS#8.
+fn unprotected_form(original: &str, decrypted: &PrivateKey) -> Result<Zeroizing<String>> {
+    if openssh_body(original).is_some() {
+        return decrypted
             .to_openssh(ssh_key::LineEnding::LF)
             .map_err(|e| CoreError::Key(format!("serialize: {e}")));
     }
-    // Not OpenSSH: a PEM key. One that decodes without a passphrase is stored
-    // as given; an encrypted one needs its passphrase and is written back as
-    // unencrypted PKCS#8.
-    if decode_secret_key(openssh, None).is_ok() {
-        return Ok(Zeroizing::new(openssh.to_owned()));
-    }
-    let Some(passphrase) = passphrase else {
-        return Err(CoreError::Key(
-            "this key is protected by its own passphrase".into(),
-        ));
-    };
-    let pair = decode_secret_key(openssh, Some(passphrase))
-        .map_err(|e| CoreError::Key(format!("parse: {e}")))?;
     let mut pem = Zeroizing::new(Vec::new());
-    russh::keys::encode_pkcs8_pem(&pair, &mut *pem)
+    russh::keys::encode_pkcs8_pem(decrypted, &mut *pem)
         .map_err(|e| CoreError::Key(format!("serialize: {e}")))?;
     String::from_utf8(pem.to_vec())
         .map(Zeroizing::new)
@@ -224,6 +304,28 @@ mod tests {
             .to_string()
     }
 
+    /// `protected` with its bcrypt round count replaced. The count sits outside
+    /// the encrypted section and nothing authenticates it, so the result still
+    /// parses as a key.
+    fn with_rounds(protected: &str, rounds: u32) -> String {
+        let key = PrivateKey::from_openssh(protected).expect("read");
+        let Kdf::Bcrypt { salt, .. } = key.kdf() else {
+            panic!("not a bcrypt-protected key");
+        };
+        let mut bytes = key.to_bytes().expect("encode").to_vec();
+        let at = bytes
+            .windows(salt.len())
+            .position(|window| window == salt.as_slice())
+            .expect("salt")
+            + salt.len();
+        bytes[at..at + 4].copy_from_slice(&rounds.to_be_bytes());
+        PrivateKey::from_bytes(&bytes)
+            .expect("reparse")
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("serialize")
+            .to_string()
+    }
+
     /// A key imported with its own passphrase is stored in a form the connect
     /// path, which decodes stored keys without a passphrase, can use.
     #[test]
@@ -232,11 +334,13 @@ mod tests {
         let (meta, _) = parse_openssh_private(&plain, None).expect("parse");
         let protected = protected_openssh(&plain, "key passphrase");
 
-        let stored = unprotected_private_key(&protected, Some("key passphrase")).expect("unprotect");
+        let (imported, stored) =
+            import_openssh_private(&protected, Some("key passphrase")).expect("import");
+        assert_eq!(imported.fingerprint, meta.fingerprint);
         let (stored_meta, _) = parse_openssh_private(&stored, None).expect("usable without passphrase");
         assert_eq!(stored_meta.fingerprint, meta.fingerprint);
 
-        assert!(unprotected_private_key(&protected, Some("wrong")).is_err());
+        assert!(import_openssh_private(&protected, Some("wrong")).is_err());
     }
 
     /// Storing a key still encrypted would file a key the connect path can
@@ -245,8 +349,8 @@ mod tests {
     fn a_protected_key_without_its_passphrase_is_an_error_not_stored() {
         let (plain, _) = generate_ed25519().expect("generate");
         let protected = protected_openssh(&plain, "key passphrase");
-        assert!(unprotected_private_key(&protected, None).is_err());
-        assert!(unprotected_private_key(&protected, Some("")).is_err());
+        assert!(import_openssh_private(&protected, None).is_err());
+        assert!(import_openssh_private(&protected, Some("")).is_err());
     }
 
     #[test]
@@ -257,9 +361,10 @@ mod tests {
         russh::keys::encode_pkcs8_pem_encrypted(&pair, b"key passphrase", 16, &mut protected)
             .expect("encrypt pem");
         let protected = String::from_utf8(protected).expect("utf8");
-        assert!(unprotected_private_key(&protected, None).is_err());
+        assert!(import_openssh_private(&protected, None).is_err());
 
-        let stored = unprotected_private_key(&protected, Some("key passphrase")).expect("unprotect");
+        let (_, stored) =
+            import_openssh_private(&protected, Some("key passphrase")).expect("import");
         assert!(stored.contains("BEGIN PRIVATE KEY"), "{}", &*stored);
         let (stored_meta, _) = parse_openssh_private(&stored, None).expect("usable without passphrase");
         assert_eq!(stored_meta.fingerprint, meta.fingerprint);
@@ -268,8 +373,67 @@ mod tests {
     #[test]
     fn an_unprotected_key_is_stored_as_given() {
         let (plain, _) = generate_ed25519().expect("generate");
-        assert_eq!(*unprotected_private_key(&plain, None).expect("none"), *plain);
-        assert_eq!(*unprotected_private_key(&plain, Some("unused")).expect("unused"), *plain);
+        assert_eq!(
+            *import_openssh_private(&plain, None).expect("none").1,
+            *plain
+        );
+        assert!(import_openssh_private(&plain, Some("unused")).is_err());
+    }
+
+    /// The round count comes from the file, and one large enough never
+    /// finishes, so it is refused before any key derivation runs — including
+    /// for a key behind leading text, which russh reads as a key all the same.
+    #[test]
+    fn a_key_asking_for_too_many_kdf_rounds_is_refused_without_deriving() {
+        let (plain, _) = generate_ed25519().expect("generate");
+        let crafted = with_rounds(&protected_openssh(&plain, "key passphrase"), 1 << 31);
+        let behind_text = format!("exported key\n{crafted}");
+
+        let (done, results) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for text in [crafted, behind_text] {
+                for passphrase in [Some("key passphrase"), None] {
+                    let result = import_openssh_private(&text, passphrase).map(|_| ());
+                    let _ = done.send(result);
+                }
+            }
+        });
+        for _ in 0..4 {
+            let result = results
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("the import ran the KDF instead of refusing the key");
+            assert!(
+                matches!(result, Err(CoreError::InvalidInput(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    /// Every decryption repeats the KDF, so an import that decrypted the key
+    /// more than once would take a multiple of one decryption.
+    #[test]
+    fn importing_a_protected_key_runs_its_kdf_once() {
+        let (plain, _) = generate_ed25519().expect("generate");
+        let protected = protected_openssh(&plain, "key passphrase");
+        let encrypted = PrivateKey::from_openssh(&protected).expect("read");
+
+        // The fastest of several runs, so a busy machine only ever slows a
+        // run down and cannot make the import look cheaper than it is.
+        let mut one_pass = std::time::Duration::MAX;
+        let mut import = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            encrypted.decrypt("key passphrase").expect("decrypt");
+            one_pass = one_pass.min(started.elapsed());
+
+            let started = std::time::Instant::now();
+            import_openssh_private(&protected, Some("key passphrase")).expect("import");
+            import = import.min(started.elapsed());
+        }
+        assert!(
+            import.as_secs_f64() < one_pass.as_secs_f64() * 1.5,
+            "import took {import:?} against {one_pass:?} for one decryption"
+        );
     }
 
     #[test]

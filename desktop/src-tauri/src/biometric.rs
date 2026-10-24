@@ -182,29 +182,17 @@ pub async fn unlock_with_biometric(state: State<'_, Arc<AppState>>) -> ApiResult
     })
     .await?;
 
-    let mut vault = state.vault.lock().await;
-    let key = vault
-        .verify_passphrase(passphrase.as_str())
-        .await
-        .map_err(|e| e.to_string())?;
+    let (key, epoch) = {
+        let vault = state.vault.lock().await;
+        let key = vault
+            .verify_passphrase(passphrase.as_str())
+            .await
+            .map_err(|e| e.to_string())?;
+        (key, vault.epoch())
+    };
     // Touch ID only ever opens the vault this device expects. Opening an older
     // copy is a decision made with the passphrase.
-    crate::vault_epoch::check_on_unlock_off_thread(
-        state.epoch_store.clone(),
-        binding_id.clone(),
-        vault.epoch(),
-        false,
-    )
-    .await?;
-    // The master key is available here, so this is also where a vault stored in
-    // an older on-disk format is rewritten in the authenticated one. The rewrite
-    // preserves the salt the Keychain item is bound to, and a failure leaves the
-    // file usable, so it must not fail the unlock.
-    if let Err(error) = vault.migrate_to_current_format(&key) {
-        tracing::warn!("vault format upgrade deferred: {error}");
-    }
-    state.record_vault_epoch(&vault).await;
-    drop(vault);
+    state.finish_unlock(&key, &binding_id, epoch, false).await?;
 
     if !state
         .vault_session
