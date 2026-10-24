@@ -56,8 +56,10 @@
   --muted-foreground: 0 0% 61%;
   --accent: 0 0% 18%;
   --accent-foreground: 0 0% 94%;
-  --destructive: 0 63% 48%;
-  --destructive-foreground: 0 0% 98%;
+  /* Lifted from the light value so red text clears 4.5:1 on the dark surfaces. */
+  --destructive: 0 70% 60%;
+  /* Dark text on the lifted red keeps filled destructive buttons above 4.5:1. */
+  --destructive-foreground: 0 0% 9%;
   --border: 0 0% 22%;
   --input: 0 0% 24%;
   --ring: 213 88% 64%;
