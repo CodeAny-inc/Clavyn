@@ -70,14 +70,18 @@ onMounted(async () => {
   // None of these boot loads reads another's result: the vault probe only
   // publishes lock and biometric state, and each store owns a disjoint slice of
   // backend state. Dispatching them together costs one IPC round-trip for the
-  // whole set instead of one per store.
-  await Promise.all([
+  // whole set instead of one per store. Each settles on its own, so one
+  // failing read neither hides the others' results nor skips the update check.
+  const boot = await Promise.allSettled([
     vault.checkStatus(),
     hosts.load(),
     identities.load(),
     workspaces.load(),
     update.registerListeners(),
   ]);
+  for (const result of boot) {
+    if (result.status === "rejected") console.error("Boot load failed:", result.reason);
+  }
   // The update check is an HTTP request to the GitHub API, so it must not gate
   // the first interactive frame. The shouldNotify watcher opens the modal when
   // the result lands.
@@ -106,7 +110,7 @@ onUnmounted(() => {
       <KeyManager v-else-if="activeView === 'keys'" />
       <VaultView v-else-if="activeView === 'vault'" />
       <KnownHostsView v-else-if="activeView === 'known-hosts'" />
-      <WorkspaceView v-else-if="activeView === 'workspaces'" />
+      <WorkspaceView v-else-if="activeView === 'workspaces'" @switch-view="activeView = $event" />
       <SettingsView v-else-if="activeView === 'settings'" />
       <!-- Lazy mount once. Preserve live SFTP state, but let the browser purge transient credentials when hidden. -->
       <SftpBrowser v-if="filesOpened" v-show="activeView === 'files'" :visible="activeView === 'files'" />

@@ -36,10 +36,12 @@ const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true
 const sftp = useSftpStore();
 const hosts = useHostsStore();
 const identities = useIdentitiesStore();
-const { maskAddress } = useMaskedAddress();
+const { maskAddress, maskHostsIn } = useMaskedAddress();
 
 const selectedHostId = ref("");
 const password = ref("");
+// The hostname the latest connect attempt was started with.
+const connectAttemptHostname = ref<string | null>(null);
 const showConnectForm = ref(true);
 const showNewDirDialog = ref(false);
 const showRenameDialog = ref(false);
@@ -78,9 +80,20 @@ const selectedEndpoint = computed(() => {
   if (!host || !selectedIdentityReady.value) return null;
   return configuredSshEndpoint(host, identities.identities);
 });
+// Backend errors can name the host (`host key for {host} changed`), so mask the
+// hosts this browser knows about the same way their addresses are masked.
+const displayedError = computed(() =>
+  maskHostsIn(sftp.error ?? "", [selectedHost.value?.hostname, sftp.connectedHost?.hostname, connectAttemptHostname.value]),
+);
 const passwordRequired = computed(() => {
   const effective = selectedEffectiveIdentity.value;
   return !!effective && passwordAuth(effective.auth);
+});
+
+// The session can also end outside this view (vault reset closes every SFTP
+// session), so return to the connect form whenever it is gone.
+watch(() => sftp.sessionId, (id) => {
+  if (!id) showConnectForm.value = true;
 });
 
 const pathSegments = computed(() =>
@@ -159,6 +172,7 @@ async function connect() {
     }
     // The backend resolves the saved host and its identity itself; passing the
     // reviewed username makes it refuse an account that changed since preflight.
+    connectAttemptHostname.value = latest.hostname;
     const request = sftp.connect(latest, credential, effective.username);
     credential = null;
     await request;
@@ -422,7 +436,7 @@ async function upload() {
             class="flex items-center gap-1.5 text-[12px] text-destructive"
           >
             <AlertCircle class="size-3.5" :stroke-width="1.75" />
-            {{ sftp.error }}
+            {{ displayedError }}
           </p>
 
           <Button :disabled="!selectedHostId || sftp.loading || !selectedIdentityReady" @click="connect">
@@ -512,7 +526,7 @@ async function upload() {
         class="flex items-center gap-2 bg-destructive/10 px-3 py-2 text-[12px] text-destructive"
       >
         <AlertCircle class="size-3.5 shrink-0" :stroke-width="1.75" />
-        <span class="flex-1 truncate">{{ sftp.error }}</span>
+        <span class="flex-1 truncate">{{ displayedError }}</span>
         <button class="hover:underline" @click="sftp.error = null">Dismiss</button>
       </div>
 
