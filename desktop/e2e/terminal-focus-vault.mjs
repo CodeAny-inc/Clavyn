@@ -20,7 +20,7 @@ const inspect = page => page.evaluate(() => ({
   focused: document.activeElement?.closest(".terminal-pane")?.getAttribute("data-host-id") ?? null,
   focusLabel: document.activeElement?.getAttribute("aria-label") ?? null,
   focusTag: document.activeElement?.tagName,
-  paletteValue: document.querySelector('input[placeholder="Search commands..."]')?.value,
+  paletteValue: document.querySelector('input[role="combobox"]')?.value,
   attempts: window.__reviewTest?.attempts,
   writes: window.__terminalTest.writes,
   connects: window.__terminalTest.connects,
@@ -128,7 +128,7 @@ async function startPending(page, type = "ssh") {
 async function openPalette(page) {
   if (page.viewportSize().width < 768) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await page.getByRole("button", { name: "Search commands", exact: true }).click();
-  const input = page.getByPlaceholder("Search commands...");
+  const input = page.getByRole("combobox", { name: "Search commands and hosts" });
   await input.fill("Go to ");
   return input;
 }
