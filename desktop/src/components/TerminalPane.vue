@@ -381,7 +381,16 @@ onMounted(async () => {
   if (!containerRef.value) return;
   term = new Terminal({ fontSize: 13,
     fontFamily: "'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'Roboto Mono', ui-monospace, monospace",
-    theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
+    lineHeight: 1.2,
+    theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#161513",
+      foreground: "#ebe7de", cursor: "#e2c88e", cursorAccent: "#161513", selectionBackground: "#4b473f",
+      // Sixteen colours tuned to the warm surface: every one meant for text
+      // clears 4.5:1 against the background (black is a fill, as in any
+      // terminal), and none is a full-saturation primary.
+      black: "#3a3733", red: "#e0786b", green: "#9cc58a", yellow: "#dcc07a",
+      blue: "#86a9d4", magenta: "#c79ad4", cyan: "#7fc2bd", white: "#d9d4c8",
+      brightBlack: "#857f74", brightRed: "#f0968c", brightGreen: "#b7d9a5", brightYellow: "#ecd59a",
+      brightBlue: "#a7c2e4", brightMagenta: "#dab5e3", brightCyan: "#a2d7d2", brightWhite: "#f5f2eb" },
     cursorBlink: true, scrollback: 10000, allowProposedApi: true,
     // Builds xterm's accessibility layer: its own row elements and a live
     // region, read from the buffer rather than from whatever is drawing, so it
@@ -515,7 +524,7 @@ async function doSearch(previous = false) {
   const addon = await ensureSearchAddon();
   if (!addon) return;
   const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
-    decorations: { matchOverviewRuler: "#4f9cf9", activeMatchColorOverviewRuler: "#f59e0b", matchBackground: "#264f78", activeMatchBackground: "#f59e0b80" } };
+    decorations: { matchOverviewRuler: "#948f84", activeMatchColorOverviewRuler: "#e2c88e", matchBackground: "#4b473f", activeMatchBackground: "#e2c88e80" } };
   try {
     if (previous) addon.findPrevious(searchQuery.value, options);
     else addon.findNext(searchQuery.value, options);
@@ -585,37 +594,37 @@ function selectAction(id: string) {
 <template>
   <Teleport to="body" :disabled="!isFullscreen">
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
-    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '', isDragOver ? 'pane-drop-target' : '']"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? '' : 'pane-inactive', isDragging ? 'pane-dragging' : '', isDragOver ? 'pane-drop-target' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
     @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
     <header class="pane-header" :class="{ 'pane-header-active': isActive }" data-testid="pane-header">
       <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2 active:cursor-grabbing" draggable="true"
         :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
-        <GripVertical class="size-3 shrink-0 text-muted-foreground" />
-        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-muted-foreground" aria-label="Connecting" />
-        <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-500' : 'bg-muted-foreground'" :title="status" />
+        <GripVertical class="size-3 shrink-0 opacity-60" />
+        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin" aria-label="Connecting" />
+        <span v-else class="pane-status-dot" :class="{ 'pane-status-dot-live': pane.connected }" :title="status" />
         <span class="truncate text-[12px]" :title="`${pane.title} · ${displayAddress} · ${status}`">{{ displayAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
       </div>
-      <div class="flex shrink-0 items-center gap-0.5 text-muted-foreground" @click.stop
+      <div class="flex shrink-0 items-center gap-0.5" @click.stop
         @pointerdown.capture="activatePane()" @focusin="activatePane()">
         <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
         <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
         <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
       </div>
     </header>
-    <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
-      <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
-      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="busy" @click.stop="reconnect">Reconnect</button>
+    <div v-if="error" class="pane-notice" role="alert">
+      <span class="min-w-0 flex-1 select-text">{{ error }}</span>
+      <button v-if="!pane.connected" class="pane-notice-action" :disabled="busy" @click.stop="reconnect">Reconnect</button>
     </div>
     <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
          any subsequent key is routed; do not gate background protocol replies. -->
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
-    <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
-      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
-      <span v-if="searchSummary" class="px-1 text-[11px] tabular-nums whitespace-nowrap select-none" :class="searchResultCount === 0 ? 'text-destructive' : 'text-muted-foreground'" aria-live="polite">{{ searchSummary }}</span>
+    <div v-if="showSearch" class="pane-search" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
+      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="pane-search-input" @input="doSearch()" />
+      <span v-if="searchSummary" class="px-1 text-[11px] tabular-nums whitespace-nowrap select-none" :class="searchResultCount === 0 ? 'text-red-300' : 'opacity-70'" aria-live="polite">{{ searchSummary }}</span>
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchRegex" aria-label="Regular expression" @click="searchRegex = !searchRegex; doSearch()"><Regex class="size-3.5" /></button>
@@ -637,11 +646,28 @@ function selectAction(id: string) {
 <style scoped>
 .terminal-pane { background: var(--terminal-background); transition: box-shadow 180ms ease-out, opacity 160ms ease-out; }
 .pane-dragging { opacity: 0.5; }
-.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--workspace-accent) 70%, transparent); }
-.pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-muted-foreground; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
-.pane-header-active { background: var(--terminal-toolbar-active); color: hsl(var(--foreground)); box-shadow: inset 2px 0 var(--workspace-accent); }
-.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
-.pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
+/* Drop previews sit on the terminal surface, which is dark in both themes, so
+   they use the terminal's ink rather than the app's theme-dependent accent. */
+.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--terminal-ink) 70%, transparent); }
+/* The header sits on the terminal's own surface; the active pane is told
+   apart by tone (a lifted header, full-strength ink) and the others by dimming
+   their output, not by a coloured rule. */
+.pane-header { @apply flex h-9 shrink-0 items-center gap-2 px-2; background: var(--terminal-chrome); color: var(--terminal-ink-muted); box-shadow: inset 0 -1px var(--terminal-seam); transition: background-color 140ms ease-out, color 140ms ease-out; }
+.pane-header-active { background: var(--terminal-chrome-active); color: var(--terminal-ink); }
+.pane-inactive :deep(.xterm-screen) { opacity: 0.66; transition: opacity 160ms ease-out; }
+/* Output is inset from the pane's edges; FitAddon subtracts this padding when
+   it sizes the grid. */
+.terminal-pane :deep(.xterm) { padding: 8px 8px 6px 14px; }
+.pane-status-dot { @apply size-1.5 shrink-0 rounded-full; background: var(--terminal-ink-muted); opacity: 0.6; }
+.pane-status-dot-live { background: #8fbf8f; opacity: 1; }
+.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#948f84]; transition: background-color 120ms ease-out, color 120ms ease-out; }
+.pane-button:hover { background: color-mix(in srgb, var(--terminal-ink) 9%, transparent); color: var(--terminal-ink); }
+.pane-button[aria-pressed="true"] { background: color-mix(in srgb, var(--terminal-ink) 16%, transparent); color: var(--terminal-ink); }
+.pane-notice { @apply flex shrink-0 items-center gap-2 px-3.5 py-2 text-xs; background: var(--terminal-chrome); color: var(--terminal-ink); box-shadow: inset 0 -1px var(--terminal-seam); }
+.pane-notice-action { @apply shrink-0 rounded px-1.5 py-0.5 font-medium underline-offset-2 hover:underline disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#948f84]; color: #e2c88e; }
+.pane-search { @apply absolute right-2 top-11 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md p-1; background: var(--terminal-chrome-active); color: var(--terminal-ink); box-shadow: inset 0 0 0 1px var(--terminal-seam), 0 6px 14px -8px rgb(0 0 0 / 0.7); }
+.pane-search-input { @apply h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none; color: var(--terminal-ink); }
+.pane-search-input::placeholder { color: var(--terminal-ink-muted); }
 /* Directional drop zones: four edges split the pane, the center swaps it.
    The overlay never captures pointer events so dragover/drop reach the pane.
    Each zone's tint wipes in from the edge the pane will land on and its label
@@ -651,17 +677,17 @@ function selectAction(id: string) {
 @keyframes drop-overlay-in { from { opacity: 0; } }
 .drop-zone { @apply absolute flex items-center justify-center opacity-0; transition: opacity 140ms ease-out; }
 .drop-zone::before { content: ""; @apply absolute inset-0; transition: clip-path 160ms cubic-bezier(0.23, 1, 0.32, 1); }
-.drop-zone span { @apply rounded-full bg-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground opacity-0 shadow-lg backdrop-blur-sm; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
+.drop-zone span { @apply rounded-full px-2.5 py-1 text-[11px] font-medium opacity-0; background: var(--terminal-ink); color: var(--terminal-background); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
 .drop-zone-active { @apply opacity-100; }
 .drop-zone-top { @apply left-0 right-0 top-0 h-1/3; }
 .drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3; }
 .drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3; }
 .drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3; }
 .drop-zone-center { @apply inset-1/3; }
-/* Zone previews share the workspace accent used by the active-pane underline
-   and the reorder caret, so every drag affordance reads as one system. */
-.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
-.drop-zone-center::before { background: color-mix(in srgb, var(--workspace-accent) 28%, transparent); border-radius: 8px; }
+/* Zone previews and their labels use the terminal's ink, the one tone that
+   reads on the pane's surface in either app theme. */
+.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--terminal-ink) 16%, transparent); }
+.drop-zone-center::before { background: color-mix(in srgb, var(--terminal-ink) 22%, transparent); border-radius: 8px; }
 .drop-zone-top::before { clip-path: inset(0 0 100% 0); }
 .drop-zone-bottom::before { clip-path: inset(100% 0 0 0); }
 .drop-zone-left::before { clip-path: inset(0 100% 0 0); }
