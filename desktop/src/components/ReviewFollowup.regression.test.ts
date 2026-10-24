@@ -180,7 +180,8 @@ describe("linked identity presentation and readiness", () => {
     await search.setValue("root");
     expect(wrapper.text()).toContain("Atlas");
     await search.setValue("deploy");
-    expect(wrapper.text()).toContain("No hosts yet");
+    expect(wrapper.text()).toContain('No hosts match "deploy"');
+    expect(wrapper.text()).not.toContain("No hosts yet");
   });
 });
 

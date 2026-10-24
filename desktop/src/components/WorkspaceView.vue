@@ -73,10 +73,15 @@ const filteredHostsForPicker = computed(() => {
 });
 
 onMounted(() => {
-  void workspaces.load();
+  loadWorkspaces();
   void hosts.load();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadWorkspaces() {
+  workspaces.load().catch(() => {});
+}
 
 // --- workspace form ---
 function addWorkspace() {
@@ -304,6 +309,10 @@ const colorOptions = [
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3 sm:p-4">
+      <div v-if="workspaces.loadError && workspaces.workspaces.length" class="mb-3 flex max-w-[800px] mx-auto items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">Workspaces could not be refreshed: {{ workspaces.loadError }}</span>
+        <button class="underline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</button>
+      </div>
       <div v-if="workspaces.workspaces.length" class="flex flex-col gap-3 max-w-[800px] mx-auto">
         <div
           v-for="ws in workspaces.workspaces"
@@ -420,6 +429,14 @@ const colorOptions = [
       </div>
 
       <!-- Empty state -->
+      <div v-else-if="workspaces.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Workspaces could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ workspaces.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</Button>
+      </div>
+      <p v-else-if="!workspaces.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading workspaces…
+      </p>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Folder class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
