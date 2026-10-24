@@ -153,9 +153,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
     </div>
     <TerminalWorkspace v-show="visible && tabs.tabs.length > 0" :visible="visible" @request-session="requestSession" />
     <div v-if="visible && tabs.tabs.length === 0" class="terminal-empty">
-      <TerminalSquare class="size-12 text-muted-foreground/50" :stroke-width="1.25" />
-      <h1 class="text-lg font-medium text-foreground">Your next session starts here.</h1>
-      <p class="max-w-sm text-sm leading-6 text-muted-foreground">Use New session to connect a host or open a local shell. Keep them in tabs or work side by side.</p>
+      <!-- Text colours are fixed: this sits on the terminal background, which
+           stays dark whatever the app theme is. -->
+      <TerminalSquare class="size-12 text-zinc-500" :stroke-width="1.25" />
+      <h1 class="text-lg font-medium text-zinc-100">Your next session starts here.</h1>
+      <p class="max-w-sm text-sm leading-6 text-zinc-400">Connect a host or open a local shell. Keep them in tabs or work side by side.</p>
+      <button class="terminal-empty-action" @click="picker?.show()">
+        <Plus class="size-4" :stroke-width="1.75" />New session
+      </button>
     </div>
     <SessionPicker ref="picker" @opened="emit('activate')" />
   </section>
@@ -172,6 +177,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeyDown));
 .session-tab-close { @apply mr-1 flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring; }
 .new-session { @apply ml-1 flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-xs font-medium text-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; box-shadow: inset 0 0 0 0 transparent; transition: box-shadow 160ms ease-out, background-color 120ms ease-out; }
 .terminal-empty { @apply flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center; background: var(--terminal-background); }
+.terminal-empty-action { @apply mt-2 flex h-9 items-center gap-1.5 rounded-md bg-zinc-100 px-4 text-sm font-medium text-zinc-900 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-900; }
 /* Pane-drag affordances in the tab strip, mirroring Termius workspaces. */
 .session-tab-drop-target { background: hsl(var(--primary) / 0.15); box-shadow: inset 0 0 0 2px hsl(var(--primary)); }
 .new-session-drop-target { background: hsl(var(--primary) / 0.15); box-shadow: inset 0 0 0 2px hsl(var(--primary)); }
