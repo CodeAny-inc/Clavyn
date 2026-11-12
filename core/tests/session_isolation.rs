@@ -1,9 +1,9 @@
 //! One misbehaving peer must hold up nothing but its own session.
 //!
 //! These run the SSH and SFTP managers against an in-process russh server on
-//! loopback whose SFTP side never finishes a directory listing and whose shell
-//! exits as soon as it starts, and check that other sessions, a close and the
-//! drain a vault reset relies on all carry on regardless.
+//! loopback whose SFTP side never finishes a directory listing or a file read
+//! and whose shell exits as soon as it starts, and check that other sessions,
+//! a close and the drain a vault reset relies on all carry on regardless.
 
 use clavyn_core::host::Host;
 use clavyn_core::known_hosts::KnownHosts;
@@ -12,7 +12,9 @@ use clavyn_core::sftp::SftpManager;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
-use russh_sftp::protocol::{File, Handle, Name, Status, StatusCode, Version};
+use russh_sftp::protocol::{
+    Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,11 +25,12 @@ use tokio::sync::Mutex;
 const USER: &str = "deploy";
 const PASSWORD: &str = "correct password";
 
-/// An SFTP server whose directories never end: every READDIR answers with one
-/// more entry and never with end-of-file.
-struct EndlessDirectory;
+/// An SFTP server that never finishes anything: every READDIR answers with one
+/// more entry and never with end-of-file, and a file answers its first read
+/// and then goes quiet.
+struct NeverFinishes;
 
-impl russh_sftp::server::Handler for EndlessDirectory {
+impl russh_sftp::server::Handler for NeverFinishes {
     type Error = StatusCode;
 
     fn unimplemented(&self) -> Self::Error {
@@ -54,6 +57,35 @@ impl russh_sftp::server::Handler for EndlessDirectory {
         Ok(Name {
             id,
             files: vec![File::dummy("entry")],
+        })
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        _filename: String,
+        _pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        Ok(Handle {
+            id,
+            handle: "file".into(),
+        })
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        _handle: String,
+        offset: u64,
+        _len: u32,
+    ) -> Result<Data, Self::Error> {
+        if offset > 0 {
+            std::future::pending::<()>().await;
+        }
+        Ok(Data {
+            id,
+            data: vec![b'x'; 1024],
         })
     }
 
@@ -144,7 +176,7 @@ impl server::Handler for TestServer {
         match channel {
             Some(channel) if name == "sftp" => {
                 session.channel_success(channel_id)?;
-                russh_sftp::server::run(channel.into_stream(), EndlessDirectory).await;
+                russh_sftp::server::run(channel.into_stream(), NeverFinishes).await;
             }
             _ => session.channel_failure(channel_id)?,
         }
@@ -269,6 +301,50 @@ async fn closing_one_sftp_session_does_not_wait_on_its_listing() {
         .expect("the listing outlived its session")
         .expect("listing task");
     assert!(result.is_err());
+}
+
+/// Closing a session ends a download stuck behind a peer that went quiet, and
+/// leaves the file the download was replacing as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_from_a_quiet_peer_ends_with_the_close_and_keeps_the_original() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = start_server().await;
+    let manager = Arc::new(SftpManager::new());
+    manager
+        .connect("stuck".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .await
+        .expect("sftp connect");
+
+    let downloads = tempfile::tempdir().expect("download dir");
+    let target = downloads.path().join("report.txt");
+    std::fs::write(&target, "original").expect("write");
+    let download = tokio::spawn({
+        let manager = manager.clone();
+        let target = target.clone();
+        async move {
+            manager
+                .download_to_local("stuck", "/srv/report.txt", &target, true)
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!download.is_finished(), "the stalled download ended on its own");
+
+    tokio::time::timeout(Duration::from_secs(5), manager.close("stuck"))
+        .await
+        .expect("close waited on the download")
+        .expect("close");
+    let result = tokio::time::timeout(Duration::from_secs(2), download)
+        .await
+        .expect("the download outlived its session")
+        .expect("download task");
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), "original");
+    let names: Vec<_> = std::fs::read_dir(downloads.path())
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(names, ["report.txt"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
