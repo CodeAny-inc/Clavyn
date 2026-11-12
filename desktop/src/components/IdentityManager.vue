@@ -51,6 +51,11 @@ const browsingFile = ref(false);
 // a second write behind it.
 const saving = ref(false);
 const saveError = ref("");
+// True once a key in this form was generated or imported rather than picked
+// from the vault. That key is in the vault whether or not the identity is
+// saved, so a failed save says so instead of leaving it to be found later in
+// the key list.
+const keyAdded = ref(false);
 
 const form = ref({
   label: "",
@@ -110,6 +115,7 @@ function addIdentity() {
   importKeyText.value = "";
   importKeyPassphrase.value = "";
   saveError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -137,6 +143,7 @@ function editIdentity(id: Identity) {
   importKeyText.value = "";
   importKeyPassphrase.value = "";
   saveError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -198,6 +205,7 @@ async function save() {
   if (!canSave.value || saving.value) return;
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
+    const adding = keyMode.value !== "select";
     keyId = await ensureKey();
     if (!keyId) return;
     // A key created here is in the vault now, whatever happens to the save. If
@@ -205,6 +213,7 @@ async function save() {
     // creating another one.
     form.value.keyId = keyId;
     keyMode.value = "select";
+    if (adding) keyAdded.value = true;
   }
   const identity: Identity = {
     id: editing.value?.id ?? crypto.randomUUID(),
@@ -228,7 +237,9 @@ async function save() {
     }
     showForm.value = false;
   } catch (e) {
-    saveError.value = saveFailure(e);
+    saveError.value = keyAdded.value
+      ? `${saveFailure(e)} The key you added is in your vault and stays there.`
+      : saveFailure(e);
   } finally {
     saving.value = false;
   }

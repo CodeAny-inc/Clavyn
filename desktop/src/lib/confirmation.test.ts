@@ -24,9 +24,17 @@ describe("confirmation tags", () => {
 describe("host change failures", () => {
   it("asks for a retry shortly after a recent Cancel instead of reporting a failure", () => {
     expect(saveFailure(cooling)).toBe(
-      "Not saved. A confirmation was cancelled a moment ago; try again in a few seconds to be asked.",
+      "Not saved. A confirmation was cancelled recently; try again in 4s to be asked.",
     );
-    expect(deleteFailure(cooling)).toMatch(/^Not deleted\. A confirmation was cancelled a moment ago/);
+    expect(deleteFailure(cooling)).toBe(
+      "Not deleted. A confirmation was cancelled recently; try again in 4s to be asked.",
+    );
+  });
+
+  it("still asks for a retry when the refusal does not say how long", () => {
+    expect(saveFailure("[confirmation-cooling-down] a host change confirmation was declined")).toBe(
+      "Not saved. A confirmation was cancelled recently; try again shortly to be asked.",
+    );
   });
 
   it("reports anything else as a failure", () => {

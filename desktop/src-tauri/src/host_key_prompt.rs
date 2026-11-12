@@ -10,7 +10,8 @@
 //! asks its own question through them, behind a gate of its own.
 
 use std::future::Future;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -24,7 +25,14 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 /// fair trade for an action taken this rarely.
 const DECLINE_COOLDOWN: Duration = Duration::from_secs(30);
 
-/// How long a dialog has to be on screen before its confirm button counts.
+/// What the host key gate holds off for after each refusal in a row.
+const DECLINE_COOLDOWNS: &[Duration] = &[DECLINE_COOLDOWN];
+
+/// How long without a refusal a gate waits before it forgets the ones it has
+/// counted, so one Cancel last week does not start today's cooldown a step up.
+const DECLINE_MEMORY: Duration = Duration::from_secs(15 * 60);
+
+/// How long a dialog has to be up before its confirm button counts.
 ///
 /// The confirm button has the focus, and the page sees every key typed into a
 /// terminal, so it can open a dialog an instant before a keystroke it expects
@@ -32,6 +40,12 @@ const DECLINE_COOLDOWN: Duration = Duration::from_secs(30);
 /// keystroke land on the button. A confirmation that comes back sooner than
 /// this cannot have followed from reading the dialog, so it does not count and
 /// the dialog is shown again, saying why. Cancelling takes effect at once.
+///
+/// The clock starts when the dialog is requested. The dialog plugin reports
+/// nothing when the window is actually drawn, so time spent creating it counts
+/// toward the delay and a slow window manager shortens what the user really
+/// gets. This is a guard against keystrokes already in flight, not a promise of
+/// a second of reading time.
 const READ_DELAY: Duration = Duration::from_secs(1);
 
 /// Marks the error raised when the user answered a host key dialog with Cancel,
@@ -47,6 +61,9 @@ pub const DECLINED: &str = "[host-key-confirmation-declined]";
 /// was asked, so it is not a `DECLINED` answer either.
 pub const COOLING_DOWN: &str = "[confirmation-cooling-down]";
 
+/// What a gate says while any dialog sharing its slot is on screen.
+const ALREADY_OPEN: &str = "a confirmation is already open; answer that one first";
+
 /// What came back from a confirmation dialog.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Answer {
@@ -58,42 +75,87 @@ pub enum Answer {
     Unavailable,
 }
 
+/// Whether a native confirmation is on screen, shared by every gate that is
+/// handed the same slot, so two kinds of question never stack on one window and
+/// leave the user unsure which one a keypress answers.
+#[derive(Clone, Default)]
+pub struct DialogSlot(Arc<AtomicBool>);
+
+impl DialogSlot {
+    fn is_taken(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    fn take(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+
+    fn release(&self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Serializes one kind of confirmation and remembers a refusal.
 ///
 /// The cooldown is deliberately global rather than per host: a caller that
 /// walks the host list would otherwise get a fresh dialog for every entry.
 pub struct PromptGate {
     state: Mutex<GateState>,
+    slot: DialogSlot,
     /// What the dialogs behind this gate ask about, for the refusals it gives.
     subject: &'static str,
     /// The tag a cancelled dialog's error carries; see `DECLINED`.
     declined: &'static str,
-    /// How long a refusal keeps the gate shut; see `DECLINE_COOLDOWN`.
-    cooldown: Duration,
+    /// How long each refusal in a row keeps the gate shut, the last entry
+    /// repeating once they run out; see `DECLINE_COOLDOWN`.
+    cooldowns: &'static [Duration],
 }
 
 #[derive(Default)]
 struct GateState {
-    open: bool,
     declined_until: Option<Instant>,
+    /// Refusals in a row, which pick the next cooldown. A confirmation clears
+    /// it, and so does `DECLINE_MEMORY` without one.
+    declines: usize,
+    last_declined: Option<Instant>,
 }
 
 impl PromptGate {
     /// The gate for the host key dialogs.
     pub fn new() -> Self {
-        Self::for_subject("host key", DECLINED, DECLINE_COOLDOWN)
+        Self::for_subject("host key", DECLINED, DECLINE_COOLDOWNS)
     }
 
     /// A gate of its own for another kind of question, so that refusing one
     /// kind does not silence the other, a view can tell which was refused, and
     /// each kind holds off for as long as suits how it is asked.
-    pub fn for_subject(subject: &'static str, declined: &'static str, cooldown: Duration) -> Self {
+    ///
+    /// `cooldowns` must not be empty. A first refusal waits `cooldowns[0]`, the
+    /// next one `cooldowns[1]` and so on, so a short first wait lets a mistake
+    /// be corrected while a caller that keeps being refused is held off for
+    /// longer each time.
+    pub fn for_subject(
+        subject: &'static str,
+        declined: &'static str,
+        cooldowns: &'static [Duration],
+    ) -> Self {
+        assert!(!cooldowns.is_empty(), "a gate needs at least one cooldown");
         Self {
             state: Mutex::new(GateState::default()),
+            slot: DialogSlot::default(),
             subject,
             declined,
-            cooldown,
+            cooldowns,
         }
+    }
+
+    /// Show at most one dialog at a time across this gate and every other one
+    /// handed the same slot. Each keeps its own cooldown.
+    pub fn sharing(mut self, slot: DialogSlot) -> Self {
+        self.slot = slot;
+        self
     }
 
     /// Claim the right to show a dialog, or say why not.
@@ -118,10 +180,8 @@ impl PromptGate {
     fn open_at(&self, now: Instant) -> Result<(), String> {
         let subject = self.subject;
         let mut state = self.lock();
-        if state.open {
-            return Err(format!(
-                "a {subject} confirmation is already open; answer that one first"
-            ));
+        if self.slot.is_taken() {
+            return Err(ALREADY_OPEN.to_string());
         }
         if let Some(until) = state.declined_until {
             if now < until {
@@ -133,20 +193,41 @@ impl PromptGate {
             }
             state.declined_until = None;
         }
-        state.open = true;
+        if !self.slot.take() {
+            return Err(ALREADY_OPEN.to_string());
+        }
         Ok(())
     }
 
     fn close_at(&self, answer: Answer, now: Instant) {
         let mut state = self.lock();
-        state.open = false;
-        // Only a refusal arms the cooldown. A dialog that never appeared taught
-        // nobody to click through, so silencing the next few seconds over it
-        // would hide the failure as well as the question.
-        state.declined_until = match answer {
-            Answer::Declined => Some(now + self.cooldown),
-            Answer::Confirmed | Answer::Unavailable => None,
-        };
+        self.slot.release();
+        match answer {
+            // Only a refusal arms the cooldown, and each one in a row arms a
+            // longer one, so a caller that keeps asking is held off for longer
+            // every time while a single Cancel stays cheap to take back.
+            Answer::Declined => {
+                let forgotten = state
+                    .last_declined
+                    .is_some_and(|last| now.saturating_duration_since(last) > DECLINE_MEMORY);
+                if forgotten {
+                    state.declines = 0;
+                }
+                let step = state.declines.min(self.cooldowns.len() - 1);
+                state.declined_until = Some(now + self.cooldowns[step]);
+                state.declines += 1;
+                state.last_declined = Some(now);
+            }
+            Answer::Confirmed => {
+                state.declined_until = None;
+                state.declines = 0;
+                state.last_declined = None;
+            }
+            // A dialog that never appeared taught nobody to click through, so
+            // silencing the next few seconds over it would hide the failure as
+            // well as the question.
+            Answer::Unavailable => state.declined_until = None,
+        }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, GateState> {
@@ -245,11 +326,30 @@ where
     }
 }
 
+/// The text in the form the platform's dialog takes it.
+///
+/// On Linux and the BSDs the dialog plugin hands the body to GTK as the format
+/// string of `gtk_message_dialog_format_secondary_text`, with no arguments, so a
+/// `%s` or `%n` in text the page wrote (a host label, say) would be run as a
+/// directive instead of printed. Doubling each `%` makes GTK print it. Windows
+/// and macOS show the text as it is.
+fn native_text(message: String) -> String {
+    if cfg!(any(windows, target_os = "macos")) {
+        message
+    } else {
+        escape_printf(&message)
+    }
+}
+
+fn escape_printf(text: &str) -> String {
+    text.replace('%', "%%")
+}
+
 async fn show(app: &AppHandle, title: &str, message: String, confirm_label: &str) -> Answer {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut builder = app
         .dialog()
-        .message(message)
+        .message(native_text(message))
         .title(title)
         .kind(MessageDialogKind::Warning)
         .buttons(MessageDialogButtons::OkCancelCustom(
@@ -298,9 +398,19 @@ pub fn trust_message(host: &str, pinned: &str, presented: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{read_answer, Answer, PromptGate, COOLING_DOWN, DECLINE_COOLDOWN, READ_DELAY};
+    use super::{
+        escape_printf, read_answer, Answer, DialogSlot, PromptGate, COOLING_DOWN, DECLINE_COOLDOWN,
+        DECLINE_MEMORY, READ_DELAY,
+    };
     use std::cell::{Cell, RefCell};
     use std::time::{Duration, Instant};
+
+    const SHORT: &[Duration] = &[Duration::from_secs(5)];
+    const STEPS: &[Duration] = &[
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        Duration::from_secs(300),
+    ];
 
     #[test]
     fn a_second_confirmation_cannot_open_while_one_is_unanswered() {
@@ -382,7 +492,7 @@ mod tests {
     #[test]
     fn a_refusal_behind_one_gate_does_not_silence_another() {
         let host_keys = PromptGate::new();
-        let other = PromptGate::for_subject("host change", "[other-declined]", DECLINE_COOLDOWN);
+        let other = PromptGate::for_subject("host change", "[other-declined]", SHORT);
         let now = Instant::now();
         host_keys.open_at(now).expect("first prompt");
         host_keys.close_at(Answer::Declined, now);
@@ -403,8 +513,8 @@ mod tests {
 
     #[test]
     fn each_gate_holds_off_for_its_own_cooldown() {
-        let short = Duration::from_secs(5);
-        let gate = PromptGate::for_subject("host change", "[other-declined]", short);
+        let short = SHORT[0];
+        let gate = PromptGate::for_subject("host change", "[other-declined]", SHORT);
         let now = Instant::now();
         gate.open_at(now).expect("first prompt");
         gate.close_at(Answer::Declined, now);
@@ -413,6 +523,107 @@ mod tests {
             .expect_err("the cooldown ended early");
         gate.open_at(now + short)
             .expect("the gate kept the host key cooldown instead of its own");
+    }
+
+    /// Decline at `at`, as the gate would see a dialog answered with Cancel, and
+    /// say how long it then refuses to open.
+    fn decline_at(gate: &PromptGate, at: Instant) -> Duration {
+        gate.open_at(at).expect("the gate was still shut");
+        gate.close_at(Answer::Declined, at);
+        let mut wait = Duration::ZERO;
+        while gate.open_at(at + wait).is_err() {
+            wait += Duration::from_secs(1);
+        }
+        // The probe above claimed the gate on success; hand it back unanswered.
+        gate.close_at(Answer::Unavailable, at + wait);
+        wait
+    }
+
+    #[test]
+    fn refusals_in_a_row_are_held_off_for_longer_each_time() {
+        let gate = PromptGate::for_subject("host change", "[other-declined]", STEPS);
+        let mut now = Instant::now();
+        let mut waits = Vec::new();
+        for _ in 0..5 {
+            let wait = decline_at(&gate, now);
+            now += wait;
+            waits.push(wait.as_secs());
+        }
+        // The last step repeats instead of running off the end.
+        assert_eq!(waits, [5, 30, 300, 300, 300]);
+    }
+
+    #[test]
+    fn a_confirmation_starts_the_cooldowns_over() {
+        let gate = PromptGate::for_subject("host change", "[other-declined]", STEPS);
+        let mut now = Instant::now();
+        now += decline_at(&gate, now);
+        now += decline_at(&gate, now);
+
+        gate.open_at(now).expect("open");
+        gate.close_at(Answer::Confirmed, now);
+        assert_eq!(decline_at(&gate, now), STEPS[0]);
+    }
+
+    #[test]
+    fn a_long_quiet_spell_starts_the_cooldowns_over() {
+        let gate = PromptGate::for_subject("host change", "[other-declined]", STEPS);
+        let mut now = Instant::now();
+        now += decline_at(&gate, now);
+        now += decline_at(&gate, now);
+
+        now += DECLINE_MEMORY + Duration::from_secs(1);
+        assert_eq!(decline_at(&gate, now), STEPS[0]);
+    }
+
+    #[test]
+    fn the_host_key_gate_keeps_one_cooldown_however_often_it_is_refused() {
+        let gate = PromptGate::new();
+        let mut now = Instant::now();
+        for _ in 0..3 {
+            let wait = decline_at(&gate, now);
+            assert_eq!(wait, DECLINE_COOLDOWN);
+            now += wait;
+        }
+    }
+
+    #[test]
+    fn gates_sharing_a_slot_never_show_two_dialogs_at_once() {
+        let slot = DialogSlot::default();
+        let host_keys = PromptGate::new().sharing(slot.clone());
+        let host_change =
+            PromptGate::for_subject("host change", "[other-declined]", SHORT).sharing(slot);
+        let now = Instant::now();
+
+        host_keys.open_at(now).expect("first prompt");
+        let error = host_change
+            .open_at(now)
+            .expect_err("a dialog opened on top of another kind");
+        assert!(error.contains("already open"), "{error}");
+
+        // Answering the first frees the slot for either gate, and being turned
+        // away left no cooldown on the one that was.
+        host_keys.close_at(Answer::Confirmed, now);
+        host_change.open_at(now).expect("the slot was not released");
+        let error = host_keys
+            .open_at(now)
+            .expect_err("the first gate opened over the second");
+        assert!(error.contains("already open"), "{error}");
+    }
+
+    #[test]
+    fn gates_with_slots_of_their_own_do_not_wait_for_each_other() {
+        let a = PromptGate::new();
+        let b = PromptGate::for_subject("host change", "[other-declined]", SHORT);
+        let now = Instant::now();
+        a.open_at(now).expect("first prompt");
+        b.open_at(now).expect("a separate gate was blocked");
+    }
+
+    #[test]
+    fn a_percent_sign_in_dialog_text_is_doubled_for_gtk() {
+        assert_eq!(escape_printf("100% %s%n"), "100%% %%s%%n");
+        assert_eq!(escape_printf("no directives"), "no directives");
     }
 
     /// Answers each dialog after `delays[n]`, on a clock the test controls, and

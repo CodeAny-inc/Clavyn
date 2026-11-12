@@ -14,6 +14,7 @@
 use crate::connection::credentials;
 use crate::host::{AuthMethod, Host};
 use crate::identity::Identity;
+use crate::known_hosts::normalize_host;
 use crate::store::StoreData;
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -23,6 +24,9 @@ use uuid::Uuid;
 pub struct KeyReach {
     pub key_id: Uuid,
     pub username: String,
+    /// The host name as a pinned host key is looked up by it, so spellings that
+    /// share a pin (`Prod.example`, `prod.example.`) are one destination here
+    /// as well.
     pub hostname: String,
     pub port: u16,
 }
@@ -40,7 +44,7 @@ impl KeyReach {
         Some(Self {
             key_id: resolved.key_id?,
             username: resolved.username.to_owned(),
-            hostname: host.hostname.clone(),
+            hostname: normalize_host(&host.hostname),
             port: host.port,
         })
     }
@@ -80,6 +84,11 @@ fn reaches(data: &StoreData) -> impl Iterator<Item = (&Host, KeyReach)> {
 /// already in use, so what is reported is never less than what a connection can
 /// reach.
 pub fn introduced(before: &StoreData, after: &StoreData) -> Vec<NewReach> {
+    // Nothing but hosts and identities decides a reach, and most writes (layouts,
+    // groups) touch neither, so they skip building the sets.
+    if before.same_hosts_and_identities(after) {
+        return Vec::new();
+    }
     let allowed: HashSet<KeyReach> = reaches(before).map(|(_, reach)| reach).collect();
     let mut listed = HashSet::new();
     reaches(after)
@@ -271,6 +280,44 @@ mod tests {
         copy.label = "prod (copy)".into();
         let after = after(&before, |d| d.add_host(copy));
         assert!(introduced(&before, &after).is_empty());
+    }
+
+    #[test]
+    fn spellings_that_share_a_pin_share_a_reach() {
+        let key = Uuid::new_v4();
+        let host = key_host("prod", "prod.example", key);
+        let before = after(&StoreData::default(), |d| d.add_host(host.clone()));
+
+        for spelling in ["PROD.example", "prod.example.", " Prod.Example. "] {
+            let copy = key_host("copy", spelling, key);
+            let after = after(&before, |d| d.add_host(copy));
+            assert!(
+                introduced(&before, &after).is_empty(),
+                "{spelling:?} was treated as a new destination"
+            );
+        }
+
+        // A different name is still a different destination, and is reported in
+        // the form it is pinned by.
+        let other = key_host("other", "Attacker.Example.", key);
+        let after = after(&before, |d| d.add_host(other));
+        assert_eq!(
+            hostnames(&introduced(&before, &after)),
+            ["attacker.example"]
+        );
+    }
+
+    #[test]
+    fn a_write_that_leaves_hosts_and_identities_alone_introduces_nothing() {
+        let identity = key_identity(Uuid::new_v4());
+        let mut host = password_host("web", "web.example");
+        host.identity_id = Some(identity.id);
+        let before = after(&StoreData::default(), |d| {
+            d.add_identity(identity.clone());
+            d.add_host(host);
+        });
+        // The same data, as a write that only touched layouts would leave it.
+        assert!(introduced(&before, &before.clone()).is_empty());
     }
 
     #[test]

@@ -542,11 +542,11 @@ pub struct SshConnectionInfo {
 /// as an account, at an address or on a port no saved host already uses it
 /// for waits for a native confirmation the page cannot answer
 /// (`host_change_prompt`), and `Store` refuses that write from any caller that
-/// does not hand it what was confirmed. Writes are compared with what the store
-/// already allows, so a vault key reaches a destination the user confirmed or
-/// one the store file already held. A startup command is shown in that
-/// dialog but is not confirmed on its own: a session to an allowed destination
-/// can already run any command.
+/// does not pass a confirmation covering it. Writes are compared with what the
+/// store already allows, so a vault key reaches a destination the user
+/// confirmed or one the store file already held. A startup command is shown in
+/// that dialog but is not confirmed on its own: a session to an allowed
+/// destination can already run any command.
 ///
 /// That is the whole of the guarantee. It says nothing about hosts that sign in
 /// without a vault key: a password is typed into the page at connect time, so

@@ -97,7 +97,7 @@ describe("HostForm when a save is not confirmed", () => {
     await fillNewHost();
 
     button("Add host")!.click();
-    await vi.waitFor(() => expect(alertText()).toContain("try again in a few seconds"));
+    await vi.waitFor(() => expect(alertText()).toContain("try again in 4s"));
     expect(alertText()).not.toContain("Could not save");
     expect(alertText()).not.toContain("[confirmation-cooling-down]");
     expect(wrapper!.emitted("close")).toBeUndefined();
@@ -150,6 +150,7 @@ describe("IdentityManager when a save is not confirmed", () => {
 
     button("Save changes")!.click();
     await vi.waitFor(() => expect(alertText()).toContain("Not saved"));
+    expect(alertText()).not.toContain("your vault");
     expect(alert).not.toHaveBeenCalled();
     expect(button("Save changes")).toBeDefined();
     expect((document.querySelector("#id-username") as HTMLInputElement).value).toBe("admin");
@@ -185,6 +186,7 @@ describe("IdentityManager when a save is not confirmed", () => {
     const dialogSave = () => button("Add identity")!;
     dialogSave().click();
     await vi.waitFor(() => expect(alertText()).toContain("Not saved"));
+    expect(alertText()).toContain("The key you added is in your vault and stays there.");
     expect(calls("generate_key")).toHaveLength(1);
 
     answer = "allow";

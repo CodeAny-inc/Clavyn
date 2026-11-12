@@ -63,17 +63,35 @@ impl StoreData {
         let id = host.identity_id?;
         self.identities.iter().find(|i| i.id == id)
     }
+
+    /// A copy holding only the hosts and identities, which are all that decide
+    /// where a vault key can sign in. Anything else in the store is left out, so
+    /// an edit run against the copy sees it empty.
+    pub fn access_copy(&self) -> StoreData {
+        StoreData {
+            hosts: self.hosts.clone(),
+            identities: self.identities.clone(),
+            ..StoreData::default()
+        }
+    }
+
+    /// Whether `other` holds the same hosts and identities, in the same order.
+    pub fn same_hosts_and_identities(&self, other: &StoreData) -> bool {
+        self.hosts == other.hosts && self.identities == other.identities
+    }
 }
 
 /// The saved store, and the only way to change it.
 ///
 /// Every write goes through `commit_confirmed`, which refuses any write that
-/// lets a vault key sign in where no saved host lets it sign in yet unless it
-/// is handed exactly what the user confirmed. The typed writers below confirm
-/// nothing, so they make every change except that one and fail with
-/// `UnconfirmedKeyReach` on it. Making such a write takes `preview` to see what
-/// it would allow, the user's confirmation of that, and `commit_confirmed` with
-/// what was confirmed.
+/// lets a vault key sign in where no saved host lets it sign in yet unless the
+/// caller hands it a list covering that reach. The typed writers below pass an
+/// empty list, so they make every change except that one and fail with
+/// `UnconfirmedKeyReach` on it, which keeps a writer added later from granting
+/// such a reach by accident. Making such a write on purpose takes `preview` to
+/// see what it would allow, the user's confirmation of that, and
+/// `commit_confirmed` with what they confirmed. Nothing here can tell whether a
+/// caller really asked the user: the list is the caller's word for it.
 pub struct Store {
     path: PathBuf,
     data: StoreData,
@@ -113,9 +131,10 @@ impl Store {
     }
 
     /// Every place `edit` would let a vault key sign in where no saved host lets
-    /// it sign in now; see `key_reach::introduced`. Nothing is written.
+    /// it sign in now; see `key_reach::introduced`. Nothing is written, and
+    /// `edit` runs on `StoreData::access_copy`, not on the whole store.
     pub fn preview(&self, edit: impl FnOnce(&mut StoreData)) -> Vec<NewReach> {
-        let mut after = self.data.clone();
+        let mut after = self.data.access_copy();
         edit(&mut after);
         key_reach::introduced(&self.data, &after)
     }
