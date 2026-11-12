@@ -55,6 +55,15 @@ pub enum CoreError {
     #[error("{path} was not written: the serialized state cannot be loaded again ({reason})")]
     UnwritableState { path: String, reason: String },
 
+    /// A store write would let a vault key sign in where no saved host lets it
+    /// sign in yet, and that is not among what the user confirmed. Nothing was
+    /// written.
+    #[error(
+        "this change lets a vault key sign in where no saved host lets it sign in yet, and that \
+         was not confirmed"
+    )]
+    UnconfirmedKeyReach,
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 

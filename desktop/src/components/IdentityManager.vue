@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
@@ -27,6 +28,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { deleteFailure, isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
 const identities = useIdentitiesStore();
@@ -46,6 +48,15 @@ const importKeyText = ref("");
 const importKeyPassphrase = ref("");
 const creatingKey = ref(false);
 const browsingFile = ref(false);
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
+const saving = ref(false);
+const saveError = ref("");
+// True once a key in this form was generated or imported rather than picked
+// from the vault. That key is in the vault whether or not the identity is
+// saved, so a failed save says so instead of leaving it to be found later in
+// the key list.
+const keyAdded = ref(false);
 
 const form = ref({
   label: "",
@@ -75,7 +86,7 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (confirm(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
     await hosts.deleteGroup(groupId);
     if (identities.selectedGroupId === groupId) {
       identities.selectedGroupId = null;
@@ -104,6 +115,8 @@ function addIdentity() {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  saveError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -130,6 +143,8 @@ function editIdentity(id: Identity) {
   newKeyLabel.value = "";
   importKeyText.value = "";
   importKeyPassphrase.value = "";
+  saveError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -188,11 +203,18 @@ async function ensureKey(): Promise<string | null> {
 }
 
 async function save() {
-  if (!canSave.value) return;
+  if (!canSave.value || saving.value) return;
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
+    const adding = keyMode.value !== "select";
     keyId = await ensureKey();
     if (!keyId) return;
+    // A key created here is in the vault now, whatever happens to the save. If
+    // the save does not go through, saving again picks this key rather than
+    // creating another one.
+    form.value.keyId = keyId;
+    keyMode.value = "select";
+    if (adding) keyAdded.value = true;
   }
   const identity: Identity = {
     id: editing.value?.id ?? crypto.randomUUID(),
@@ -206,6 +228,8 @@ async function save() {
       .filter(Boolean),
     group_id: form.value.groupId || null,
   };
+  saving.value = true;
+  saveError.value = "";
   try {
     if (editing.value) {
       await identities.updateIdentity(identity);
@@ -214,13 +238,22 @@ async function save() {
     }
     showForm.value = false;
   } catch (e) {
-    alert(`Failed to save identity: ${e}`);
+    saveError.value = keyAdded.value
+      ? `${saveFailure(e)} The key you added is in your vault and stays there.`
+      : saveFailure(e);
+  } finally {
+    saving.value = false;
   }
 }
 
 async function deleteIdentity(id: Identity) {
-  if (confirm(`Delete identity "${id.label}"?`)) {
+  if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
+  try {
     await identities.deleteIdentity(id.id);
+  } catch (e) {
+    // Cancelling the native confirmation was the user's answer, and the
+    // identity is still listed, so there is nothing more to say.
+    if (!isDeclinedHostChange(e)) alert(deleteFailure(e));
   }
 }
 
@@ -557,8 +590,9 @@ function hostsUsingIdentity(identityId: string): number {
       </div>
 
       <template #footer>
+        <p v-if="saveError" role="alert" class="basis-full text-[12px] text-destructive">{{ saveError }}</p>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
-        <Button :disabled="!canSave || creatingKey" @click="save">
+        <Button :disabled="!canSave || creatingKey || saving" @click="save">
           <Loader2 v-if="creatingKey" class="size-3.5 mr-1 animate-spin" :stroke-width="1.75" />
           {{ editing ? "Save changes" : "Add identity" }}
         </Button>
