@@ -141,6 +141,21 @@ impl SshSession {
         let _ = closed.wait_for(|closed| *closed).await;
     }
 
+    /// Send `data` to this session's terminal.
+    ///
+    /// The send waits for as long as the peer leaves the connection unread,
+    /// and only this session's writes wait behind it. A close ends the wait.
+    async fn send(&self, session_id: &str, data: &[u8]) -> Result<()> {
+        let send = async {
+            let _order = self.writes.lock().await;
+            self.handle.data(self.channel_id, data.to_vec()).await
+        };
+        tokio::select! {
+            sent = send => sent.map_err(|_| CoreError::Ssh("write failed".into())),
+            () = self.closed() => Err(CoreError::SessionNotFound(session_id.to_string())),
+        }
+    }
+
     /// Mark the session closed and say goodbye to the peer. The goodbye holds
     /// only the connection handle, so the id is released as soon as the map
     /// entry and the reader are gone, however long the peer takes.
@@ -244,7 +259,10 @@ impl SessionManager {
             claim: held.clone(),
         });
 
-        self.sessions.lock().await.insert(session_id.clone(), session);
+        self.sessions
+            .lock()
+            .await
+            .insert(session_id.clone(), session.clone());
         let sessions = self.sessions.clone();
 
         // Spawn the reading task
@@ -319,8 +337,13 @@ impl SessionManager {
         // OpenSSH ignores an exec that arrives after the shell, so it cannot be
         // sent as a request of its own. The session is usable either way, so a
         // command that cannot be sent does not fail the connect.
+        //
+        // It is sent to the session built above, not to whatever the id names
+        // by now: a shell that exits at once frees the id, and a session that
+        // takes it next must never receive this one's input. Holding `session`
+        // also keeps the id reserved until the send is over.
         if let Some(cmd) = host.startup_command.as_deref().filter(|cmd| !cmd.is_empty()) {
-            if let Err(error) = self.write(&session_id, format!("{cmd}\r").as_bytes()).await {
+            if let Err(error) = session.send(&session_id, format!("{cmd}\r").as_bytes()).await {
                 tracing::warn!("startup command for session {session_id} was not sent: {error}");
             }
         }
@@ -348,15 +371,7 @@ impl SessionManager {
     /// The send waits for as long as the peer leaves the connection unread,
     /// and only this session's writes wait behind it.
     pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        let session = self.get(session_id).await?;
-        let send = async {
-            let _order = session.writes.lock().await;
-            session.handle.data(session.channel_id, data.to_vec()).await
-        };
-        tokio::select! {
-            sent = send => sent.map_err(|_| CoreError::Ssh("write failed".into())),
-            () = session.closed() => Err(CoreError::SessionNotFound(session_id.to_string())),
-        }
+        self.get(session_id).await?.send(session_id, data).await
     }
 
     /// Resize a session's terminal.
