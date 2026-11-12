@@ -250,7 +250,7 @@ impl SessionManager {
             }
         }
 
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
+        let (resize_tx, resize_rx) = mpsc::channel::<(u32, u32)>(32);
         let credit = Arc::new(OutputCredit::new());
 
         let held = claim.commit();
@@ -267,17 +267,23 @@ impl SessionManager {
         self.sessions.lock().await.insert(session_id.clone(), session);
         let sessions = self.sessions.clone();
 
-        // Spawn the reading task
         let sid = session_id.clone();
         let data_cb = self.data_callback.clone();
         let close_cb = self.close_callback.clone();
-        let mut channel = channel;
+        let (mut channel, writer) = channel.split();
+
+        // Resizes go out from a task of their own, never from the reader. A
+        // send waits on russh's connection loop, and while the reader is stalled
+        // on credit that loop is blocked handing it data it will not take; a
+        // reader that awaited the send would never get back to taking it, and
+        // neither credit nor a close could wake it. Here the send just waits
+        // until the reader resumes.
+        tokio::spawn(send_resizes(writer, resize_rx));
 
         tokio::spawn(async move {
             // Dropped when this task ends, after the close has been announced,
             // which is the moment the id is free for another session.
             let held = held;
-            let mut pending_resize: Option<(u32, u32)> = None;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
@@ -295,10 +301,10 @@ impl SessionManager {
                 // batcher while another branch's handler mutates it.
                 let flush_at = batcher.deadline();
                 // While the UI layer is a window behind, the channel is left
-                // unread, which backs the stall up to the peer. Resizes and a
-                // batch already due are still handled meanwhile; the end of the
-                // stream is seen once credit returns or the session is closed,
-                // which lifts the limit.
+                // unread, which backs the stall up to the peer. A batch already
+                // due is still delivered meanwhile; the end of the stream is
+                // seen once credit returns or the session is closed, which
+                // lifts the limit.
                 let reading = credit.has_room();
                 tokio::select! {
                     () = credit.room(), if !reading => {}
@@ -329,18 +335,9 @@ impl SessionManager {
                             _ => {}
                         }
                     }
-                    // Once the entry is gone the sender is dropped and `recv`
-                    // answers `None` at once; the pattern disables the branch
-                    // then, so the loop waits on the channel instead of spinning.
-                    Some(size) = resize_rx.recv() => {
-                        pending_resize = Some(size);
-                    }
                     () = sleep_until(flush_at) => {
                         flush(&mut batcher);
                     }
-                }
-                if let Some((c, r)) = pending_resize.take() {
-                    let _ = channel.window_change(c, r, 0, 0).await;
                 }
             }
         });
@@ -458,6 +455,25 @@ async fn take_if_held(
     match sessions.get(session_id) {
         Some(session) if Arc::ptr_eq(&session.claim, held) => sessions.remove(session_id),
         _ => None,
+    }
+}
+
+/// Forward a session's terminal sizes to the peer until the session, which
+/// holds the only sender, is dropped.
+///
+/// Sizes that queue up while a send is waiting collapse into the newest, so a
+/// burst of resizes during a stall reaches the peer as the size the terminal
+/// ended up at.
+async fn send_resizes(
+    writer: russh::ChannelWriteHalf<russh::client::Msg>,
+    mut sizes: mpsc::Receiver<(u32, u32)>,
+) {
+    while let Some(mut size) = sizes.recv().await {
+        while let Ok(newer) = sizes.try_recv() {
+            size = newer;
+        }
+        let (cols, rows) = size;
+        let _ = writer.window_change(cols, rows, 0, 0).await;
     }
 }
 
