@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import {
   AlertCircle,
   ArrowUp,
@@ -283,7 +284,7 @@ async function confirmRename() {
 
 async function deleteEntry(entry: SftpEntry) {
   closeContextMenu();
-  if (!confirm(`Delete "${entry.name}"?`)) return;
+  if (!(await confirmAction(`Delete "${entry.name}"?`))) return;
   try {
     await sftp.deleteEntry(entry);
   } catch {
@@ -327,7 +328,7 @@ async function upload() {
         sftp.error = `A directory named "${fileName}" already exists`;
         return;
       }
-      overwrite = confirm(
+      overwrite = await confirmAction(
         `"${fileName}" already exists on the remote host. Overwrite it?`,
       );
       if (!overwrite) return;
