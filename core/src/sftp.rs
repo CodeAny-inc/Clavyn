@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The most entries one listing returns. A server that keeps answering a
 /// listing with more entries would otherwise keep it, and its memory, growing
@@ -94,9 +94,71 @@ struct SftpConnection {
     /// simply still running, cannot outlive the close or report success
     /// after it.
     closed: CloseSignal,
+    /// The remote paths an upload or write is under way to, each with the
+    /// lock the next writer to that path waits on; see
+    /// [`SftpConnection::claim_destination`].
+    writers: WriterLocks,
+}
+
+type WriterLocks = std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>;
+
+fn lock_writers(
+    writers: &WriterLocks,
+) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Mutex<()>>>> {
+    // The map only ever holds valid locks, whatever a panicking holder was doing.
+    writers.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Sole right to write one remote path on one connection, released on drop.
+struct DestinationGuard<'a> {
+    writers: &'a WriterLocks,
+    path: String,
+    lock: Option<Arc<Mutex<()>>>,
+    held: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for DestinationGuard<'_> {
+    fn drop(&mut self) {
+        drop(self.held.take());
+        let mut writers = lock_writers(self.writers);
+        drop(self.lock.take());
+        // Every writer holding or waiting on the path keeps a clone, so a
+        // count of one means the map's own copy is the last and the entry can
+        // go. The count is read under the map lock, which every clone is taken
+        // under, so no writer can be joining at the same moment.
+        if writers
+            .get(&self.path)
+            .is_some_and(|lock| Arc::strong_count(lock) == 1)
+        {
+            writers.remove(&self.path);
+        }
+    }
 }
 
 impl SftpConnection {
+    /// Wait until no other upload or write on this connection is writing
+    /// `path`, then hold it until the guard drops. SFTP calls on one connection
+    /// run side by side, and two writers on one file would otherwise truncate
+    /// and write it at once, leaving a mix of both that each reports as a
+    /// success. Paths are compared as given, which is how the browser builds
+    /// them.
+    async fn claim_destination(&self, path: &str) -> DestinationGuard<'_> {
+        let lock = lock_writers(&self.writers)
+            .entry(path.to_owned())
+            .or_default()
+            .clone();
+        // Built before the wait so that a writer cancelled while waiting still
+        // takes its entry out of the map when nothing else needs it.
+        let mut guard = DestinationGuard {
+            writers: &self.writers,
+            path: path.to_owned(),
+            lock: Some(lock.clone()),
+            held: None,
+        };
+        guard.held = Some(lock.lock_owned().await);
+        guard
+    }
+
     /// Run `operation` until it finishes or the connection is closed.
     async fn until_closed<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
         self.closed
@@ -246,6 +308,7 @@ impl SftpManager {
             sftp,
             lister,
             closed: CloseSignal::new(),
+            writers: WriterLocks::default(),
         });
         // The check at the top ran before a connect that takes seconds, so a
         // second connect on the same id may have finished in the meantime. The
@@ -377,6 +440,7 @@ impl SftpManager {
     /// `upload_from_local` so large files never cross Tauri IPC as JSON arrays.
     pub async fn write_file(&self, session_id: &str, path: &str, data: &[u8]) -> Result<()> {
         self.request(session_id, "write file", |conn| async move {
+            let _destination = conn.claim_destination(path).await;
             conn.sftp.write(path, data).await
         })
         .await
@@ -410,7 +474,9 @@ impl SftpManager {
     }
 
     /// Stream a local file directly to the remote host. Existing remote files
-    /// are rejected unless the caller explicitly opts in to overwrite.
+    /// are rejected unless the caller explicitly opts in to overwrite. An
+    /// upload waits for any other upload to the same path on this connection
+    /// to finish first.
     pub async fn upload_from_local(
         &self,
         session_id: &str,
@@ -421,6 +487,7 @@ impl SftpManager {
         let conn = self.get(session_id).await?;
 
         conn.until_closed(async {
+            let _destination = conn.claim_destination(remote_path).await;
             if !overwrite
                 && conn
                     .sftp

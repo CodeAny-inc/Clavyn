@@ -16,7 +16,7 @@ use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
     Attrs, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,8 +28,9 @@ const USER: &str = "deploy";
 const PASSWORD: &str = "correct password";
 
 /// An SFTP server whose directories never end: every READDIR answers with more
-/// entries and never with end-of-file. Its files exist only as names, enough
-/// to tell an exclusive create from one that replaces a file.
+/// entries and never with end-of-file. Its files live in memory, enough to tell
+/// an exclusive create from one that replaces a file, and to see what two
+/// writers left in one.
 #[derive(Clone)]
 struct EndlessDirectory {
     /// Entries in each READDIR answer.
@@ -38,10 +39,12 @@ struct EndlessDirectory {
     page_delay: Duration,
     /// Pause before each STAT answer.
     stat_delay: Duration,
+    /// Pause before each WRITE answer.
+    write_delay: Duration,
     /// Handles closed so far.
     closes: Arc<AtomicUsize>,
-    /// Paths created so far.
-    files: Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Every file created so far, by path, with its contents.
+    files: Arc<std::sync::Mutex<HashMap<String, Vec<u8>>>>,
 }
 
 impl Default for EndlessDirectory {
@@ -50,6 +53,7 @@ impl Default for EndlessDirectory {
             page: 1,
             page_delay: Duration::from_millis(5),
             stat_delay: Duration::ZERO,
+            write_delay: Duration::ZERO,
             closes: Arc::default(),
             files: Arc::default(),
         }
@@ -115,10 +119,13 @@ impl russh_sftp::server::Handler for EndlessDirectory {
         _attrs: FileAttributes,
     ) -> Result<Handle, Self::Error> {
         let mut files = self.files.lock().expect("files");
-        if pflags.contains(OpenFlags::EXCLUDE) && files.contains(&filename) {
+        if pflags.contains(OpenFlags::EXCLUDE) && files.contains_key(&filename) {
             return Err(StatusCode::Failure);
         }
-        files.insert(filename.clone());
+        let contents = files.entry(filename.clone()).or_default();
+        if pflags.contains(OpenFlags::TRUNCATE) {
+            contents.clear();
+        }
         Ok(Handle {
             id,
             handle: filename,
@@ -128,16 +135,24 @@ impl russh_sftp::server::Handler for EndlessDirectory {
     async fn write(
         &mut self,
         id: u32,
-        _handle: String,
-        _offset: u64,
-        _data: Vec<u8>,
+        handle: String,
+        offset: u64,
+        data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
+        tokio::time::sleep(self.write_delay).await;
+        let mut files = self.files.lock().expect("files");
+        let contents = files.entry(handle).or_default();
+        let start = offset as usize;
+        if contents.len() < start + data.len() {
+            contents.resize(start + data.len(), 0);
+        }
+        contents[start..start + data.len()].copy_from_slice(&data);
         Ok(ok_status(id))
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
         tokio::time::sleep(self.stat_delay).await;
-        if self.files.lock().expect("files").contains(&path) {
+        if self.files.lock().expect("files").contains_key(&path) {
             Ok(Attrs {
                 id,
                 attrs: FileAttributes::default(),
@@ -650,5 +665,62 @@ async fn of_two_uploads_to_one_path_without_overwrite_only_one_creates_it() {
         .find_map(|result| result.as_ref().err())
         .expect("one upload refused");
     assert!(refused.to_string().contains("already exists"), "{refused}");
+    manager.close_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overwrite_upload_waits_for_one_already_writing_the_same_path() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let large = dir.path().join("large.bin");
+    let small = dir.path().join("small.bin");
+    std::fs::write(&large, vec![b'a'; 1024 * 1024]).expect("large file");
+    std::fs::write(&small, vec![b'b'; 100]).expect("small file");
+    // Slow writes keep the large upload running while the small one starts.
+    let sftp = EndlessDirectory {
+        write_delay: Duration::from_millis(2),
+        ..EndlessDirectory::default()
+    };
+    let files = sftp.files.clone();
+    let port = serve(TestServer {
+        sftp,
+        ..TestServer::default()
+    })
+    .await;
+    let manager = Arc::new(SftpManager::new());
+    manager
+        .connect("up".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .await
+        .expect("sftp connect");
+
+    let first = tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.upload_from_local("up", &large, "/data.bin", true).await }
+    });
+    let started = async {
+        while files
+            .lock()
+            .expect("files")
+            .get("/data.bin")
+            .is_none_or(|contents| contents.is_empty())
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), started)
+        .await
+        .expect("the first upload never started writing");
+    let second = manager.upload_from_local("up", &small, "/data.bin", true).await;
+
+    first.await.expect("upload task").expect("first upload");
+    second.expect("second upload");
+    // The second upload replaced the first's file once it was complete,
+    // rather than truncating and writing it while the first still was.
+    let contents = files.lock().expect("files").get("/data.bin").cloned().unwrap_or_default();
+    assert!(
+        contents == [b'b'; 100],
+        "the file holds {} bytes, {} of them from the first upload, not the second upload's 100",
+        contents.len(),
+        contents.iter().filter(|&&byte| byte == b'a').count()
+    );
     manager.close_all().await;
 }
