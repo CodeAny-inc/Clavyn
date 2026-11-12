@@ -2,8 +2,9 @@
 //!
 //! These run the SSH and SFTP managers against an in-process russh server on
 //! loopback whose SFTP side never finishes a directory listing and whose shell
-//! exits as soon as it starts, and check that other sessions, a close and the
-//! drain a vault reset relies on all carry on regardless.
+//! exits as soon as it starts, or stops reading its input, and check that other
+//! sessions, a close and the drain a vault reset relies on all carry on
+//! regardless, and that a close always ends the connection and frees its id.
 
 use clavyn_core::host::Host;
 use clavyn_core::known_hosts::KnownHosts;
@@ -12,8 +13,11 @@ use clavyn_core::sftp::SftpManager;
 use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
-use russh_sftp::protocol::{File, Handle, Name, Status, StatusCode, Version};
-use std::collections::HashMap;
+use russh_sftp::protocol::{
+    Attrs, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -23,9 +27,43 @@ use tokio::sync::Mutex;
 const USER: &str = "deploy";
 const PASSWORD: &str = "correct password";
 
-/// An SFTP server whose directories never end: every READDIR answers with one
-/// more entry and never with end-of-file.
-struct EndlessDirectory;
+/// An SFTP server whose directories never end: every READDIR answers with more
+/// entries and never with end-of-file. Its files exist only as names, enough
+/// to tell an exclusive create from one that replaces a file.
+#[derive(Clone)]
+struct EndlessDirectory {
+    /// Entries in each READDIR answer.
+    page: usize,
+    /// Pause before each READDIR answer.
+    page_delay: Duration,
+    /// Pause before each STAT answer.
+    stat_delay: Duration,
+    /// Handles closed so far.
+    closes: Arc<AtomicUsize>,
+    /// Paths created so far.
+    files: Arc<std::sync::Mutex<HashSet<String>>>,
+}
+
+impl Default for EndlessDirectory {
+    fn default() -> Self {
+        Self {
+            page: 1,
+            page_delay: Duration::from_millis(5),
+            stat_delay: Duration::ZERO,
+            closes: Arc::default(),
+            files: Arc::default(),
+        }
+    }
+}
+
+fn ok_status(id: u32) -> Status {
+    Status {
+        id,
+        status_code: StatusCode::Ok,
+        error_message: "Ok".into(),
+        language_tag: "en-US".into(),
+    }
+}
 
 impl russh_sftp::server::Handler for EndlessDirectory {
     type Error = StatusCode;
@@ -50,10 +88,10 @@ impl russh_sftp::server::Handler for EndlessDirectory {
     }
 
     async fn readdir(&mut self, id: u32, _handle: String) -> Result<Name, Self::Error> {
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(self.page_delay).await;
         Ok(Name {
             id,
-            files: vec![File::dummy("entry")],
+            files: vec![File::dummy("entry"); self.page],
         })
     }
 
@@ -65,12 +103,48 @@ impl russh_sftp::server::Handler for EndlessDirectory {
     }
 
     async fn close(&mut self, id: u32, _handle: String) -> Result<Status, Self::Error> {
-        Ok(Status {
+        self.closes.fetch_add(1, Ordering::SeqCst);
+        Ok(ok_status(id))
+    }
+
+    async fn open(
+        &mut self,
+        id: u32,
+        filename: String,
+        pflags: OpenFlags,
+        _attrs: FileAttributes,
+    ) -> Result<Handle, Self::Error> {
+        let mut files = self.files.lock().expect("files");
+        if pflags.contains(OpenFlags::EXCLUDE) && files.contains(&filename) {
+            return Err(StatusCode::Failure);
+        }
+        files.insert(filename.clone());
+        Ok(Handle {
             id,
-            status_code: StatusCode::Ok,
-            error_message: "Ok".into(),
-            language_tag: "en-US".into(),
+            handle: filename,
         })
+    }
+
+    async fn write(
+        &mut self,
+        id: u32,
+        _handle: String,
+        _offset: u64,
+        _data: Vec<u8>,
+    ) -> Result<Status, Self::Error> {
+        Ok(ok_status(id))
+    }
+
+    async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
+        tokio::time::sleep(self.stat_delay).await;
+        if self.files.lock().expect("files").contains(&path) {
+            Ok(Attrs {
+                id,
+                attrs: FileAttributes::default(),
+            })
+        } else {
+            Err(StatusCode::NoSuchFile)
+        }
     }
 }
 
@@ -79,6 +153,12 @@ struct TestServer {
     channels: Arc<std::sync::Mutex<HashMap<ChannelId, Channel<Msg>>>>,
     /// Stop reading once the first input arrives, the way a hung peer does.
     stall_on_input: bool,
+    /// Stop reading for this long when the first input arrives, then read
+    /// normally again, the way a peer that recovers does.
+    stall_once: Option<(Duration, Arc<AtomicBool>)>,
+    sftp: EndlessDirectory,
+    /// Connections the server has seen end.
+    ended: Arc<AtomicUsize>,
 }
 
 impl server::Handler for TestServer {
@@ -113,7 +193,7 @@ impl server::Handler for TestServer {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        if self.stall_on_input {
+        if self.stall_on_input || self.stall_once.is_some() {
             return Ok(());
         }
         session.data(channel, b"bye\r\n".to_vec())?;
@@ -131,6 +211,11 @@ impl server::Handler for TestServer {
         if self.stall_on_input {
             std::future::pending::<()>().await;
         }
+        if let Some((stall, stalled)) = &self.stall_once {
+            if !stalled.swap(true, Ordering::SeqCst) {
+                tokio::time::sleep(*stall).await;
+            }
+        }
         Ok(())
     }
 
@@ -144,7 +229,7 @@ impl server::Handler for TestServer {
         match channel {
             Some(channel) if name == "sftp" => {
                 session.channel_success(channel_id)?;
-                russh_sftp::server::run(channel.into_stream(), EndlessDirectory).await;
+                russh_sftp::server::run(channel.into_stream(), self.sftp.clone()).await;
             }
             _ => session.channel_failure(channel_id)?,
         }
@@ -175,6 +260,7 @@ async fn serve(handler: TestServer) -> u16 {
                 if let Ok(running) = server::run_stream(config, stream, handler.clone()).await {
                     let _ = running.await;
                 }
+                handler.ended.fetch_add(1, Ordering::SeqCst);
             });
         }
     });
@@ -322,41 +408,8 @@ async fn a_write_stuck_behind_a_peer_that_stopped_reading_ends_with_the_close() 
     })
     .await;
     let sessions = Arc::new(SessionManager::new(Arc::new(|_, _| {}), Arc::new(|_, _| {})));
-    let claim = sessions.claim("stuck").expect("claim");
-    sessions
-        .create_ssh_session(&claim, &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
-        .await
-        .expect("ssh session");
-    drop(claim);
-
-    // Keep writing until the peer's window and the socket buffers are full
-    // and a write stops returning.
-    let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let writer = tokio::spawn({
-        let sessions = sessions.clone();
-        let written = written.clone();
-        async move {
-            loop {
-                sessions.write("stuck", &[b'x'; 64 * 1024]).await?;
-                written.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            #[allow(unreachable_code)]
-            Ok::<(), clavyn_core::CoreError>(())
-        }
-    });
-    let stuck = async {
-        loop {
-            let before = written.load(std::sync::atomic::Ordering::Relaxed);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-            if before > 0 && written.load(std::sync::atomic::Ordering::Relaxed) == before {
-                return;
-            }
-        }
-    };
-    tokio::time::timeout(Duration::from_secs(20), stuck)
-        .await
-        .expect("writes never stalled");
-    assert!(!writer.is_finished());
+    connect_shell(&sessions, port, &dir).await;
+    let writer = write_until_stuck(&sessions).await;
 
     tokio::time::timeout(Duration::from_secs(10), sessions.close("stuck"))
         .await
@@ -368,4 +421,234 @@ async fn a_write_stuck_behind_a_peer_that_stopped_reading_ends_with_the_close() 
         .expect("writer task");
     assert!(result.is_err());
     assert!(!sessions.contains("stuck").await);
+}
+
+/// Open a shell on `port` under the id "stuck".
+async fn connect_shell(sessions: &SessionManager, port: u16, dir: &TempDir) {
+    let claim = sessions.claim("stuck").expect("claim");
+    sessions
+        .create_ssh_session(&claim, &host(port), None, known_hosts(dir), None, None, Some(PASSWORD), 80, 24)
+        .await
+        .expect("ssh session");
+}
+
+/// Keep writing to "stuck" until the peer's window and the socket buffers are
+/// full and a write stops returning, and hand back the task still writing.
+async fn write_until_stuck(
+    sessions: &Arc<SessionManager>,
+) -> tokio::task::JoinHandle<Result<(), clavyn_core::CoreError>> {
+    let written = Arc::new(AtomicUsize::new(0));
+    let writer = tokio::spawn({
+        let sessions = sessions.clone();
+        let written = written.clone();
+        async move {
+            loop {
+                sessions.write("stuck", &[b'x'; 64 * 1024]).await?;
+                written.fetch_add(1, Ordering::Relaxed);
+            }
+            #[allow(unreachable_code)]
+            Ok::<(), clavyn_core::CoreError>(())
+        }
+    });
+    let stuck = async {
+        loop {
+            let before = written.load(Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if before > 0 && written.load(Ordering::Relaxed) == before {
+                return;
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(20), stuck)
+        .await
+        .expect("writes never stalled");
+    assert!(!writer.is_finished());
+    writer
+}
+
+/// A manager whose close announcements arrive on the returned receiver.
+fn announcing_manager() -> (Arc<SessionManager>, tokio::sync::mpsc::UnboundedReceiver<String>) {
+    let (closed_tx, closed_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let sessions = SessionManager::new(
+        Arc::new(|_, _| {}),
+        Arc::new(move |id: &str, _| {
+            let _ = closed_tx.send(id.to_string());
+        }),
+    );
+    (Arc::new(sessions), closed_rx)
+}
+
+/// Wait for the close of "stuck" to be announced and its id to come free.
+async fn expect_released(
+    sessions: &SessionManager,
+    closed_rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+) {
+    let announced = tokio::time::timeout(Duration::from_secs(10), closed_rx.recv())
+        .await
+        .expect("the close was never announced");
+    assert_eq!(announced.as_deref(), Some("stuck"));
+    let free = async {
+        while sessions.is_claimed("stuck") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), free)
+        .await
+        .expect("the id stayed claimed after the close");
+    assert!(sessions.claim("stuck").is_ok(), "the id could not be reused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn closing_a_session_whose_peer_stopped_reading_frees_its_id() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = serve(TestServer {
+        stall_on_input: true,
+        ..TestServer::default()
+    })
+    .await;
+    let (sessions, mut closed_rx) = announcing_manager();
+    connect_shell(&sessions, port, &dir).await;
+    let writer = write_until_stuck(&sessions).await;
+
+    // The goodbye cannot get past the unread input, so it is the cut after
+    // the grace that has to end the connection, and with it the reader.
+    tokio::time::timeout(Duration::from_secs(10), sessions.close("stuck"))
+        .await
+        .expect("close waited on the stuck write")
+        .expect("close");
+    let _ = writer.await;
+    expect_released(&sessions, &mut closed_rx).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_that_recovers_after_the_goodbye_timed_out_is_still_disconnected() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = TestServer {
+        stall_once: Some((Duration::from_secs(8), Arc::new(AtomicBool::new(false)))),
+        ..TestServer::default()
+    };
+    let ended = server.ended.clone();
+    let port = serve(server).await;
+    let (sessions, mut closed_rx) = announcing_manager();
+    connect_shell(&sessions, port, &dir).await;
+    let writer = write_until_stuck(&sessions).await;
+
+    tokio::time::timeout(Duration::from_secs(10), sessions.close("stuck"))
+        .await
+        .expect("close waited on the stuck write")
+        .expect("close");
+    let _ = writer.await;
+    expect_released(&sessions, &mut closed_rx).await;
+
+    // Once the peer reads again it finds the connection gone, rather than a
+    // session nobody can address any more.
+    let gone = async {
+        while ended.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(15), gone)
+        .await
+        .expect("the connection outlived the close on the server's side");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_resize_never_waits_on_a_peer_that_stopped_reading() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let port = serve(TestServer {
+        stall_on_input: true,
+        ..TestServer::default()
+    })
+    .await;
+    let (sessions, mut closed_rx) = announcing_manager();
+    connect_shell(&sessions, port, &dir).await;
+    let writer = write_until_stuck(&sessions).await;
+
+    for step in 0..100u32 {
+        tokio::time::timeout(Duration::from_secs(1), sessions.resize("stuck", 80 + step, 24))
+            .await
+            .expect("a resize waited on the stalled peer")
+            .expect("resize");
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), sessions.close("stuck"))
+        .await
+        .expect("close waited on the stuck resize")
+        .expect("close");
+    let _ = writer.await;
+    expect_released(&sessions, &mut closed_rx).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_listing_past_the_entry_cap_is_refused_and_its_handle_closed() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sftp = EndlessDirectory {
+        page: 2_000,
+        page_delay: Duration::ZERO,
+        ..EndlessDirectory::default()
+    };
+    let closes = sftp.closes.clone();
+    let port = serve(TestServer {
+        sftp,
+        ..TestServer::default()
+    })
+    .await;
+    let manager = SftpManager::new();
+    manager
+        .connect("big".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .await
+        .expect("sftp connect");
+
+    let error = tokio::time::timeout(Duration::from_secs(60), manager.list_dir("big", "/"))
+        .await
+        .expect("the listing ran past the entry cap")
+        .expect_err("a directory past the entry cap was listed");
+    assert!(error.to_string().contains("more than"), "{error}");
+    assert_eq!(closes.load(Ordering::SeqCst), 1, "the directory handle was left open");
+    manager.close_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn of_two_uploads_to_one_path_without_overwrite_only_one_creates_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let local = dir.path().join("report.txt");
+    std::fs::write(&local, b"report").expect("local file");
+    // Slow existence checks let both uploads pass theirs before either one
+    // creates the file.
+    let port = serve(TestServer {
+        sftp: EndlessDirectory {
+            stat_delay: Duration::from_millis(200),
+            ..EndlessDirectory::default()
+        },
+        ..TestServer::default()
+    })
+    .await;
+    let manager = Arc::new(SftpManager::new());
+    manager
+        .connect("up".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .await
+        .expect("sftp connect");
+
+    let upload = || {
+        let manager = manager.clone();
+        let local = local.clone();
+        tokio::spawn(async move {
+            manager
+                .upload_from_local("up", &local, "/report.txt", false)
+                .await
+        })
+    };
+    let (first, second) = tokio::join!(upload(), upload());
+    let results = [first.expect("upload task"), second.expect("upload task")];
+    assert_eq!(
+        results.iter().filter(|result| result.is_ok()).count(),
+        1,
+        "{results:?}"
+    );
+    let refused = results
+        .iter()
+        .find_map(|result| result.as_ref().err())
+        .expect("one upload refused");
+    assert!(refused.to_string().contains("already exists"), "{refused}");
+    manager.close_all().await;
 }

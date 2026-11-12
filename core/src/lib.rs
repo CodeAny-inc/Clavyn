@@ -31,6 +31,7 @@ pub mod output;
 pub mod session;
 pub mod sftp;
 pub mod store;
+pub mod transport;
 pub mod vault;
 pub mod workspace;
 
