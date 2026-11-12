@@ -6,6 +6,7 @@ mod biometric_commands;
 #[cfg(test)]
 mod command_acl_tests;
 mod commands;
+mod host_change_prompt;
 mod host_key_prompt;
 mod local_files;
 mod navigation;
