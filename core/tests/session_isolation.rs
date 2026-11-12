@@ -5,23 +5,18 @@
 //! exits as soon as it starts, and check that other sessions, a close and the
 //! drain a vault reset relies on all carry on regardless.
 
-use clavyn_core::host::Host;
-use clavyn_core::known_hosts::KnownHosts;
+mod common;
+
 use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
-use russh::keys::{Algorithm, PrivateKey};
+use common::loopback::{known_hosts, password_host, random_host_key, serve, server_config};
+use common::loopback::{PASSWORD, USER};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{File, Handle, Name, Status, StatusCode, Version};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
-
-const USER: &str = "deploy";
-const PASSWORD: &str = "correct password";
 
 /// An SFTP server whose directories never end: every READDIR answers with one
 /// more entry and never with end-of-file.
@@ -153,58 +148,14 @@ impl server::Handler for TestServer {
 }
 
 async fn start_server() -> u16 {
-    serve(TestServer::default()).await
-}
-
-async fn serve(handler: TestServer) -> u16 {
-    let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-    let host_key = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
-    let config = Arc::new(server::Config {
-        keys: vec![host_key],
-        auth_rejection_time: Duration::from_millis(10),
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        ..Default::default()
-    });
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let config = config.clone();
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, handler.clone()).await {
-                    let _ = running.await;
-                }
-            });
-        }
-    });
-    port
-}
-
-fn host(port: u16) -> Host {
-    serde_json::from_value(serde_json::json!({
-        "id": "00000000-0000-0000-0000-000000000001",
-        "label": "Loopback",
-        "hostname": "127.0.0.1",
-        "port": port,
-        "username": USER,
-        "auth": {"password": {"credential_key": "unused"}},
-        "tags": []
-    }))
-    .expect("host")
-}
-
-fn known_hosts(dir: &TempDir) -> Arc<Mutex<KnownHosts>> {
-    Arc::new(Mutex::new(
-        KnownHosts::load(dir.path().join("known_hosts.json")).expect("load known hosts"),
-    ))
+    serve(server_config(random_host_key()), TestServer::default()).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_listing_that_never_ends_holds_up_no_other_sftp_session() {
     let dir = tempfile::tempdir().expect("temp dir");
     let port = start_server().await;
-    let host = host(port);
+    let host = password_host(port);
     let pins = known_hosts(&dir);
     let manager = Arc::new(SftpManager::new());
     for id in ["stuck", "other"] {
@@ -249,7 +200,7 @@ async fn closing_one_sftp_session_does_not_wait_on_its_listing() {
     let port = start_server().await;
     let manager = Arc::new(SftpManager::new());
     manager
-        .connect("stuck".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .connect("stuck".into(), &password_host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
         .await
         .expect("sftp connect");
 
@@ -289,7 +240,7 @@ async fn a_shell_that_exits_leaves_no_session_behind() {
 
     let claim = sessions.claim("shell").expect("claim");
     sessions
-        .create_ssh_session(&claim, &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
+        .create_ssh_session(&claim, &password_host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
         .await
         .expect("ssh session");
     drop(claim);
@@ -316,15 +267,15 @@ async fn a_shell_that_exits_leaves_no_session_behind() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_write_stuck_behind_a_peer_that_stopped_reading_ends_with_the_close() {
     let dir = tempfile::tempdir().expect("temp dir");
-    let port = serve(TestServer {
+    let stalling = TestServer {
         stall_on_input: true,
         ..TestServer::default()
-    })
-    .await;
+    };
+    let port = serve(server_config(random_host_key()), stalling).await;
     let sessions = Arc::new(SessionManager::new(Arc::new(|_, _| {}), Arc::new(|_, _| {})));
     let claim = sessions.claim("stuck").expect("claim");
     sessions
-        .create_ssh_session(&claim, &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
+        .create_ssh_session(&claim, &password_host(port), None, known_hosts(&dir), None, None, Some(PASSWORD), 80, 24)
         .await
         .expect("ssh session");
     drop(claim);

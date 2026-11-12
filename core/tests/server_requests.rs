@@ -2,20 +2,18 @@
 //! in-process russh server on loopback: channels it tries to open back are
 //! refused, and a host's startup command reaches the shell it was meant for.
 
+mod common;
+
 use clavyn_core::host::Host;
-use clavyn_core::known_hosts::KnownHosts;
 use clavyn_core::session::SessionManager;
-use russh::keys::{Algorithm, PrivateKey};
+use common::loopback::{known_hosts, password_host, random_host_key, serve, server_config};
+use common::loopback::{PASSWORD, USER};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::sync::{mpsc, Mutex};
-
-const USER: &str = "deploy";
-const PASSWORD: &str = "correct password";
+use tokio::sync::mpsc;
 
 /// What the server saw, reported back to the test.
 #[derive(Debug)]
@@ -54,6 +52,8 @@ impl server::Handler for TestServer {
         Ok(())
     }
 
+    /// Opens one channel of every type russh can open back, in the order
+    /// [`OPENED_BACK`] lists them.
     async fn shell_request(
         &mut self,
         _channel: ChannelId,
@@ -63,20 +63,40 @@ impl server::Handler for TestServer {
             let handle = session.handle();
             let seen = self.seen.clone();
             tokio::spawn(async move {
-                let agent = handle.channel_open_agent().await.is_ok();
-                let _ = seen.send(Seen::Opened { kind: "agent", accepted: agent });
-                let x11 = handle.channel_open_x11("127.0.0.1", 6010).await.is_ok();
-                let _ = seen.send(Seen::Opened { kind: "x11", accepted: x11 });
-                let forwarded = handle
-                    .channel_open_forwarded_tcpip("127.0.0.1", 8080, "127.0.0.1", 50000)
-                    .await
-                    .is_ok();
-                let _ = seen.send(Seen::Opened {
-                    kind: "forwarded-tcpip",
-                    accepted: forwarded,
-                });
-                let session = handle.channel_open_session().await.is_ok();
-                let _ = seen.send(Seen::Opened { kind: "session", accepted: session });
+                let report = |kind, accepted| {
+                    let _ = seen.send(Seen::Opened { kind, accepted });
+                };
+                report("agent", handle.channel_open_agent().await.is_ok());
+                report("x11", handle.channel_open_x11("127.0.0.1", 6010).await.is_ok());
+                report(
+                    "forwarded-tcpip",
+                    handle
+                        .channel_open_forwarded_tcpip("127.0.0.1", 8080, "127.0.0.1", 50000)
+                        .await
+                        .is_ok(),
+                );
+                report(
+                    "forwarded-streamlocal",
+                    handle
+                        .channel_open_forwarded_streamlocal("/tmp/forwarded.sock")
+                        .await
+                        .is_ok(),
+                );
+                report(
+                    "direct-tcpip",
+                    handle
+                        .channel_open_direct_tcpip("127.0.0.1", 22, "127.0.0.1", 50001)
+                        .await
+                        .is_ok(),
+                );
+                report(
+                    "direct-streamlocal",
+                    handle
+                        .channel_open_direct_streamlocal("/tmp/direct.sock")
+                        .await
+                        .is_ok(),
+                );
+                report("session", handle.channel_open_session().await.is_ok());
             });
         }
         Ok(())
@@ -93,51 +113,21 @@ impl server::Handler for TestServer {
     }
 }
 
+/// Every channel type the test server opens back, in the order it opens them.
+const OPENED_BACK: [&str; 7] = [
+    "agent",
+    "x11",
+    "forwarded-tcpip",
+    "forwarded-streamlocal",
+    "direct-tcpip",
+    "direct-streamlocal",
+    "session",
+];
+
 async fn start_server(open_back: bool) -> (u16, mpsc::UnboundedReceiver<Seen>) {
     let (seen, events) = mpsc::unbounded_channel();
-    let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-    let host_key = PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("host key");
-    let config = Arc::new(server::Config {
-        keys: vec![host_key],
-        auth_rejection_time: Duration::from_millis(10),
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        ..Default::default()
-    });
-    let handler = TestServer { seen, open_back };
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let config = config.clone();
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, handler).await {
-                    let _ = running.await;
-                }
-            });
-        }
-    });
+    let port = serve(server_config(random_host_key()), TestServer { seen, open_back }).await;
     (port, events)
-}
-
-fn host(port: u16, startup_command: Option<&str>) -> Host {
-    serde_json::from_value(serde_json::json!({
-        "id": "00000000-0000-0000-0000-000000000001",
-        "label": "Loopback",
-        "hostname": "127.0.0.1",
-        "port": port,
-        "username": USER,
-        "auth": {"password": {"credential_key": "unused"}},
-        "startup_command": startup_command,
-        "tags": []
-    }))
-    .expect("host")
-}
-
-fn known_hosts(dir: &TempDir) -> Arc<Mutex<KnownHosts>> {
-    Arc::new(Mutex::new(
-        KnownHosts::load(dir.path().join("known_hosts.json")).expect("load known hosts"),
-    ))
 }
 
 fn sessions() -> SessionManager {
@@ -164,9 +154,9 @@ async fn channels_the_server_opens_back_are_refused() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (port, mut events) = start_server(true).await;
     let sessions = sessions();
-    open_shell(&sessions, &host(port, None), &dir).await;
+    open_shell(&sessions, &password_host(port), &dir).await;
 
-    for expected in ["agent", "x11", "forwarded-tcpip", "session"] {
+    for expected in OPENED_BACK {
         match next(&mut events).await {
             Seen::Opened { kind, accepted } => {
                 assert_eq!(kind, expected);
@@ -182,7 +172,9 @@ async fn the_startup_command_is_typed_into_the_shell() {
     let dir = tempfile::tempdir().expect("temp dir");
     let (port, mut events) = start_server(false).await;
     let sessions = sessions();
-    open_shell(&sessions, &host(port, Some("tmux attach")), &dir).await;
+    let mut host = password_host(port);
+    host.startup_command = Some("tmux attach".into());
+    open_shell(&sessions, &host, &dir).await;
 
     match next(&mut events).await {
         Seen::Input(bytes) => assert_eq!(bytes, b"tmux attach\r"),
