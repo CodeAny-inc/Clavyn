@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onUnmounted, watch } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import { useKeysStore } from "../stores/keys";
 import { useVaultStore } from "../stores/vault";
 import { useUiStore } from "../stores/ui";
@@ -128,7 +129,7 @@ function resetForm() {
 }
 
 async function deleteKey(key: KeyMeta) {
-  if (confirm(`Delete key "${key.label}"?`)) {
+  if (await confirmAction(`Delete key "${key.label}"?`)) {
     await keys.deleteKey(key.id);
   }
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
@@ -85,7 +86,7 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (confirm(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
     await hosts.deleteGroup(groupId);
     if (identities.selectedGroupId === groupId) {
       identities.selectedGroupId = null;
@@ -246,7 +247,7 @@ async function save() {
 }
 
 async function deleteIdentity(id: Identity) {
-  if (!confirm(`Delete identity "${id.label}"?`)) return;
+  if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
   try {
     await identities.deleteIdentity(id.id);
   } catch (e) {

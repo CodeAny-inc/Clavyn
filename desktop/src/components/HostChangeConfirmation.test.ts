@@ -201,7 +201,7 @@ describe("IdentityManager when a save is not confirmed", () => {
     setInvokeHandler("list_identities", () => [identity]);
     let failure: unknown = DECLINED;
     setInvokeHandler("delete_identity", () => Promise.reject(failure));
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+    setInvokeHandler("plugin:dialog|message", () => "Ok");
     const alert = vi.spyOn(window, "alert");
 
     wrapper = mount(IdentityManager, { attachTo: document.body });

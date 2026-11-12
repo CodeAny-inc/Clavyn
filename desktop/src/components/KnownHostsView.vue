@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import { HOST_KEY_DECLINED, hasTag, untagged } from "../lib/confirmation";
@@ -87,7 +88,7 @@ async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
   // The key is retained, not erased, so this asks in the page. Erasing it is
   // "Forget permanently", which the backend confirms natively.
-  if (!confirm(`Remove known host "${entry.host}"?`)) return;
+  if (!(await confirmAction(`Remove known host "${entry.host}"?`))) return;
   await run(removeError, () => api.removeKnownHost(host, port));
 }
 
