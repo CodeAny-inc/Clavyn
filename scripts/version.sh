@@ -15,8 +15,16 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CARGO_TOML="$ROOT/Cargo.toml"
+CARGO_LOCK="$ROOT/Cargo.lock"
 PACKAGE_JSON="$ROOT/desktop/package.json"
 TAURI_CONF="$ROOT/desktop/src-tauri/tauri.conf.json"
+
+# A semantic version as semver.org defines it, without build metadata: no
+# empty identifiers and no leading zeros in numeric ones. Cargo rejects
+# anything looser, and release.yml applies the same pattern to the tags it
+# publishes. The value is also spliced into sed expressions, which this
+# character set keeps inert.
+SEMVER_RE='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
 
 # --- helpers ---
 
@@ -24,22 +32,56 @@ get_version() {
   grep '^version = ' "$CARGO_TOML" | head -1 | sed 's/version = "\(.*\)"/\1/'
 }
 
-set_version() {
-  local new="$1"
+require_semver() {
+  if [[ ! "$1" =~ $SEMVER_RE ]]; then
+    echo "Not a semantic version: '$1' (expected MAJOR.MINOR.PATCH[-PRERELEASE])" >&2
+    exit 1
+  fi
+}
+
+# Called from an `if`, where errexit does not apply, so every step returns
+# on failure explicitly.
+write_version() {
+  local new="$1" file
   # -i.bak is the in-place form both GNU and BSD sed accept
   # Cargo.toml (workspace.package)
-  sed -i.bak "s/^version = \".*\"/version = \"$new\"/" "$CARGO_TOML" && rm -f "$CARGO_TOML.bak"
-  # desktop/package.json
-  sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$PACKAGE_JSON" && rm -f "$PACKAGE_JSON.bak"
-  # tauri.conf.json
-  sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
+  sed -i.bak "s/^version = \".*\"/version = \"$new\"/" "$CARGO_TOML" || return 1
+  rm -f "$CARGO_TOML.bak"
+  # desktop/package.json and tauri.conf.json
+  for file in "$PACKAGE_JSON" "$TAURI_CONF"; do
+    sed -i.bak "s/\"version\": \".*\"/\"version\": \"$new\"/" "$file" || return 1
+    rm -f "$file.bak"
+  done
   # Cargo.lock records the workspace crates' own versions, and CI builds with
   # --locked, which rejects a lockfile that disagrees with Cargo.toml. Only the
   # workspace entries are rewritten; no dependency moves. The offline attempt
   # needs nothing beyond the local registry cache and is usually enough.
   if ! cargo update -w --offline --manifest-path "$CARGO_TOML" 2>/dev/null; then
-    cargo update -w --manifest-path "$CARGO_TOML"
+    cargo update -w --manifest-path "$CARGO_TOML" || return 1
   fi
+}
+
+# The four files that record the version are copied first and put back if
+# any step fails, so a bump either lands in all of them or in none.
+set_version() {
+  local new="$1" backup
+  require_semver "$new"
+  backup="$(mktemp -d)"
+  cp "$CARGO_TOML" "$backup/Cargo.toml"
+  cp "$CARGO_LOCK" "$backup/Cargo.lock"
+  cp "$PACKAGE_JSON" "$backup/package.json"
+  cp "$TAURI_CONF" "$backup/tauri.conf.json"
+  if ! write_version "$new"; then
+    cp "$backup/Cargo.toml" "$CARGO_TOML"
+    cp "$backup/Cargo.lock" "$CARGO_LOCK"
+    cp "$backup/package.json" "$PACKAGE_JSON"
+    cp "$backup/tauri.conf.json" "$TAURI_CONF"
+    rm -f "$CARGO_TOML.bak" "$PACKAGE_JSON.bak" "$TAURI_CONF.bak"
+    rm -rf "$backup"
+    echo "Bumping to $new failed; Cargo.toml, Cargo.lock, package.json and tauri.conf.json are unchanged." >&2
+    exit 1
+  fi
+  rm -rf "$backup"
   echo "Bumped version to $new"
 }
 
@@ -66,12 +108,7 @@ cmd_get() {
 cmd_bump_explicit() {
   local new="$1"
   local current
-  # The value is spliced into sed expressions and JSON, so anything other
-  # than a plain semantic version is refused before it reaches them.
-  if [[ ! "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-    echo "Not a semantic version: '$new' (expected MAJOR.MINOR.PATCH[-PRERELEASE])" >&2
-    exit 1
-  fi
+  require_semver "$new"
   current=$(get_version)
   if [[ "$current" == "$new" ]]; then
     echo "Version is already $new"
