@@ -32,6 +32,11 @@ url = "2"
 # The highest vault epoch this device has seen is kept in the OS credential
 # store, out of reach of anything that can rewrite the app data directory.
 keyring = "=4.2.0"
+# The host change dialog escapes stored text by Unicode general category
+# (controls, format characters, separators), which std does not expose. No
+# dependencies of its own; pinned so the Unicode version it encodes changes
+# only on purpose.
+unicode-general-category = "=1.1.0"
 
 [dev-dependencies]
 tempfile = "3"

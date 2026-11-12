@@ -378,7 +378,7 @@ fn key_path(host: &str, port: u16) -> String {
 
 /// Lowercase a host name and strip a trailing root dot, or canonicalize an IP
 /// literal (with or without the brackets an IPv6 literal is written in).
-fn normalize_host(host: &str) -> String {
+pub(crate) fn normalize_host(host: &str) -> String {
     // The root dot goes first so a bracketed literal spelled "[::1]." still
     // loses its brackets below.
     let host = host.trim().trim_end_matches('.');
