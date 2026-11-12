@@ -16,6 +16,7 @@ import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 import { acquireWebglRenderer, releaseWebglRenderer } from "../lib/terminalRenderer";
 import { sanitizePaste } from "../lib/terminalPaste";
+import { createSerialSender } from "../lib/serialSender";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
@@ -118,74 +119,124 @@ function fit() {
   try {
     if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
       fitAddon.fit();
-      if (currentSessionId && props.pane.connected) sendSize(currentSessionId, term.cols, term.rows);
+      if (currentSessionId && props.pane.connected) sendSize(currentSessionId, { cols: term.cols, rows: term.rows });
     }
   } catch { /* ResizeObserver can run during teardown. */ }
 }
-// Every resize reaches the remote as a window-change and the shell redraws, so
-// only a size the session does not already have is sent. Session creation
-// records the size it opened with; a failed resize forgets it so the next fit
-// retries. Like writes, resizes go out one at a time: two in flight could land
-// in either order and leave the remote at the older size. While one is in
-// flight only the most recent size is kept, and it follows once the first
-// settles.
-let sentSize: { sessionId: string; cols: number; rows: number } | null = null;
-let resizingSession: string | null = null;
-let wantedSize: { sessionId: string; cols: number; rows: number } | null = null;
-function recordSize(sessionId: string, cols: number, rows: number) {
-  sentSize = { sessionId, cols, rows };
-}
-function sendSize(sessionId: string, cols: number, rows: number) {
-  if (resizingSession === sessionId) {
-    wantedSize = { sessionId, cols, rows };
-    return;
-  }
-  if (sentSize?.sessionId === sessionId && sentSize.cols === cols && sentSize.rows === rows) return;
-  const sent = { sessionId, cols, rows };
-  sentSize = sent;
-  resizingSession = sessionId;
-  wantedSize = null;
-  void api.sessionResize(sessionId, cols, rows).catch(() => {
-    if (sentSize === sent) sentSize = null;
-  }).finally(() => {
-    if (resizingSession !== sessionId) return;
-    resizingSession = null;
-    const next = wantedSize;
-    wantedSize = null;
-    if (next && currentSessionId === sessionId) sendSize(next.sessionId, next.cols, next.rows);
-  });
-}
-// Tauri runs each command as its own task, so two writes in flight at once can
-// reach the session out of order. One write per pane is in flight at a time;
-// input arriving meanwhile is held and sent as a single write once it settles.
-let writingSession: string | null = null;
-let heldInput: number[] = [];
-function inputAccepted(sessionId: string | null): sessionId is string {
+function sessionLive(sessionId: string | null): sessionId is string {
   return !disposed && !props.pane.closing && !sessionEnded && !!sessionId && currentSessionId === sessionId
     && props.pane.connected && !connecting.value;
 }
-function sendInput(bytes: number[]) {
-  const sessionId = currentSessionId;
-  if (!inputAccepted(sessionId)) return;
-  if (writingSession === sessionId) {
-    for (const byte of bytes) heldInput.push(byte);
-    return;
-  }
-  // Held input belongs to the session whose write is still in flight; a
-  // replacement session never inherits it.
-  heldInput = [];
-  writingSession = sessionId;
-  void api.sessionWrite(sessionId, bytes).catch(cause => {
+// Every resize reaches the remote as a window-change and the shell redraws, so
+// only a size the session is not known to have is sent. The known size is the
+// one the session was created with, then each size a resize confirmed; the
+// backend confirms only once the change has gone out, so a lost one is never
+// taken as applied. Resizes go out one at a time, because two in flight could
+// land in either order and leave the remote at the older size, and while one is
+// in flight only the newest size is kept. A failed resize forgets the known
+// size and is retried a few times with backoff, since nothing else refits a
+// pane whose geometry has stopped changing.
+type TerminalSize = { cols: number; rows: number };
+const RESIZE_RETRY_MS = 250;
+const RESIZE_RETRY_LIMIT = 3;
+let knownSize: ({ sessionId: string } & TerminalSize) | null = null;
+let resizeRetries = 0;
+let resizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function sessionHasSize(sessionId: string, size: TerminalSize) {
+  return knownSize?.sessionId === sessionId && knownSize.cols === size.cols && knownSize.rows === size.rows;
+}
+function sessionCreatedAt(sessionId: string, size: TerminalSize) {
+  knownSize = { sessionId, ...size };
+  resizeRetries = 0;
+}
+function retryResize() {
+  if (resizeRetryTimer !== null || resizeRetries >= RESIZE_RETRY_LIMIT) return;
+  resizeRetries += 1;
+  resizeRetryTimer = setTimeout(() => {
+    resizeRetryTimer = null;
+    fit();
+  }, RESIZE_RETRY_MS * 2 ** (resizeRetries - 1));
+}
+const resizes = createSerialSender<TerminalSize>({
+  send: (sessionId, size) => api.sessionResize(sessionId, size.cols, size.rows).then(() => {
+    if (currentSessionId === sessionId) knownSize = { sessionId, ...size };
+  }, cause => {
+    if (knownSize?.sessionId === sessionId) knownSize = null;
+    throw cause;
+  }),
+  merge: (_held, size) => size,
+  settled: (sessionId, held, failure) => {
+    if (!sessionLive(sessionId)) return null;
+    if (!failure) resizeRetries = 0;
+    // After a failure the known size is gone, so a held size is always sent.
+    if (held) return sessionHasSize(sessionId, held) ? null : held;
+    if (failure) retryResize();
+    return null;
+  },
+});
+function sendSize(sessionId: string, size: TerminalSize) {
+  if (!resizes.busy(sessionId) && sessionHasSize(sessionId, size)) return;
+  resizes.push(sessionId, size);
+}
+// One write per pane is in flight at a time; input arriving meanwhile is held
+// and sent as a single write once it settles.
+const writes = createSerialSender<number[]>({
+  send: (sessionId, bytes) => api.sessionWrite(sessionId, bytes),
+  merge: (held, bytes) => {
+    for (const byte of bytes) held.push(byte);
+    return held;
+  },
+  settled: (sessionId, held, failure) => {
+    if (!failure) return held && sessionLive(sessionId) ? held : null;
     // An old write may settle after EOF or after xterm has a new session.
     // Preserve that owner's transcript/status; only report a live owner's error.
-    if (inputAccepted(sessionId)) writeError(`Write failed: ${String(cause)}`);
-  }).finally(() => {
-    if (writingSession !== sessionId) return;
-    writingSession = null;
-    const next = heldInput;
-    heldInput = [];
-    if (next.length && currentSessionId === sessionId) sendInput(next);
-  });
+    if (sessionLive(sessionId)) writeError(`Write failed: ${String(failure.cause)}`);
+    // Input held behind the failed write was typed before the failure could
+    // be seen. Sending it would hand the remote the rest of a line with a gap
+    // in it, which can turn a command into a different one.
+    return null;
+  },
+});
+function sendInput(bytes: number[]) {
+  const sessionId = currentSessionId;
+  if (sessionLive(sessionId)) writes.push(sessionId, bytes);
+}
+// OSC 8 hyperlinks come from the remote, and the text a link is drawn on need
+// not resemble where it points, so hovering one shows its real target and
+// Cmd/Ctrl-click copies it. Nothing opens it: without a handler xterm confirms
+// and then calls window.open(), which opens an in-app window the shell does
+// not manage, and the shell-open permission only covers the project's own
+// URLs. The target is shown and copied in the URL parser's serialization,
+// which punycodes the host and percent-encodes invisible or direction-changing
+// characters, so it reads as what it resolves to.
+const linkTarget = ref<string | null>(null);
+const linkNotice = ref<string | null>(null);
+const LINK_NOTICE_MS = 1500;
+let linkNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+function linkHref(uri: string): string | null {
+  try {
+    return new URL(uri).href;
+  } catch {
+    return null;
+  }
+}
+function showLinkNotice(message: string) {
+  if (linkNoticeTimer !== null) clearTimeout(linkNoticeTimer);
+  linkNotice.value = message;
+  linkNoticeTimer = setTimeout(() => {
+    linkNoticeTimer = null;
+    linkNotice.value = null;
+  }, LINK_NOTICE_MS);
+}
+async function copyLink(uri: string) {
+  const href = linkHref(uri);
+  if (!href) return;
+  try {
+    await navigator.clipboard.writeText(href);
+    if (!disposed) showLinkNotice("Link copied");
+  } catch {
+    if (!disposed) showLinkNotice("Could not copy the link");
+  }
 }
 function controlHasFocus() {
   const focused = document.activeElement;
@@ -352,11 +403,12 @@ async function connectSession() {
       await new Promise<void>(resolve => terminal.write("", resolve));
       if (disposed) return;
       searchAddon?.clearDecorations();
+      linkTarget.value = null;
       terminal.reset();
     }
     fit();
     if (props.pane.terminalType === "local") {
-      recordSize(sessionId, terminal.cols, terminal.rows);
+      sessionCreatedAt(sessionId, { cols: terminal.cols, rows: terminal.rows });
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows, outputSink);
     } else {
       // Direct hosts do not depend on the identity list. Linked hosts still fail
@@ -400,7 +452,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
-          recordSize(sessionId, terminal.cols, terminal.rows);
+          sessionCreatedAt(sessionId, { cols: terminal.cols, rows: terminal.rows });
           const request = api.connectSsh(sessionId, host.id, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
@@ -455,11 +507,13 @@ onMounted(async () => {
     // region, read from the buffer rather than from whatever is drawing, so it
     // works the same on the GPU renderer as on the DOM one.
     screenReaderMode: settings.screenReaderMode,
-    // OSC 8 hyperlinks come from the remote. Without a handler xterm confirms
-    // and then calls window.open(), which opens an in-app window the shell
-    // does not manage, and the shell-open permission only covers the project's
-    // own URLs. Activating a link therefore does nothing.
-    linkHandler: { activate() {} } });
+    linkHandler: {
+      hover: (_event, uri) => { linkTarget.value = linkHref(uri); },
+      leave: () => { linkTarget.value = null; },
+      activate: (event, uri) => {
+        if (event.metaKey || event.ctrlKey) void copyLink(uri);
+      },
+    } });
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.attachCustomKeyEventHandler(event => {
@@ -524,6 +578,10 @@ onBeforeUnmount(() => {
   pendingOutput = null;
   tailOutput = null;
   clearStreamEndFallback();
+  if (resizeRetryTimer !== null) clearTimeout(resizeRetryTimer);
+  resizeRetryTimer = null;
+  if (linkNoticeTimer !== null) clearTimeout(linkNoticeTimer);
+  linkNoticeTimer = null;
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();
@@ -690,6 +748,8 @@ function selectAction(id: string) {
     <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
          any subsequent key is routed; do not gate background protocol replies. -->
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
+    <div v-if="linkNotice || linkTarget" class="pointer-events-none absolute bottom-2 left-2 z-30 max-w-[calc(100%-16px)] truncate rounded-md border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground shadow-lg"
+      role="status" data-testid="terminal-link-target">{{ linkNotice ?? `${linkTarget} · ⌘/Ctrl-click to copy` }}</div>
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
     <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
       <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />

@@ -6,7 +6,11 @@ import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { emitSessionClosed, getInvokeMock, setInvokeHandler } from "../test/setup";
 
-type LinkHandler = { activate(event: MouseEvent, text: string, range: unknown): void; hover?: (...args: unknown[]) => void };
+type LinkHandler = {
+  activate(event: MouseEvent, text: string, range: unknown): void;
+  hover?: (...args: unknown[]) => void;
+  leave?: (...args: unknown[]) => void;
+};
 const terminals = vi.hoisted(() => ({
   items: [] as Array<{
     options: { linkHandler?: LinkHandler };
@@ -104,7 +108,7 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(600);
 });
-afterEach(() => { view?.unmount(); view = undefined; vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { view?.unmount(); view = undefined; vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe("terminal paste", () => {
   it("cannot end a bracketed paste early and run the rest as typed input", async () => {
@@ -143,16 +147,56 @@ describe("terminal paste", () => {
 });
 
 describe("terminal hyperlinks", () => {
+  const linkTarget = () => document.querySelector('[data-testid="terminal-link-target"]')?.textContent ?? null;
+  function stubClipboard(writeText: (text: string) => Promise<void>) {
+    const clipboard = { writeText: vi.fn(writeText) };
+    vi.spyOn(navigator, "clipboard", "get").mockReturnValue(clipboard as unknown as Clipboard);
+    return clipboard.writeText;
+  }
+
   it("never opens a window for an OSC 8 link from the remote", async () => {
     const { terminal } = await begin();
+    const writeText = stubClipboard(async () => {});
     const open = vi.spyOn(window, "open");
     const confirm = vi.spyOn(window, "confirm");
     const handler = terminal.options.linkHandler!;
     expect(handler).toBeDefined();
     handler.hover?.(new MouseEvent("mouseover"), "https://evil.example.test", {});
     handler.activate(new MouseEvent("click"), "https://evil.example.test", {});
+    handler.activate(new MouseEvent("click", { ctrlKey: true }), "https://evil.example.test", {});
+    handler.activate(new MouseEvent("click", { metaKey: true }), "https://evil.example.test", {});
+    await flushPromises();
     expect(open).not.toHaveBeenCalled();
     expect(confirm).not.toHaveBeenCalled();
+    expect(writeText).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows where a link really points while it is hovered", async () => {
+    const { terminal } = await begin();
+    const handler = terminal.options.linkHandler!;
+    handler.hover?.(new MouseEvent("mouseover"), "https://EXAMPLE.test/a b/‮gnp.exe", {});
+    await nextTick();
+    expect(linkTarget()).toBe("https://example.test/a%20b/%E2%80%AEgnp.exe · ⌘/Ctrl-click to copy");
+    handler.leave?.(new MouseEvent("mouseout"), "https://EXAMPLE.test/a b/‮gnp.exe", {});
+    await nextTick();
+    expect(linkTarget()).toBeNull();
+  });
+
+  it("copies a link's target only on Cmd/Ctrl-click, and says whether it worked", async () => {
+    const { terminal } = await begin();
+    const handler = terminal.options.linkHandler!;
+    const writeText = stubClipboard(async () => {});
+    handler.activate(new MouseEvent("click"), "https://example.test/docs", {});
+    await flushPromises();
+    expect(writeText).not.toHaveBeenCalled();
+    handler.activate(new MouseEvent("click", { ctrlKey: true }), "https://example.test/docs", {});
+    await flushPromises();
+    expect(writeText).toHaveBeenCalledWith("https://example.test/docs");
+    expect(linkTarget()).toBe("Link copied");
+    stubClipboard(async () => { throw new Error("denied"); });
+    handler.activate(new MouseEvent("click", { metaKey: true }), "https://example.test/docs", {});
+    await flushPromises();
+    expect(linkTarget()).toBe("Could not copy the link");
   });
 });
 
@@ -181,15 +225,18 @@ describe("terminal write ordering", () => {
     expect(written().map(write => write.bytes)).toEqual([[0x1b, 0x5b, 0x4d, 0x20, 0xa1, 0xff]]);
   });
 
-  it("reports a failed write and still sends the input held behind it", async () => {
+  it("reports a failed write and drops the input held behind it, but sends what is typed afterwards", async () => {
     const { terminal } = await begin();
     const pending = holdWrites();
-    terminal.input("a");
-    terminal.input("b");
+    terminal.input("rm -rf ~/old");
+    terminal.input("/2024");
+    terminal.input("\r");
     pending[0].reject(new Error("WRITE_FAILURE"));
     await flushPromises();
     expect(terminal.output.join("")).toContain("Write failed: Error: WRITE_FAILURE");
-    expect(written().map(write => text(write.bytes))).toEqual(["a", "b"]);
+    expect(written().map(write => text(write.bytes))).toEqual(["rm -rf ~/old"]);
+    terminal.input("c");
+    expect(written().map(write => text(write.bytes))).toEqual(["rm -rf ~/old", "c"]);
   });
 
   it("never hands held input to a replacement session, nor makes it wait for the old write", async () => {
@@ -260,6 +307,41 @@ describe("terminal resize", () => {
     resizeTo(120, 40);
     await flushPromises();
     expect(resizes()).toHaveLength(2);
+  });
+
+  it("sends no held size once the session has ended", async () => {
+    const { pane } = await begin();
+    const pending: Array<() => void> = [];
+    setInvokeHandler("session_resize", () => new Promise<void>(resolve => { pending.push(resolve); }));
+    resizeTo(100, 30);
+    await flushPromises();
+    resizeTo(120, 40);
+    emitSessionClosed(pane.sessionId!);
+    await nextTick();
+    pending[0]();
+    await flushPromises();
+    expect(resizes()).toEqual([[pane.sessionId, 100, 30]]);
+  });
+
+  it("retries a failed resize by itself, a few times with backoff", async () => {
+    const { pane } = await begin();
+    vi.useFakeTimers();
+    setInvokeHandler("session_resize", () => Promise.reject(new Error("fixture failure")));
+    resizeTo(100, 30);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resizes()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(resizes()).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(resizes()).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(resizes()).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(resizes()).toHaveLength(4);
+    setInvokeHandler("session_resize", () => undefined);
+    resizeTo(100, 30);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resizes()).toEqual(Array(5).fill([pane.sessionId, 100, 30]));
   });
 
   it("retries a size whose resize failed", async () => {
