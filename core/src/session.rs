@@ -9,7 +9,7 @@ use russh::ChannelMsg;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Callback invoked when a session receives data from the remote end.
 /// The Tauri layer uses this to forward a batch of output to the frontend.
@@ -105,12 +105,16 @@ fn lock_claims(
     claimed.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// A terminal size for the session task to send as a window change, and where
+/// to report whether the request reached the server.
+type ResizeRequest = (u32, u32, oneshot::Sender<std::result::Result<(), russh::Error>>);
+
 struct SshSession {
     #[allow(dead_code)]
     id: String,
     handle: Arc<Mutex<Handle<connection::SshHandler>>>,
     channel_id: russh::ChannelId,
-    resize_tx: mpsc::Sender<(u32, u32)>,
+    resize_tx: mpsc::Sender<ResizeRequest>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
     claim: Arc<ClaimedId>,
@@ -208,7 +212,7 @@ impl SessionManager {
         }
 
         let handle = Arc::new(Mutex::new(handle));
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<ResizeRequest>(32);
 
         let held = claim.commit();
         let session = SshSession {
@@ -231,7 +235,7 @@ impl SessionManager {
             // Dropped when this task ends, after the close has been announced,
             // which is the moment the id is free for another session.
             let _held = held;
-            let mut pending_resize: Option<(u32, u32)> = None;
+            let mut pending_resize: Option<ResizeRequest> = None;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
@@ -271,8 +275,11 @@ impl SessionManager {
                         flush(&mut batcher);
                     }
                 }
-                if let Some((c, r)) = pending_resize.take() {
-                    let _ = channel.window_change(c, r, 0, 0).await;
+                if let Some((c, r, reply)) = pending_resize.take() {
+                    let sent = channel.window_change(c, r, 0, 0).await;
+                    // The requester may have stopped waiting; then nobody
+                    // needs the result.
+                    let _ = reply.send(sent);
                 }
             }
         });
@@ -281,31 +288,49 @@ impl SessionManager {
     }
 
     /// Write data to a session's terminal.
+    ///
+    /// The session map is released before the send. A send can wait on the
+    /// session's flow control for as long as the remote leaves its input
+    /// unread, and every other session's writes, resizes and closes go through
+    /// the same map.
     pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
-        let handle = session.handle.lock().await;
+        let (handle, channel_id) = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+            (session.handle.clone(), session.channel_id)
+        };
+        let handle = handle.lock().await;
         handle
-            .data(session.channel_id, data.to_vec())
+            .data(channel_id, data.to_vec())
             .await
             .map_err(|_| CoreError::Ssh("write failed".into()))?;
         Ok(())
     }
 
     /// Resize a session's terminal.
+    ///
+    /// Returns once the window-change request has gone to the server, or with
+    /// the reason it could not. Callers skip sizes they have already sent, so a
+    /// request that was only queued must not count as delivered.
     pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
-        session
-            .resize_tx
-            .send((cols, rows))
+        let resize_tx = {
+            let sessions = self.sessions.lock().await;
+            let session = sessions
+                .get(session_id)
+                .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+            session.resize_tx.clone()
+        };
+        let (reply, delivered) = oneshot::channel();
+        resize_tx
+            .send((cols, rows, reply))
             .await
             .map_err(|_| CoreError::Ssh("resize channel closed".into()))?;
-        Ok(())
+        delivered
+            .await
+            .map_err(|_| CoreError::Ssh("session closed before the resize was sent".into()))?
+            .map_err(|e| CoreError::Ssh(format!("window change: {e}")))
     }
 
     /// Close a session.
