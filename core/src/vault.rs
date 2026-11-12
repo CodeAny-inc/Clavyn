@@ -685,16 +685,93 @@ fn migrated_keys_meta(legacy: &[KeyMeta], payload: &VaultPayload) -> Result<Vec<
 
 #[cfg(test)]
 mod wiping_buffer_tests {
-    use super::WipingBuffer;
+    use super::{SecretText, VaultPayload, WipingBuffer};
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
     use std::io::Write;
 
+    thread_local! {
+        /// `Some(count)` while [`reallocations_during`] runs on this thread.
+        static REALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// Forwards everything to `System` and counts `realloc` calls made on a
+    /// thread inside [`reallocations_during`].
+    ///
+    /// It is the allocator of this crate's whole test binary, but a thread that
+    /// is not counting only pays one thread-local read per `realloc`, so no
+    /// other test sees a difference.
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = REALLOCATIONS.try_with(|count| count.set(count.get().map(|n| n + 1)));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn reallocations_during(run: impl FnOnce()) -> usize {
+        REALLOCATIONS.with(|count| count.set(Some(0)));
+        run();
+        REALLOCATIONS
+            .with(|count| count.replace(None))
+            .expect("counting stays on until it is read")
+    }
+
+    /// A payload several times larger than a fresh buffer, whose keys carry
+    /// every class of byte JSON has to escape, and whose lines all differ so a
+    /// misplaced run of bytes cannot go unnoticed.
+    fn a_large_payload() -> VaultPayload {
+        let keys = (0..12usize)
+            .map(|n| {
+                let mut key = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+                for line in 0..40usize {
+                    key.extend(
+                        (0..70usize).map(|col| char::from(b'A' + ((n * 7 + line * 3 + col) % 26) as u8)),
+                    );
+                    key.push('\n');
+                }
+                key.push_str("\"quote\" back\\slash\ttab \u{7}bell \u{e9}\n");
+                key.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+                (format!("key-{n}"), SecretText(key))
+            })
+            .collect();
+        VaultPayload { keys }
+    }
+
+    /// The bytes repeat with period 251, which no write length below shares, so
+    /// any byte that lands at the wrong offset changes the comparison. The
+    /// lengths cross the first capacity exactly, and the last write alone needs
+    /// more than double the capacity before it, so both ways of sizing the
+    /// replacement allocation run.
     #[test]
     fn it_holds_exactly_what_was_written_across_growth() {
         let mut buffer = WipingBuffer::new();
         let initial = buffer.0.capacity();
-        let chunk = [0x5au8; 1000];
+        let mut next = 0u8;
         let mut expected = Vec::new();
-        for _ in 0..20 {
+        for len in [1usize, initial - 1, 1, 2, 5000, 3, 9000, 100_000] {
+            let chunk: Vec<u8> = (0..len)
+                .map(|_| {
+                    next = (next + 1) % 251;
+                    next
+                })
+                .collect();
             buffer.write_all(&chunk).expect("write");
             expected.extend_from_slice(&chunk);
         }
@@ -704,10 +781,35 @@ mod wiping_buffer_tests {
 
     #[test]
     fn a_payload_serializes_to_the_same_bytes_as_to_vec() {
-        let value = serde_json::json!({"keys": [["id", "-----BEGIN KEY-----\nabc\n-----END KEY-----\n"]]});
+        let payload = a_large_payload();
         let mut buffer = WipingBuffer::new();
-        serde_json::to_writer(&mut buffer, &value).expect("serialize");
-        assert_eq!(buffer.0.as_slice(), serde_json::to_vec(&value).expect("to_vec").as_slice());
+        let initial = buffer.0.capacity();
+        serde_json::to_writer(&mut buffer, &payload).expect("serialize");
+        assert!(buffer.0.capacity() > initial, "the payload never made the buffer grow");
+        assert_eq!(buffer.0.as_slice(), serde_json::to_vec(&payload).expect("to_vec").as_slice());
+    }
+
+    /// The wipe holds only while every growth moves into a fresh `Zeroizing`
+    /// allocation. A `Vec` that grows itself goes through `realloc`, which can
+    /// free the old block with its contents intact, so serializing a payload
+    /// must not reach `realloc` at all.
+    #[test]
+    fn growing_never_frees_a_buffer_through_realloc() {
+        let control = reallocations_during(|| {
+            let mut plain = Vec::<u8>::with_capacity(1);
+            plain.extend_from_slice(&[0; 64]);
+            std::hint::black_box(plain);
+        });
+        assert!(control > 0, "the allocator does not see a plain Vec grow");
+
+        let payload = a_large_payload();
+        let mut buffer = WipingBuffer::new();
+        let initial = buffer.0.capacity();
+        let reallocations = reallocations_during(|| {
+            serde_json::to_writer(&mut buffer, &payload).expect("serialize");
+        });
+        assert!(buffer.0.capacity() > initial, "the payload never made the buffer grow");
+        assert_eq!(reallocations, 0, "an outgrown buffer was freed through realloc");
     }
 }
 
@@ -715,7 +817,7 @@ mod wiping_buffer_tests {
 mod tests {
     use super::{
         base64, derive_key, open_unbound, random_bytes, seal, unbase64, SecretText, Vault, VaultKey,
-        VaultPayload, NONCE_LEN, VAULT_FORMAT_VERSION,
+        VaultPayload, WipingBuffer, NONCE_LEN, VAULT_FORMAT_VERSION,
     };
     use crate::keys::KeyMeta;
     use std::path::Path;
@@ -882,6 +984,35 @@ mod tests {
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].public_key_base64, first_meta.public_key_base64);
         assert_eq!(meta[1].fingerprint, second_meta.fingerprint);
+    }
+
+    /// Keys are added until the payload no longer fits the serialization
+    /// buffer's first allocation, so the last save has to grow it, and every
+    /// key must still come back intact from the file that save wrote.
+    #[tokio::test]
+    async fn keys_survive_a_save_that_outgrows_the_serialization_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (mut vault, key) = initialized(path.clone(), "correct horse battery staple").await;
+
+        let first_capacity = WipingBuffer::new().0.capacity();
+        let mut added = Vec::new();
+        while vault.decrypt(&key).expect("decrypt").len() <= first_capacity {
+            let (meta, private) = a_key();
+            let id = meta.id.to_string();
+            vault.add_key(&key, meta, &private).expect("add");
+            added.push((id, private));
+        }
+        drop(vault);
+
+        let reopened = Vault::open(path).expect("reopen");
+        assert_eq!(reopened.keys_meta().len(), added.len());
+        for (id, private) in &added {
+            assert_eq!(
+                reopened.get_key_with(&key, id).expect("stored key").as_slice(),
+                private.as_bytes()
+            );
+        }
     }
 
     #[tokio::test]
