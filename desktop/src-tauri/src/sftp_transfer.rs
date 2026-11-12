@@ -20,39 +20,109 @@ fn err(e: impl std::fmt::Display) -> String {
 /// separators, the characters no Windows file name may hold are replaced, and
 /// anything that does not name a file falls back to `download`.
 ///
-/// The name is also what the user reads before clicking Save, so characters
-/// that change how it reads are replaced too: bidirectional controls would let
-/// `report\u{202E}fdp.exe` display as `reportexe.pdf`. Trailing dots and
-/// spaces, which Windows strips, and device names such as `CON` or `aux.txt`,
-/// which Windows opens as the device, are neutralised the same way.
+/// The name is also what the user reads before clicking Save, so it has to
+/// read as what will be written. Bidirectional controls and the line and
+/// paragraph separators are replaced, so `report\u{202E}fdp.exe` cannot display
+/// as `reportexe.pdf`. Padding is collapsed (see `collapse_padding`), so blank
+/// characters cannot push the real extension out of the name box.
 fn remote_file_name(remote_path: &str) -> String {
+    suggested_name(remote_path, cfg!(windows))
+}
+
+/// `remote_file_name` with its Windows-only rules switched on or off by
+/// `windows`, so both variants run under test on every platform.
+///
+/// Windows strips trailing dots and spaces, and opens device names such as
+/// `CON` or `aux.txt` as the device instead of creating a file. There, the
+/// trailing dots and spaces are trimmed and a device name gets a leading
+/// underscore. Elsewhere those are ordinary names and are offered as served.
+fn suggested_name(remote_path: &str, windows: bool) -> String {
     let last = remote_path
         .rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
         .unwrap_or_default();
-    let cleaned: String = last
+    let cleaned: Vec<char> = last
         .chars()
         .map(|c| match c {
             ':' | '*' | '?' | '"' | '<' | '>' | '|' | '/' | '\\' => '_',
             c if c.is_control() => '_',
-            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}'
+            '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}'..='\u{202E}'
             | '\u{2066}'..='\u{2069}' => '_',
             c => c,
         })
         .collect();
-    let cleaned = cleaned.trim_end_matches(['.', ' ']);
-    match cleaned {
+    let mut name = collapse_padding(&cleaned);
+    if windows {
+        name.truncate(name.trim_end_matches(['.', ' ']).len());
+    }
+    match name.as_str() {
         "" | "." | ".." => "download".to_string(),
-        name if is_windows_device_name(name) => format!("_{name}"),
-        name => name.to_string(),
+        _ if windows && is_windows_device_name(&name) => format!("_{name}"),
+        _ => name,
     }
 }
 
+/// Characters that render as empty space: Unicode white space, the Hangul
+/// fillers, which fonts commonly draw with a width, and the braille blank.
+fn is_blank(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}' | '\u{2800}')
+}
+
+/// Default-ignorable characters, which render as nothing at all. The
+/// bidirectional controls among them never reach this check, because
+/// `suggested_name` has already replaced them.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{034F}'
+            | '\u{17B4}'
+            | '\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200D}'
+            | '\u{2060}'..='\u{2065}'
+            | '\u{206A}'..='\u{206F}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// Collapse padding to a single space. Padding is a run of blank and
+/// invisible characters holding more than one blank; everything from its first
+/// blank to its last becomes one space, so interleaving zero-width characters
+/// with spaces cannot rebuild it. A lone blank is kept as served, and so are
+/// invisible characters outside the blanks, such as the joiners Persian and
+/// emoji sequences need or a variation selector after an emoji.
+fn collapse_padding(chars: &[char]) -> String {
+    let is_gap = |c: char| is_blank(c) || is_invisible(c);
+    let mut out = String::with_capacity(chars.len());
+    for run in chars.chunk_by(|&a, &b| is_gap(a) == is_gap(b)) {
+        let first = run.iter().position(|&c| is_blank(c));
+        let last = run.iter().rposition(|&c| is_blank(c));
+        match (first, last) {
+            (Some(first), Some(last)) if first < last => {
+                out.extend(&run[..first]);
+                out.push(' ');
+                out.extend(&run[last + 1..]);
+            }
+            _ => out.extend(run),
+        }
+    }
+    out
+}
+
 /// Whether Windows treats `name` as a device rather than a file. The check
-/// applies to the part before the first dot, in any letter case, and the
-/// superscript digits count as digits for `COM` and `LPT`.
+/// applies to the part before the first dot, without its trailing spaces, in
+/// any letter case. The superscript digits count as digits for `COM` and
+/// `LPT`, and `0` is included because the Windows naming rules list `COM0` and
+/// `LPT0` among the reserved names.
 fn is_windows_device_name(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
+    let stem = stem.trim_end_matches(' ').to_ascii_uppercase();
     match stem.as_str() {
         "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
         _ => {
@@ -118,7 +188,16 @@ pub async fn sftp_upload_from_local(
 
 #[cfg(test)]
 mod tests {
-    use super::remote_file_name;
+    use super::{remote_file_name, suggested_name};
+
+    /// The name `suggested_name` offers on Windows and on every other platform.
+    fn on_both(remote_path: &str) -> [String; 2] {
+        [suggested_name(remote_path, true), suggested_name(remote_path, false)]
+    }
+
+    fn same_on_both(name: &str) -> [String; 2] {
+        [name.to_string(), name.to_string()]
+    }
 
     #[test]
     fn the_saved_name_is_the_last_remote_segment() {
@@ -148,21 +227,84 @@ mod tests {
     }
 
     #[test]
-    fn a_name_cannot_disguise_what_it_is() {
-        assert_eq!(remote_file_name("report\u{202E}fdp.exe"), "report_fdp.exe");
-        assert_eq!(remote_file_name("a\u{2066}b\u{2069}c\u{200F}.txt"), "a_b_c_.txt");
-        assert_eq!(remote_file_name("invoice.pdf.exe. . "), "invoice.pdf.exe");
-        assert_eq!(remote_file_name("..."), "download");
+    fn a_name_cannot_reorder_itself() {
+        assert_eq!(on_both("report\u{202E}fdp.exe"), same_on_both("report_fdp.exe"));
+        assert_eq!(on_both("a\u{2066}b\u{2069}c\u{200F}.txt"), same_on_both("a_b_c_.txt"));
+        assert_eq!(
+            on_both("x\u{061C}\u{200E}\u{202A}\u{202B}\u{202C}\u{202D}\u{2067}\u{2068}y"),
+            same_on_both("x________y")
+        );
+        assert_eq!(on_both("invoice.pdf\u{2028}\u{2029}.exe"), same_on_both("invoice.pdf__.exe"));
+    }
+
+    /// A name box shows only the start of a long name, so a run of blanks
+    /// between a decoy extension and the real one hides the real one.
+    #[test]
+    fn padding_cannot_push_the_real_extension_out_of_view() {
+        let spaces = format!("invoice.pdf{}.exe", " ".repeat(80));
+        let fillers = format!("invoice.pdf{}.exe", "\u{3164}".repeat(40));
+        assert_eq!(on_both(&spaces), same_on_both("invoice.pdf .exe"));
+        assert_eq!(on_both(&fillers), same_on_both("invoice.pdf .exe"));
+        assert_eq!(on_both("invoice.pdf\u{2800}\u{00A0}\u{3000}.exe"), same_on_both("invoice.pdf .exe"));
+        assert_eq!(
+            on_both("invoice.pdf \u{200B} \u{2060} \u{FEFF} \u{200D} .exe"),
+            same_on_both("invoice.pdf .exe")
+        );
+        assert_eq!(on_both("two  spaces.txt"), same_on_both("two spaces.txt"));
     }
 
     #[test]
-    fn a_windows_device_name_is_saved_as_a_file() {
-        assert_eq!(remote_file_name("CON"), "_CON");
-        assert_eq!(remote_file_name("aux.txt"), "_aux.txt");
-        assert_eq!(remote_file_name("com1.log"), "_com1.log");
-        assert_eq!(remote_file_name("LPT\u{00B9}"), "_LPT\u{00B9}");
-        assert_eq!(remote_file_name("console.log"), "console.log");
-        assert_eq!(remote_file_name("com10.txt"), "com10.txt");
-        assert_eq!(remote_file_name("nullable.rs"), "nullable.rs");
+    fn characters_that_read_correctly_are_kept() {
+        for name in [
+            "meeting notes.txt",
+            "\u{8CC7}\u{6599}\u{3000}2024.pdf",
+            "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}.txt",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}.png",
+            "\u{2764}\u{FE0F} notes.txt",
+            "soft\u{00AD}hyphen.md",
+        ] {
+            assert_eq!(on_both(name), same_on_both(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn trailing_dots_and_spaces_are_trimmed_only_where_windows_strips_them() {
+        assert_eq!(
+            on_both("invoice.pdf.exe. . "),
+            ["invoice.pdf.exe".to_string(), "invoice.pdf.exe. . ".to_string()]
+        );
+        assert_eq!(on_both("..."), ["download".to_string(), "...".to_string()]);
+        assert_eq!(on_both(". ."), ["download".to_string(), ". .".to_string()]);
+    }
+
+    #[test]
+    fn a_windows_device_name_is_saved_as_a_file_on_windows() {
+        for device in [
+            "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM0", "COM1", "COM9", "LPT0",
+            "LPT1", "LPT9", "COM\u{00B9}", "COM\u{00B2}", "LPT\u{00B3}",
+        ] {
+            for name in [device.to_string(), device.to_lowercase(), format!("{device}.txt")] {
+                assert_eq!(on_both(&name), [format!("_{name}"), name.clone()], "{name:?}");
+            }
+        }
+        assert_eq!(on_both("con.tar.gz"), ["_con.tar.gz".to_string(), "con.tar.gz".to_string()]);
+        assert_eq!(on_both("CON .txt"), ["_CON .txt".to_string(), "CON .txt".to_string()]);
+        assert_eq!(on_both("NUL. ."), ["_NUL".to_string(), "NUL. .".to_string()]);
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_a_device_is_kept() {
+        for name in [
+            "console.log",
+            "com10.txt",
+            "nullable.rs",
+            "LPT",
+            "COMA",
+            "aux_.c",
+            "CON\u{3000}.txt",
+            "NUL\u{00A0}",
+        ] {
+            assert_eq!(on_both(name), same_on_both(name), "{name:?}");
+        }
     }
 }
