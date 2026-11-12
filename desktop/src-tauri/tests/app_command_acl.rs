@@ -8,27 +8,50 @@
 //! permission error, which no build step reports.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
-/// The text between `open` and the next `close` after it.
-fn between<'a>(text: &'a str, open: &str, close: &str) -> &'a str {
-    let start = text
-        .find(open)
-        .unwrap_or_else(|| panic!("{open} not found"))
-        + open.len();
-    let len = text[start..]
-        .find(close)
-        .unwrap_or_else(|| panic!("{close} not found after {open}"));
-    &text[start..start + len]
-}
-
-/// Command names registered in `generate_handler!`, without their module path.
-fn handler_commands() -> Vec<String> {
-    between(include_str!("../src/main.rs"), "generate_handler![", "]")
-        .split(',')
+/// Command names in the first `generate_handler![...]` of `source`, without
+/// their module path.
+///
+/// The macro accepts outer attributes such as `#[cfg(...)]` on an entry, and
+/// the list can hold `//` comments. Both are dropped before the paths are read,
+/// and the list ends at the `]` that closes the macro, not at the first `]`,
+/// which an attribute would supply.
+fn handler_list(source: &str) -> Vec<String> {
+    const OPEN: &str = "generate_handler![";
+    let start = source.find(OPEN).expect("generate_handler! not found") + OPEN.len();
+    let code = source[start..]
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut list = String::new();
+    // Nesting depth inside `#[...]`; zero means a path is being read.
+    let mut attribute = 0usize;
+    let mut chars = code.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '#' if attribute == 0 && chars.peek() == Some(&'[') => {
+                chars.next();
+                attribute = 1;
+            }
+            '[' if attribute > 0 => attribute += 1,
+            ']' if attribute > 0 => attribute -= 1,
+            ']' => break,
+            _ if attribute > 0 => {}
+            _ => list.push(c),
+        }
+    }
+    list.split(',')
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(|path| path.rsplit("::").next().unwrap().to_string())
         .collect()
+}
+
+/// Command names registered in `generate_handler!` in `src/main.rs`.
+fn handler_commands() -> Vec<String> {
+    handler_list(include_str!("../src/main.rs"))
 }
 
 /// The `[[permission]]` entries in `permissions/app-commands.toml`, as
@@ -92,6 +115,56 @@ fn unique(names: &[String], what: &str) -> BTreeSet<String> {
     let set: BTreeSet<String> = names.iter().cloned().collect();
     assert_eq!(set.len(), names.len(), "{what} lists a command twice");
     set
+}
+
+/// An attribute on an entry or a comment in the list neither ends the list
+/// early nor reads as a command.
+#[test]
+fn the_handler_list_reader_skips_attributes_and_comments() {
+    let source = r#"
+        .invoke_handler(tauri::generate_handler![
+            commands::first,
+            // commands::commented_out,
+            #[cfg(target_os = "macos")]
+            biometric::second, // trailing note
+            #[cfg(all(feature = "x", not(test)))] third,
+            commands::fourth,
+        ])
+        .run(context);
+        other_macro![not_a_command];
+    "#;
+    assert_eq!(handler_list(source), ["first", "second", "third", "fourth"]);
+}
+
+/// Tauri enables every file under `capabilities/` unless
+/// `app.security.capabilities` in tauri.conf.json names a subset or defines
+/// capabilities inline. The checks in this file read `default.json` alone, so
+/// a capability anywhere else would grant commands they never see.
+#[test]
+fn default_json_is_the_only_capability() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
+    let entries: Vec<String> = std::fs::read_dir(&dir)
+        .expect("capabilities/")
+        .map(|entry| {
+            entry
+                .expect("an entry in capabilities/")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        ["default.json"],
+        "a capability other than default.json needs the checks in this file extended to it"
+    );
+
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).expect("tauri.conf.json");
+    assert!(
+        config["app"]["security"].get("capabilities").is_none(),
+        "app.security.capabilities would replace or add to capabilities/default.json"
+    );
 }
 
 /// One `allow-<command>` permission per registered command, each allowing
