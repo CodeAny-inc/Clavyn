@@ -15,6 +15,22 @@ use tokio::sync::{mpsc, Mutex};
 /// dropped. A peer that has stopped reading never acknowledges one.
 const DISCONNECT_GRACE: Duration = Duration::from_secs(5);
 
+/// How long the shell's output has to pause before a startup command is typed.
+///
+/// The login banner arrives before the shell has run its startup files, and a
+/// shell still running them can read typed input meant for its prompt or have
+/// the terminal echo it ahead of the prompt. A shell prints its prompt last and
+/// then waits, so output that has started and then stopped for this long is
+/// taken as the prompt. It is longer than a typical interactive shell takes
+/// between the banner and its first prompt.
+const STARTUP_SETTLE: Duration = Duration::from_secs(1);
+
+/// Upper bound on waiting for the shell before the startup command is typed
+/// anyway, so a shell that prints nothing, or never stops printing, still gets
+/// it. Input sent in the meantime waits behind the command for at most this
+/// long.
+const STARTUP_WAIT_LIMIT: Duration = Duration::from_secs(5);
+
 type SessionMap = HashMap<String, Arc<SshSession>>;
 
 /// Callback invoked when a session receives data from the remote end.
@@ -126,8 +142,9 @@ struct SshSession {
     channel_id: russh::ChannelId,
     /// Serializes writes to this session so keystrokes reach the channel in
     /// the order they were sent. Per session, so a stalled peer only holds up
-    /// its own input.
-    writes: Mutex<()>,
+    /// its own input. Shared so a startup command can hold its turn while it
+    /// waits for the shell.
+    writes: Arc<Mutex<()>>,
     resize_tx: mpsc::Sender<(u32, u32)>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
@@ -254,10 +271,27 @@ impl SessionManager {
             handle: Arc::new(handle),
             closed: tokio::sync::watch::Sender::new(false),
             channel_id,
-            writes: Mutex::new(()),
+            writes: Arc::new(Mutex::new(())),
             resize_tx,
             claim: held.clone(),
         });
+
+        // A startup command takes the first turn to write before the session
+        // is reachable, so nothing written to it can overtake the command. The
+        // reader reports each batch of output for as long as it waits.
+        let (mut output_seen, startup) =
+            match host.startup_command.as_deref().filter(|cmd| !cmd.is_empty()) {
+                Some(command) => {
+                    let (seen, output) = tokio::sync::watch::channel(());
+                    let startup = StartupCommand {
+                        command: command.to_string(),
+                        turn: session.writes.clone().lock_owned().await,
+                        output,
+                    };
+                    (Some(seen), Some(startup))
+                }
+                None => (None, None),
+            };
 
         self.sessions
             .lock()
@@ -292,6 +326,11 @@ impl SessionManager {
                         match msg {
                             Some(ChannelMsg::Data { data })
                             | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                                // Nobody listens once the startup command has
+                                // stopped waiting, and the sender goes with it.
+                                if output_seen.as_ref().is_some_and(|seen| seen.send(()).is_err()) {
+                                    output_seen = None;
+                                }
                                 if batcher.push(&data, Instant::now()) {
                                     flush(&mut batcher);
                                 }
@@ -331,21 +370,13 @@ impl SessionManager {
             }
         });
 
-        // The startup command is typed into the shell once the reader is
-        // running, so whatever the remote echoes back is drained while it is
-        // sent. A channel takes only one shell, exec or subsystem request, and
-        // OpenSSH ignores an exec that arrives after the shell, so it cannot be
-        // sent as a request of its own. The session is usable either way, so a
-        // command that cannot be sent does not fail the connect.
-        //
-        // It is sent to the session built above, not to whatever the id names
-        // by now: a shell that exits at once frees the id, and a session that
-        // takes it next must never receive this one's input. Holding `session`
-        // also keeps the id reserved until the send is over.
-        if let Some(cmd) = host.startup_command.as_deref().filter(|cmd| !cmd.is_empty()) {
-            if let Err(error) = session.send(&session_id, format!("{cmd}\r").as_bytes()).await {
-                tracing::warn!("startup command for session {session_id} was not sent: {error}");
-            }
+        // A channel takes only one shell, exec or subsystem request, and
+        // OpenSSH ignores an exec that arrives after the shell, so the startup
+        // command is typed into the shell instead. It waits for the shell on a
+        // task of its own, so the connect does not, and the session is usable
+        // whether or not the command goes out.
+        if let Some(startup) = startup {
+            tokio::spawn(type_startup_command(session, session_id, startup));
         }
 
         Ok(())
@@ -451,6 +482,72 @@ async fn disconnect(handle: &Handle<connection::SshHandler>) {
         handle.disconnect(russh::Disconnect::ByApplication, "", "en"),
     )
     .await;
+}
+
+/// A host's startup command, waiting for its shell to be ready for input.
+struct StartupCommand {
+    command: String,
+    /// The session's first turn to write. Input sent while the command waits
+    /// queues behind it and reaches the shell after the command, in order.
+    turn: tokio::sync::OwnedMutexGuard<()>,
+    /// Marked by the reader each time the shell prints something; closed when
+    /// the reader ends.
+    output: tokio::sync::watch::Receiver<()>,
+}
+
+/// Whether the shell is ready for typed input: `true` once its output has
+/// started and then paused for [`STARTUP_SETTLE`], or once
+/// [`STARTUP_WAIT_LIMIT`] has passed, and `false` if the output ends first,
+/// which means the session is ending.
+async fn shell_settled(mut output: tokio::sync::watch::Receiver<()>) -> bool {
+    let settled = async {
+        if output.changed().await.is_err() {
+            return false;
+        }
+        loop {
+            match tokio::time::timeout(STARTUP_SETTLE, output.changed()).await {
+                Err(_) => return true,
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return false,
+            }
+        }
+    };
+    tokio::time::timeout(STARTUP_WAIT_LIMIT, settled)
+        .await
+        .unwrap_or(true)
+}
+
+/// Type `startup.command` into the session's shell once [`shell_settled`]
+/// says the shell is ready, followed by `\r`, the byte Enter sends.
+///
+/// It goes to `session` itself, not to whatever the id names by then: a shell
+/// that exits at once frees the id, and a session that takes it next must
+/// never receive this one's input. A close ends the wait and releases the
+/// write turn.
+async fn type_startup_command(session: Arc<SshSession>, session_id: String, startup: StartupCommand) {
+    let StartupCommand {
+        command,
+        turn,
+        output,
+    } = startup;
+    let typed = async {
+        let _turn = turn;
+        if !shell_settled(output).await {
+            return Ok(());
+        }
+        session
+            .handle
+            .data(session.channel_id, format!("{command}\r").into_bytes())
+            .await
+    };
+    tokio::select! {
+        sent = typed => {
+            if sent.is_err() {
+                tracing::warn!("startup command for session {session_id} was not sent: the connection is gone");
+            }
+        }
+        () = session.closed() => {}
+    }
 }
 
 #[cfg(test)]
