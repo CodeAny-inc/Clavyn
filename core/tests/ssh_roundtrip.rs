@@ -17,10 +17,14 @@ use clavyn_core::CoreError;
 use common::{copy_fixture, passphrase_protected_ed25519, PASSPHRASE};
 use common::loopback::{known_hosts, password_host, random_host_key, serve, server_config};
 use common::loopback::{PASSWORD, USER};
-use russh::keys::{decode_secret_key, parse_public_key_base64, Algorithm, PrivateKey, PublicKey};
+use russh::keys::{
+    decode_secret_key, parse_public_key_base64, Algorithm, HashAlg, PrivateKey, PublicKey,
+};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, Preferred};
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 const VAULT_PASSPHRASE: &str = "vault passphrase";
@@ -41,11 +45,15 @@ impl server::Handler for TestServer {
         })
     }
 
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        key: server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
         let authorized = self
             .authorized_key
             .as_ref()
-            .is_some_and(|k| k.key_data() == key.key_data());
+            .is_some_and(|k| k.key_data() == key.public_key.key_data());
         Ok(if user == USER && authorized {
             Auth::Accept
         } else {
@@ -71,6 +79,27 @@ impl server::Handler for TestServer {
     ) -> Result<(), Self::Error> {
         session.data(channel, data.to_vec())?;
         Ok(())
+    }
+}
+
+/// A server that refuses every authentication request and counts them, so a
+/// test can tell whether a client got as far as authenticating.
+#[derive(Clone, Default)]
+struct CountingServer {
+    attempts: Arc<AtomicUsize>,
+}
+
+impl server::Handler for CountingServer {
+    type Error = russh::Error;
+
+    async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(Auth::reject())
+    }
+
+    async fn auth_password(&mut self, _user: &str, _password: &str) -> Result<Auth, Self::Error> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(Auth::reject())
     }
 }
 
@@ -313,6 +342,81 @@ async fn an_rsa_host_key_is_pinned_under_its_negotiated_algorithm() {
     let pinned = pins.lock().await.list();
     assert_eq!(pinned.len(), 1);
     assert_eq!(pinned[0].1, "rsa-sha2-512");
+}
+
+/// A pin is compared by key, so one that records a different algorithm than
+/// the one negotiated now still matches. It is left as recorded rather than
+/// rewritten, and nothing is held for review.
+#[tokio::test]
+async fn a_pinned_rsa_host_key_is_accepted_whatever_algorithm_its_pin_records() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let host_key = fixture_rsa_host_key().await;
+    let public = host_key.public_key().clone();
+    let port = start_server(host_key, TestServer { authorized_key: None }).await;
+    let pins = known_hosts(&dir);
+    pins.lock()
+        .await
+        .verify("127.0.0.1", port, &public, Some(HashAlg::Sha256))
+        .expect("pin under SHA-256");
+
+    connect(&password_host(port), None, pins.clone(), None, None, Some(PASSWORD))
+        .await
+        .expect("password auth");
+
+    let pins = pins.lock().await;
+    let recorded: Vec<String> = pins.list().into_iter().map(|pin| pin.1).collect();
+    assert_eq!(recorded, ["rsa-sha2-256"]);
+    assert!(pins.pending_changes().is_empty());
+}
+
+/// A changed RSA host key is refused before the client authenticates, and the
+/// key held for review carries the algorithm it was negotiated with, so
+/// accepting it later records the same algorithm a first connection would.
+#[tokio::test]
+async fn a_changed_rsa_host_key_is_refused_before_authentication_and_held_as_negotiated() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let server = CountingServer::default();
+    let port = serve(server_config(fixture_rsa_host_key().await), server.clone()).await;
+    let pins = known_hosts(&dir);
+    let previous = random_host_key().public_key().clone();
+    pins.lock()
+        .await
+        .verify("127.0.0.1", port, &previous, None)
+        .expect("pin previous key");
+
+    let error = match connect(&password_host(port), None, pins.clone(), None, None, Some(PASSWORD))
+        .await
+    {
+        Ok(_) => panic!("a changed host key was accepted"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, CoreError::HostKeyMismatch { .. }),
+        "expected a host key mismatch, got {error}"
+    );
+    assert_eq!(
+        server.attempts.load(Ordering::SeqCst),
+        0,
+        "the client authenticated to a server whose key it had not accepted"
+    );
+    {
+        let pins = pins.lock().await;
+        pins.check_mismatch("127.0.0.1", port, &previous)
+            .expect("original pin kept");
+        let held = pins.pending_changes();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].key_type, "rsa-sha2-512");
+    }
+
+    // The counter is live: a key the client accepts does reach authentication.
+    let fresh_dir = tempfile::tempdir().expect("temp dir");
+    match connect(&password_host(port), None, known_hosts(&fresh_dir), None, None, Some(PASSWORD))
+        .await
+    {
+        Ok(_) => panic!("the counting server accepted a password"),
+        Err(error) => assert!(error.to_string().contains("authentication rejected"), "{error}"),
+    }
+    assert!(server.attempts.load(Ordering::SeqCst) > 0);
 }
 
 /// A server that can only sign its host key with SHA-1 fails key exchange with
