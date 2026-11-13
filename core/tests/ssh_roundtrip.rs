@@ -119,7 +119,8 @@ async fn password_auth_connects_and_pins_the_host_key() {
 
     let session = connect(&password_host(port), None, pins.clone(), None, None, Some(PASSWORD))
         .await
-        .expect("password auth");
+        .expect("password auth")
+        .handle;
 
     // The session carries data both ways.
     let mut channel = session.channel_open_session().await.expect("open channel");

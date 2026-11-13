@@ -39,6 +39,15 @@ pub async fn serve<H>(config: server::Config, handler: H) -> u16
 where
     H: server::Handler + Clone + Send + 'static,
 {
+    serve_watching(config, handler, |_| {}).await
+}
+
+/// [`serve`], calling `ended` with a connection's copy of the handler once
+/// that connection is over, however it ended.
+pub async fn serve_watching<H>(config: server::Config, handler: H, ended: fn(&H)) -> u16
+where
+    H: server::Handler + Clone + Send + 'static,
+{
     let config = Arc::new(config);
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -47,9 +56,10 @@ where
             let config = config.clone();
             let handler = handler.clone();
             tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, handler).await {
+                if let Ok(running) = server::run_stream(config, stream, handler.clone()).await {
                     let _ = running.await;
                 }
+                ended(&handler);
             });
         }
     });
