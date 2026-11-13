@@ -75,7 +75,9 @@ const STREAM_END_GRACE_MS = 5000;
 let streamEndTimer: ReturnType<typeof setTimeout> | null = null;
 let outputTruncated = false;
 // Buffer remote output, never user input, until this attempt can answer queries.
-let pendingOutput: Uint8Array[] | null = null;
+// Each chunk keeps its share of the session's output window until it has been
+// written, so the buffer is bounded by that window too.
+let pendingOutput: HeldOutput[] | null = null;
 // Output still arriving after the close notification, held so the trailing
 // bytes are written before the closed banner rather than after it.
 let tailOutput: Uint8Array[] | null = null;
@@ -277,6 +279,25 @@ function reconnect() {
   activatePane(true);
   void connectWhenReady();
 }
+interface HeldOutput {
+  data: Uint8Array;
+  release: () => void;
+}
+// Writes session output and settles once xterm has parsed it. The output's
+// acknowledgement waits for that, so a session never has more than its window
+// queued in xterm, whose write buffer throws past its own limit.
+function writeOutput(data: Uint8Array): Promise<void> {
+  return new Promise(resolve => {
+    if (term) term.write(data, resolve);
+    else resolve();
+  });
+}
+// Hand buffered output back to the session's window without writing it, for
+// output that will never reach the emulator; returns the bytes.
+function releaseOutput(held: HeldOutput[] | null): Uint8Array[] {
+  for (const chunk of held ?? []) chunk.release();
+  return (held ?? []).map(chunk => chunk.data);
+}
 function writeError(message: string) {
   error.value = message;
   term?.write(`\r\n\x1b[31m${message}\x1b[0m\r\n`);
@@ -338,7 +359,7 @@ async function ensureListeners(): Promise<boolean> {
           // Disable writes before parsing them: queries must not reply to a dead
           // session. Take ownership of anything this attempt has buffered so a
           // connection still settling cannot discard it.
-          tailOutput = [...(pendingOutput ?? [])];
+          tailOutput = releaseOutput(pendingOutput);
           pendingOutput = null;
           closeReason = event.reason;
           finishClose();
@@ -379,16 +400,23 @@ async function connectSession() {
   tailOutput = null;
   outputTruncated = false;
   clearStreamEndFallback();
+  releaseOutput(pendingOutput);
   pendingOutput = [];
   // The sink belongs to this attempt, so a superseded attempt's output can
   // never reach the emulator even before its session is torn down. Bytes keep
   // being accepted until the sink itself reports the end of the stream: the
   // close notification does not travel with them and can arrive first.
-  const outputSink = api.sessionOutput(data => {
+  // Output the pane writes is acknowledged once xterm has parsed it, output
+  // it buffers once that buffer is written, and output it drops at once.
+  const outputSink = api.sessionOutput(sessionId, data => {
     if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
     if (sessionEnded) tailOutput?.push(data);
-    else if (pendingOutput) pendingOutput.push(data);
-    else if (props.pane.connected) term?.write(data);
+    else if (pendingOutput) {
+      const buffer = pendingOutput;
+      return new Promise<void>(release => {
+        buffer.push({ data, release });
+      });
+    } else if (props.pane.connected) return writeOutput(data);
   }, () => {
     if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
     streamEnded = true;
@@ -488,12 +516,13 @@ async function connectSession() {
       connecting.value = false;
       const output = pendingOutput;
       pendingOutput = null;
-      for (const chunk of output ?? []) terminal.write(chunk);
+      for (const chunk of output ?? []) terminal.write(chunk.data, chunk.release);
     }
     fit();
   } catch (cause) {
     if (!disposed) writeError(`Connection failed: ${String(cause)}`);
   } finally {
+    releaseOutput(pendingOutput);
     pendingOutput = null;
     connecting.value = false;
   }
@@ -577,6 +606,7 @@ watch(() => settings.screenReaderMode, enabled => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  releaseOutput(pendingOutput);
   pendingOutput = null;
   tailOutput = null;
   clearStreamEndFallback();

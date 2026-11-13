@@ -7,7 +7,8 @@ import TerminalWorkspace from "./TerminalWorkspace.vue";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useUiStore } from "../stores/ui";
-import { emitSessionClosed, setInvokeHandler } from "../test/setup";
+import { emitSessionClosed, emitSessionOutput, getInvokeMock, setInvokeHandler } from "../test/setup";
+import { OUTPUT_ACK_DELAY_MS } from "../api";
 import type { Host } from "../types";
 
 const terminalMock = vi.hoisted(() => ({
@@ -183,6 +184,37 @@ describe("TerminalPane session identity", () => {
     await nextTick();
     await view.get('button[aria-label="Actions for Atlas"]').trigger("pointerdown");
     expect(tabs.activePaneId).toBe(first.id);
+  });
+});
+
+describe("TerminalPane output acknowledgement", () => {
+  const acks = () =>
+    getInvokeMock().mock.calls
+      .filter(([command]) => command === "session_output_ack")
+      .map(([, args]) => args);
+
+  it("acknowledges output only once xterm has parsed it", async () => {
+    const hosts = useHostsStore();
+    const tabs = useTabsStore();
+    const host = makeHost("atlas");
+    hosts.hosts = [host];
+    const tab = tabs.newTab(host);
+    const pane = collectPanes(tab.tree)[0];
+    mountPane(pane, tab.id);
+    await vi.waitFor(() => expect(pane.connected).toBe(true));
+    const sessionId = pane.sessionId!;
+
+    const parsed: (() => void)[] = [];
+    terminalMock.write.mockImplementation((_data, callback) => {
+      if (callback) parsed.push(callback);
+    });
+    emitSessionOutput(sessionId, "x".repeat(500));
+    await vi.waitFor(() => expect(parsed).toHaveLength(1));
+    await new Promise(resolve => setTimeout(resolve, OUTPUT_ACK_DELAY_MS * 3));
+    expect(acks()).toEqual([]);
+
+    parsed[0]();
+    await vi.waitFor(() => expect(acks()).toEqual([{ sessionId, bytes: 500 }]));
   });
 });
 

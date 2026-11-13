@@ -187,6 +187,10 @@ identifier = "allow-session-resize"
 commands.allow = ["session_resize"]
 
 [[permission]]
+identifier = "allow-session-output-ack"
+commands.allow = ["session_output_ack"]
+
+[[permission]]
 identifier = "allow-close-session"
 commands.allow = ["close_session"]
 
