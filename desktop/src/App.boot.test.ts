@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, shallowMount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import App from "./App.vue";
@@ -9,6 +9,7 @@ import { useKeysStore } from "./stores/keys";
 import { useUpdateStore } from "./stores/update";
 import { useVaultStore } from "./stores/vault";
 import { useWorkspacesStore } from "./stores/workspaces";
+import { useUiStore } from "./stores/ui";
 
 const BOOT_READS: Record<string, unknown> = {
   vault_is_initialized: true,
@@ -180,5 +181,50 @@ describe("App boot", () => {
     await flushPromises();
     expect(update.available).toBe(true);
     expect(update.showModal).toBe(true);
+  });
+});
+
+describe("App command palette shortcut", () => {
+  let wrapper: VueWrapper;
+
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    for (const [command, value] of Object.entries(BOOT_READS)) setInvokeHandler(command, () => value);
+    setInvokeHandler("biometric_available", () => false);
+    setInvokeHandler("biometric_passphrase_stored", () => false);
+    vi.spyOn(navigator, "platform", "get").mockReturnValue("Linux x86_64");
+  });
+
+  afterEach(() => {
+    wrapper?.unmount();
+    vi.restoreAllMocks();
+    document.body.innerHTML = "";
+  });
+
+  function press(target: Element, init: KeyboardEventInit) {
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true, ...init }));
+  }
+
+  it("leaves plain Ctrl+K to a focused terminal off macOS, and answers Ctrl+Shift+K there", async () => {
+    wrapper = shallowMount(App, { attachTo: document.body });
+    await flushPromises();
+    const ui = useUiStore();
+    const terminal = document.createElement("div");
+    terminal.className = "xterm";
+    const textarea = document.createElement("textarea");
+    terminal.append(textarea);
+    document.body.append(terminal);
+
+    press(textarea, { ctrlKey: true });
+    expect(ui.commandPaletteOpen).toBe(false);
+    press(textarea, { key: "K", ctrlKey: true, shiftKey: true });
+    expect(ui.commandPaletteOpen).toBe(true);
+  });
+
+  it("still opens the palette on Ctrl+K outside a terminal", async () => {
+    wrapper = shallowMount(App, { attachTo: document.body });
+    await flushPromises();
+    press(document.body, { ctrlKey: true });
+    expect(useUiStore().commandPaletteOpen).toBe(true);
   });
 });

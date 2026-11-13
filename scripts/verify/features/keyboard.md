@@ -10,6 +10,16 @@ Global shortcuts handled in `App.vue`'s `handleKeydown`.
 | `Cmd/Ctrl+,` | Go to Settings |
 | `Escape` | Exit fullscreen pane (if one is fullscreen) / close palette |
 
+Shortcuts that also work while a terminal has focus (`lib/shortcuts.ts`). On
+Linux and Windows plain `Ctrl+<key>` belongs to the shell (`Ctrl+F`, `Ctrl+K`,
+`Ctrl+Left/Right`), so these use `Ctrl+Shift`; macOS uses `Cmd`.
+
+| macOS | Linux / Windows | Action |
+|-------|-----------------|--------|
+| `Cmd+F` | `Ctrl+Shift+F` | Find in the terminal |
+| `Cmd+Arrow` | `Ctrl+Shift+Arrow` | Move to the neighbouring pane |
+| `Cmd+K` | `Ctrl+Shift+K` | Command palette from inside a terminal |
+
 ## Driving it with control-clavyn
 
     node scripts/verify/control-clavyn.mjs press "Control+KeyK"     # open palette
@@ -20,6 +30,8 @@ Global shortcuts handled in `App.vue`'s `handleKeydown`.
 
 ## Gotchas
 
+- The harness browser reports a Linux platform, so terminal shortcuts are
+  `Control+Shift+...` there (e.g. `Control+Shift+ArrowLeft`).
 - Use `Control+` (not `Meta+`) in the harness on Linux/Windows. On macOS the
   app listens for `metaKey`; Playwright `Meta+` works there. The `press`
   command passes the key string straight to Playwright's `keyboard.press`.

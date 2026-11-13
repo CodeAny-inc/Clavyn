@@ -17,6 +17,7 @@ import AppSidebar from "./components/AppSidebar.vue";
 import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
+import { isTerminalShortcut } from "./lib/shortcuts";
 
 // Everything else is reachable only through navigation or a shortcut, so it is
 // split out of the entry chunk and fetched when first rendered.
@@ -53,7 +54,10 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault(); ui.exitFullscreen(); return;
   }
   const cmd = e.metaKey || e.ctrlKey;
-  if (cmd && e.key === "k") {
+  // Inside a terminal only the terminal-safe form counts (Cmd+K, or
+  // Ctrl+Shift+K off macOS): plain Ctrl+K there is the shell's kill-line.
+  const inTerminal = e.target instanceof Element && !!e.target.closest(".xterm");
+  if (cmd && e.key.toLowerCase() === "k" && (!inTerminal || isTerminalShortcut(e))) {
     e.preventDefault(); commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
     e.preventDefault(); activeView.value = "terminal"; tabs.newTab();
