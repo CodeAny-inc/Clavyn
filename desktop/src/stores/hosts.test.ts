@@ -143,6 +143,83 @@ describe("hosts store", () => {
       expect(store.hosts).toHaveLength(2);
     });
 
+    describe("when a delete that cascades lands during the load", () => {
+      // The backend removes these links in the same write as the delete, so
+      // the snapshot still in flight is reconciled with the delete. Discarding
+      // it would leave a list that has not loaded yet empty.
+      const linked: Host = { ...mockHost, identity_id: "id-1" };
+      const other: Host = { ...mockHost2, identity_id: "id-2" };
+
+      it("keeps the host list and drops the links an identity delete removed", async () => {
+        let releaseHosts: (hosts: Host[]) => void = () => {};
+        vi.mocked(api.listHosts).mockReturnValueOnce(
+          new Promise<Host[]>((resolve) => {
+            releaseHosts = resolve;
+          }),
+        );
+
+        const store = useHostsStore();
+        const inFlight = store.load();
+
+        store.unlinkIdentity("id-1");
+
+        releaseHosts([{ ...linked }, { ...other }]);
+        await inFlight;
+
+        expect(store.hosts).toHaveLength(2);
+        expect(store.hosts.find((h) => h.id === "host-1")?.identity_id).toBeNull();
+        expect(store.hosts.find((h) => h.id === "host-2")?.identity_id).toBe("id-2");
+      });
+
+      it("keeps both lists and drops what a group delete removed", async () => {
+        let releaseHosts: (hosts: Host[]) => void = () => {};
+        let releaseGroups: (groups: HostGroup[]) => void = () => {};
+        vi.mocked(api.listHosts).mockReturnValueOnce(
+          new Promise<Host[]>((resolve) => {
+            releaseHosts = resolve;
+          }),
+        );
+        vi.mocked(api.listGroups).mockReturnValueOnce(
+          new Promise<HostGroup[]>((resolve) => {
+            releaseGroups = resolve;
+          }),
+        );
+
+        const store = useHostsStore();
+        const inFlight = store.load();
+
+        await store.deleteGroup("group-1");
+
+        releaseHosts([{ ...mockHost }, { ...mockHost2 }]);
+        releaseGroups([{ ...mockGroup }, { id: "group-2", name: "Staging", color: null }]);
+        await inFlight;
+
+        expect(store.groups.map((g) => g.id)).toEqual(["group-2"]);
+        expect(store.hosts).toHaveLength(2);
+        expect(store.hosts.find((h) => h.id === "host-2")?.group_id).toBeNull();
+      });
+
+      it("does not apply the delete to a read that starts after it settles", async () => {
+        let releaseHosts: (hosts: Host[]) => void = () => {};
+        vi.mocked(api.listHosts).mockReturnValueOnce(
+          new Promise<Host[]>((resolve) => {
+            releaseHosts = resolve;
+          }),
+        );
+
+        const store = useHostsStore();
+        const first = store.load();
+        store.unlinkIdentity("id-1");
+        releaseHosts([{ ...linked }]);
+        await first;
+
+        vi.mocked(api.listHosts).mockResolvedValueOnce([{ ...linked }]);
+        await store.load();
+
+        expect(store.hosts.find((h) => h.id === "host-1")?.identity_id).toBe("id-1");
+      });
+    });
+
     it("reads hosts and groups in one round-trip", async () => {
       const store = useHostsStore();
       const order: string[] = [];
