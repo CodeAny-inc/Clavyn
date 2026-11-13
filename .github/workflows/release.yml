@@ -23,12 +23,23 @@ on:
 permissions:
   contents: read
 
+# Runs that publish the same release queue behind each other instead of racing
+# on `--clobber` uploads to one tag. A dispatch names its release through the
+# `version` input while `github.ref` is the branch it was started from, so the
+# group is keyed on the tag the run publishes: a dispatch for 1.2.3 and the
+# push of tag v1.2.3 share a group. `prepare` refuses a run whose group would
+# differ from its tag, such as a dispatch from a branch without a version.
+concurrency:
+  group: release-${{ inputs.version && format('refs/tags/v{0}', inputs.version) || github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # ──────────────────────────────────────────────
   # Determine version and release type
   # ──────────────────────────────────────────────
   prepare:
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
+    timeout-minutes: 5
     permissions: {}
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -43,22 +54,32 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           RUNNER_MODE: ${{ inputs.runner_mode || 'github' }}
         run: |
+          # The concurrency group is `refs/tags/v<version>` for a dispatch
+          # that names its version and `github.ref` otherwise. Taking the tag
+          # only from a tag ref keeps both equal to the tag this run
+          # publishes, so no two runs for one release build at once.
           if [[ -n "$INPUT_VERSION" ]]; then
             VERSION="$INPUT_VERSION"
             TAG="v${VERSION}"
-          else
-            TAG="${GITHUB_REF##*/}"
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
             VERSION="${TAG#v}"
+          else
+            echo "Refusing to release: a run started from $GITHUB_REF must name its version in the version input." >&2
+            exit 1
           fi
           # Everything downstream trusts these two values: they become the
           # release tag, the `gh release upload` target and tauri-action's
           # tagName. `$GITHUB_OUTPUT` is a line-oriented file and the last
           # record for a key wins, so a version carrying a newline writes
           # extra records and repoints `tag` at something the caller chose.
-          # Accept only a semantic version; nothing else can express a
-          # newline, and no tag this project has ever released is rejected.
-          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "Refusing to release: '$VERSION' is not a semantic version." >&2
+          # Accept only a semantic version, the pattern scripts/version.sh
+          # also enforces: nothing else can express a newline, Cargo rejects
+          # anything looser, and no tag this project has ever released is
+          # rejected.
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?$'
+          if [[ ! "$VERSION" =~ $semver ]] || [[ "$TAG" != "v$VERSION" ]]; then
+            echo "Refusing to release: '$TAG' is not v followed by a semantic version." >&2
             exit 1
           fi
           IS_PRERELEASE="false"
@@ -107,6 +128,7 @@ jobs:
     # Tag pushes and ordinary manual releases use GitHub-hosted runners. A failed
     # trusted release can be retried via workflow_dispatch with runner_mode=self-hosted.
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && matrix.self_hosted_runner || matrix.github_runner) }}
+    timeout-minutes: 90
     permissions:
       contents: write
     steps:
@@ -263,7 +285,10 @@ jobs:
           releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.is_prerelease }}
           uploadUpdaterJson: false
-          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }}
+          # Everything after `--` goes to cargo; `--locked` builds against the
+          # committed Cargo.lock and fails if it is out of date. It stays last
+          # so every tauri option, including SIGNING_CONFIG_ARGS, precedes it.
+          args: ${{ matrix.args }} --config ${{ runner.temp }}/unsigned-updater.json ${{ env.SIGNING_CONFIG_ARGS }} -- --locked
 
       - name: Remove the Authenticode certificate from the runner store
         # The macOS keychain the bundler creates is temporary and goes with the
@@ -307,6 +332,7 @@ jobs:
   signer-tool:
     needs: prepare
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
     permissions: {}
     outputs:
       signer_sha256: ${{ steps.digest.outputs.sha256 }}
@@ -341,6 +367,7 @@ jobs:
   sign:
     needs: [prepare, build, signer-tool]
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
@@ -412,6 +439,7 @@ jobs:
           import base64, glob, json, os, subprocess, sys
 
           runner_temp = os.environ["RUNNER_TEMP"]
+          version = os.environ["VERSION"]
           with open(f"{runner_temp}/tauri.conf.json") as f:
               pubkey_cfg = json.load(f)["plugins"]["updater"]["pubkey"]
 
@@ -426,6 +454,18 @@ jobs:
           with open(f"{runner_temp}/pubkey.der", "wb") as f:
               f.write(bytes.fromhex("302a300506032b6570032100") + pub[10:])
 
+          def ed25519_verify(msg_path, signature):
+              with open(f"{runner_temp}/sig.bin", "wb") as f:
+                  f.write(signature)
+              r = subprocess.run(
+                  ["openssl", "pkeyutl", "-verify", "-rawin",
+                   "-in", msg_path,
+                   "-sigfile", f"{runner_temp}/sig.bin",
+                   "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
+                   "-keyform", "DER"],
+                  capture_output=True, text=True)
+              return r.returncode == 0, r.stderr.strip()
+
           failed = []
           for path in sorted(glob.glob(f"{runner_temp}/assets/*")):
               if path.endswith(".sig"):
@@ -436,12 +476,24 @@ jobs:
                   print(f"{name}: missing .sig")
                   failed.append(name)
                   continue
-              # Each .sig is the base64 of a minisign signature box; its
-              # signature line decodes to [alg | keynum(8) | ed25519 sig(64)].
+              # Each .sig is the base64 of a minisign signature box: an
+              # untrusted comment, the signature line
+              # [alg | keynum(8) | ed25519 sig(64)], the trusted comment, and
+              # the global signature, which covers the 64-byte signature
+              # followed by the trusted comment's text.
               box = base64.b64decode(open(sig_path, "rb").read()).decode()
+              lines = [l for l in box.splitlines() if l]
+              tc = next((i for i, l in enumerate(lines)
+                         if l.startswith("trusted comment: ")), None)
+              if tc is None or tc + 1 >= len(lines):
+                  print(f"{name}: signature has no trusted comment")
+                  failed.append(name)
+                  continue
               sig = base64.b64decode(
-                  next(l for l in box.splitlines()
-                       if l and not l.startswith(("untrusted", "trusted"))))
+                  next(l for l in lines
+                       if not l.startswith(("untrusted comment:", "trusted comment:"))))
+              trusted = lines[tc][len("trusted comment: "):]
+              global_sig = base64.b64decode(lines[tc + 1])
               if sig[:2] not in (b"Ed", b"ED") or len(sig) != 74 or sig[2:10] != keynum:
                   print(f"{name}: signature algorithm or keynum mismatch")
                   failed.append(name)
@@ -456,48 +508,26 @@ jobs:
                   msg_path = f"{runner_temp}/digest.bin"
               else:
                   msg_path = path
-              with open(f"{runner_temp}/sig.bin", "wb") as f:
-                  f.write(sig[10:])
-              r = subprocess.run(
-                  ["openssl", "pkeyutl", "-verify", "-rawin",
-                   "-in", msg_path,
-                   "-sigfile", f"{runner_temp}/sig.bin",
-                   "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
-                   "-keyform", "DER"],
-                  capture_output=True, text=True)
-              if r.returncode != 0:
-                  print(f"{name}: {r.stderr.strip() or 'signature verification failed'}")
+              ok, err = ed25519_verify(msg_path, sig[10:])
+              if not ok:
+                  print(f"{name}: {err or 'signature verification failed'}")
                   failed.append(name)
                   continue
-              # The app requires the signed version to match the manifest's,
-              # so a signature without it would leave the release
-              # uninstallable. The trusted comment is covered by minisign's
-              # global signature over [signature | trusted comment].
-              trusted = next(
-                  (l[len("trusted comment: "):] for l in box.splitlines()
-                   if l.startswith("trusted comment: ")), None)
-              global_line = box.splitlines()[-1] if box.strip() else ""
-              fields = dict(
-                  f.split(":", 1) for f in (trusted or "").split("\t") if ":" in f)
-              if fields.get("version") != os.environ["VERSION"]:
-                  print(f"{name}: trusted comment does not carry version {os.environ['VERSION']}")
+              # The app sets `requireSignedVersion` and requires the version in
+              # the trusted comment to match the manifest's, so a signature
+              # without it would leave the release uninstallable. The global
+              # signature is what makes that comment trustworthy.
+              if f"version:{version}" not in trusted.split("\t"):
+                  print(f"{name}: signature is not bound to version {version}")
                   failed.append(name)
                   continue
-              with open(f"{runner_temp}/global.msg", "wb") as f:
+              with open(f"{runner_temp}/global.bin", "wb") as f:
                   f.write(sig[10:] + trusted.encode())
-              with open(f"{runner_temp}/global.sig", "wb") as f:
-                  f.write(base64.b64decode(global_line))
-              r = subprocess.run(
-                  ["openssl", "pkeyutl", "-verify", "-rawin",
-                   "-in", f"{runner_temp}/global.msg",
-                   "-sigfile", f"{runner_temp}/global.sig",
-                   "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
-                   "-keyform", "DER"],
-                  capture_output=True, text=True)
-              if r.returncode == 0:
-                  print(f"{name}: signature and signed version verified")
+              ok, err = ed25519_verify(f"{runner_temp}/global.bin", global_sig)
+              if ok:
+                  print(f"{name}: signature verified for version {version}")
               else:
-                  print(f"{name}: trusted comment signature does not verify")
+                  print(f"{name}: trusted comment: {err or 'global signature verification failed'}")
                   failed.append(name)
 
           if failed:
@@ -516,6 +546,7 @@ jobs:
   publish-manifest:
     needs: [prepare, sign]
     runs-on: ${{ fromJSON(inputs.runner_mode == 'self-hosted' && '["self-hosted","linux","clavyn"]' || '["ubuntu-22.04"]') }}
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
