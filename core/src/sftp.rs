@@ -13,9 +13,11 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWriteExt};
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
 /// The most entries one listing returns. A server that keeps answering a
@@ -35,6 +37,21 @@ const FALLBACK_LIST_DEADLINE: Duration = Duration::from_secs(30);
 /// How long opening the listing channel may take before the connection does
 /// without it.
 const LISTER_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Buffer between a transfer and its local file.
+///
+/// tokio runs every read or write of a `tokio::fs::File` as a separate job on
+/// its blocking pool, so this sets how much each of those jobs moves. On an
+/// upload it also keeps every SFTP write full: russh-sftp splits writes into
+/// packets of at most `Config::max_write_packet_len` (32 KiB by default) and
+/// keeps up to 16 in flight, but sends a smaller packet whenever it is handed
+/// less, as it is by `tokio::io::copy`'s 8 KiB reads. With full packets an
+/// upload keeps about 512 KiB in flight instead of 128 KiB.
+const LOCAL_FILE_BUFFER: usize = 256 * 1024;
+
+/// Most symbolic links a download follows to find the file it writes, the
+/// same bound Linux puts on a path lookup.
+const MAX_LINKS: usize = 40;
 
 /// A directory entry returned by SFTP list operations.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -194,11 +211,7 @@ impl SftpConnection {
 
     /// Run `operation` until it finishes or the connection is closed.
     async fn until_closed<T>(&self, operation: impl Future<Output = Result<T>>) -> Result<T> {
-        self.closed
-            .guard(operation, || {
-                CoreError::Ssh("the SFTP session was closed".into())
-            })
-            .await
+        self.closed.guard(operation, session_closed).await
     }
 
     /// Stop every request, listing and transfer on this connection, end its
@@ -483,7 +496,8 @@ impl SftpManager {
     /// Stream a remote file directly to a local path. An existing local file is
     /// refused unless the caller explicitly opts in to overwrite, mirroring
     /// `upload_from_local`. A download waits for any other download to the same
-    /// local file, from any session, to finish first.
+    /// local file, from any session, to finish first, so of two downloads to
+    /// one file the one started last is the one left in place.
     pub async fn download_to_local(
         &self,
         session_id: &str,
@@ -493,24 +507,22 @@ impl SftpManager {
     ) -> Result<()> {
         let conn = self.get(session_id).await?;
 
-        conn.until_closed(async {
-            // Two downloads to one local file would otherwise truncate and
-            // write it at once, from any two sessions, leaving a mix of both
-            // that each reports as a success.
-            let destination = download_destination(local_path).await;
-            let _destination = claim(&self.downloads, destination).await;
-            let mut remote = conn
-                .sftp
-                .open(remote_path)
-                .await
-                .map_err(|e| CoreError::Ssh(format!("open remote file: {e}")))?;
-            let mut local = open_download_target(local_path, overwrite).await?;
-
-            tokio::io::copy(&mut remote, &mut local).await?;
-            local.flush().await?;
-            Ok(())
-        })
-        .await
+        let (_destination, mut remote) = conn
+            .until_closed(async {
+                let destination = download_destination(local_path).await;
+                let destination = claim(&self.downloads, destination).await;
+                let remote = conn
+                    .sftp
+                    .open(remote_path)
+                    .await
+                    .map_err(|e| CoreError::Ssh(format!("open remote file: {e}")))?;
+                Ok((destination, remote))
+            })
+            .await?;
+        // A close stops the download at any point before it is put in place
+        // but never cuts its cleanup short, so the staging file is always
+        // removed by the download itself.
+        write_download(&mut remote, local_path, overwrite, conn.closed.raised()).await
     }
 
     /// Stream a local file directly to the remote host. Existing remote files
@@ -540,7 +552,10 @@ impl SftpManager {
                 )));
             }
 
-            let mut local = tokio::fs::File::open(local_path).await?;
+            let mut local = tokio::io::BufReader::with_capacity(
+                LOCAL_FILE_BUFFER,
+                tokio::fs::File::open(local_path).await?,
+            );
             // Without `overwrite` the create is exclusive, so of two uploads to
             // one path the second is refused even when both passed the check
             // above before either had created the file.
@@ -564,7 +579,7 @@ impl SftpManager {
                 Err(e) => return Err(CoreError::Ssh(format!("create remote file: {e}"))),
             };
 
-            tokio::io::copy(&mut local, &mut remote).await?;
+            tokio::io::copy_buf(&mut local, &mut remote).await?;
             remote.flush().await?;
             remote.shutdown().await?;
             Ok(())
@@ -668,50 +683,707 @@ impl Default for SftpManager {
     }
 }
 
-/// Open the local file a download writes into. Without `overwrite` an existing
-/// file is refused; `create_new` checks and creates in one step, so a file that
-/// appears between a check and the open is refused too.
-async fn open_download_target(path: &Path, overwrite: bool) -> Result<tokio::fs::File> {
-    let mut options = tokio::fs::OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
-    } else {
-        options.create_new(true);
+/// The error every operation stopped by a close reports.
+fn session_closed() -> CoreError {
+    CoreError::Ssh("the SFTP session was closed".into())
+}
+
+/// Write a download to `target` without ever leaving a partial file under its
+/// name.
+///
+/// Every download is written to a staging file beside the target and put in
+/// place only once every byte is on disk, so a dropped connection, a server
+/// timeout, a closed session or the app quitting mid-transfer never leaves a
+/// file under the target's name that looks finished. A failed download removes
+/// only its own staging file, so it never takes a file that another download
+/// put at the same name.
+///
+/// With `overwrite`, whatever is at `target` is replaced, provided it is a
+/// regular file the user could also have written in place: one the user has
+/// no write access to, such as a file marked read-only, is refused rather than
+/// renamed over.
+/// The replacement keeps the replaced file's permission bits. It is still a
+/// new file, though, so other hard links to the old one keep the old content,
+/// its owner, extended attributes and Windows access control are its own, and
+/// replacing needs room for both copies until the rename. Without `overwrite`,
+/// an existing file is refused, and the download takes the name only if
+/// nothing else has taken it in the meantime.
+///
+/// A symbolic link is followed, even one whose file does not exist yet, so the
+/// file it names is written and the link stays a link, as writing through it
+/// would have done. `closed` resolving stops the download at any point before
+/// it is put in place; the cleanup still runs.
+async fn write_download<R: AsyncRead + Unpin + ?Sized>(
+    source: &mut R,
+    target: &Path,
+    overwrite: bool,
+    closed: impl Future<Output = ()>,
+) -> Result<()> {
+    let mut closed = std::pin::pin!(closed);
+    if !overwrite && tokio::fs::symlink_metadata(target).await.is_ok() {
+        return Err(already_exists(target));
     }
-    options.open(path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            CoreError::InvalidInput(format!("local file already exists: {}", path.display()))
-        } else {
-            e.into()
+    let target = follow_link(target).await;
+    let replaced = if overwrite {
+        replaceable(&target).await?
+    } else {
+        None
+    };
+
+    let staging = staging_path(&target);
+    let mut file = open_staging(&staging, replaced.is_some()).await?;
+    let copied = copy_until(source, &mut file, closed.as_mut()).await;
+    if let (Ok(()), Some(replaced)) = (&copied, &replaced) {
+        keep_permissions(&file, replaced).await;
+    }
+    close(file).await;
+
+    let published = match copied {
+        Err(error) => Err(error),
+        // A close that lands while the file is being made durable still stops
+        // the download, so nothing is put in place once the session is gone.
+        Ok(()) if has_resolved(closed.as_mut()).await => Err(session_closed()),
+        Ok(()) => publish(&staging, &target, overwrite).await,
+    };
+    if published.is_err() {
+        discard(&staging).await;
+        return published;
+    }
+    sync_directory_of(&target).await;
+    Ok(())
+}
+
+/// Copy `source` into `file` and make it durable, unless `closed` resolves
+/// first.
+async fn copy_until<R, F>(
+    source: &mut R,
+    file: &mut tokio::fs::File,
+    closed: Pin<&mut F>,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin + ?Sized,
+    F: Future<Output = ()>,
+{
+    let mut writer = tokio::io::BufWriter::with_capacity(LOCAL_FILE_BUFFER, &mut *file);
+    tokio::select! {
+        copied = tokio::io::copy(source, &mut writer) => {
+            copied?;
         }
+        () = closed => return Err(session_closed()),
+    }
+    writer.flush().await?;
+    drop(writer);
+    file.sync_all().await?;
+    Ok(())
+}
+
+/// Whether `future` has resolved, without waiting for it. Never called on a
+/// future that has already resolved.
+async fn has_resolved<F: Future<Output = ()>>(mut future: Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx).is_ready())).await
+}
+
+/// Close `file` once tokio has finished any write still in flight on it.
+/// Dropping a `tokio::fs::File` leaves the handle open until then, and the
+/// file is renamed or removed right after this.
+async fn close(mut file: tokio::fs::File) {
+    let _ = file.flush().await;
+    drop(file.try_into_std());
+}
+
+/// The path a write through `path` ends up at. A symbolic link is followed
+/// even when the file it names does not exist yet, since writing through it
+/// would create that file. A chain longer than `MAX_LINKS` is left as it is,
+/// so opening it fails the way the system reports a loop.
+async fn follow_link(path: &Path) -> PathBuf {
+    let mut path = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        let is_link = tokio::fs::symlink_metadata(&path)
+            .await
+            .is_ok_and(|meta| meta.file_type().is_symlink());
+        if !is_link {
+            break;
+        }
+        let Ok(next) = tokio::fs::read_link(&path).await else {
+            break;
+        };
+        // A relative link names a path from the directory holding the link;
+        // `join` keeps an absolute one as it is.
+        path = match path.parent() {
+            Some(dir) => dir.join(next),
+            None => next,
+        };
+    }
+    path
+}
+
+/// The file an overwrite of `target` replaces, if there is one.
+///
+/// Writing a file in place needs permission to write that file, while renaming
+/// over it needs permission only on its directory. The download is put in
+/// place by a rename, so the file is first opened for writing, and one the user
+/// could not have written is refused rather than replaced. Only a regular file
+/// is replaced.
+async fn replaceable(target: &Path) -> Result<Option<std::fs::Metadata>> {
+    let replaced = match tokio::fs::metadata(target).await {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !replaced.is_file() {
+        return Err(CoreError::InvalidInput(format!(
+            "not a regular file: {}",
+            target.display()
+        )));
+    }
+    tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(target)
+        .await
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("cannot write {}: {error}", target.display()),
+            )
+        })?;
+    Ok(Some(replaced))
+}
+
+fn already_exists(path: &Path) -> CoreError {
+    CoreError::InvalidInput(format!("local file already exists: {}", path.display()))
+}
+
+/// A fresh hidden name beside `target`. Only the start of the target's name
+/// is kept, so a name close to the file system's length limit still leaves
+/// room for the suffix.
+fn staging_path(target: &Path) -> PathBuf {
+    let name: String = target
+        .file_name()
+        .map(|n| n.to_string_lossy().chars().take(32).collect())
+        .unwrap_or_default();
+    target.with_file_name(format!(".{name}.{}.part", uuid::Uuid::new_v4()))
+}
+
+/// Create the staging file. One that replaces an existing file starts out
+/// readable by its owner only on Unix, so a private file being replaced is
+/// never readable by anyone else mid-download; a new download starts with the
+/// default permissions it keeps. On Windows both take the access control the
+/// directory passes on.
+async fn open_staging(path: &Path, private: bool) -> Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if private {
+        options.mode(0o600);
+    }
+    #[cfg(not(unix))]
+    let _ = private;
+    Ok(options.open(path).await?)
+}
+
+/// Give a replacement the permission bits of the file it replaces. Set-user-ID
+/// and set-group-ID are left off, as a write in place by anyone but root clears
+/// them. A failure is logged and the staging file stays owner-only, which is
+/// never more open than the original: some network and FUSE file systems
+/// refuse every mode change, and a complete download is not thrown away for it.
+#[cfg(unix)]
+async fn keep_permissions(file: &tokio::fs::File, replaced: &std::fs::Metadata) {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = replaced.permissions().mode() & 0o777;
+    if let Err(error) = file
+        .set_permissions(std::fs::Permissions::from_mode(mode))
+        .await
+    {
+        tracing::warn!("could not give a download the replaced file's permissions: {error}");
+    }
+}
+
+/// Windows has no permission bits to carry over, and a file that is read-only
+/// is refused before the download starts.
+#[cfg(not(unix))]
+async fn keep_permissions(_file: &tokio::fs::File, _replaced: &std::fs::Metadata) {}
+
+/// Put a finished staging file in place at `target`.
+///
+/// With `replace`, whatever is at `target` is replaced. Without it, the file
+/// takes the name only if nothing else has: a hard link refuses an existing
+/// name in the same step that creates it. A file system without hard links
+/// (FAT, exFAT, some network shares) gets a check followed by a rename
+/// instead, which leaves a short window in which a file created by someone
+/// else could be replaced.
+async fn publish(staging: &Path, target: &Path, replace: bool) -> Result<()> {
+    if replace {
+        return Ok(tokio::fs::rename(staging, target).await?);
+    }
+    match tokio::fs::hard_link(staging, target).await {
+        Ok(()) => {
+            discard(staging).await;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(already_exists(target))
+        }
+        Err(_) => {
+            if tokio::fs::symlink_metadata(target).await.is_ok() {
+                return Err(already_exists(target));
+            }
+            Ok(tokio::fs::rename(staging, target).await?)
+        }
+    }
+}
+
+/// Make the download's name durable as well as its bytes. A failure is
+/// logged: the download is already in place, and reporting it as failed would
+/// say the opposite.
+async fn sync_directory_of(target: &Path) {
+    let target = target.to_path_buf();
+    let synced = tokio::task::spawn_blocking(move || {
+        crate::fs_util::sync_parent_directory(&target).map_err(|error| (target, error))
     })
+    .await;
+    if let Ok(Err((target, error))) = synced {
+        tracing::warn!("saved {} but could not sync its directory: {error}", target.display());
+    }
+}
+
+/// Remove what a failed download wrote. A file that cannot be removed is
+/// logged, since the error the caller sees is the download's own.
+async fn discard(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("could not remove an incomplete download at {}: {error}", path.display());
+        }
+    }
 }
 
 #[cfg(test)]
 mod download_target_tests {
-    use super::open_download_target;
-    use tokio::io::AsyncWriteExt;
+    use super::write_download;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    /// Yields `data`, then fails the way a dropped connection does.
+    struct BrokenAfter(&'static [u8]);
+
+    impl AsyncRead for BrokenAfter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.0.is_empty() {
+                return Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()));
+            }
+            let n = self.0.len().min(buf.remaining());
+            buf.put_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
 
     #[tokio::test]
-    async fn an_existing_file_is_kept_unless_overwrite_is_chosen() {
+    async fn an_overwrite_replaces_the_file_only_once_complete() {
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("report.txt");
         std::fs::write(&path, "original").expect("write");
 
-        assert!(open_download_target(&path, false).await.is_err());
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
-
-        let mut file = open_download_target(&path, true).await.expect("overwrite");
-        file.write_all(b"new").await.expect("write");
-        file.flush().await.expect("flush");
-        assert_eq!(std::fs::read_to_string(&path).expect("read"), "new");
+        write_download(&mut &b"replacement"[..], &path, true, never())
+            .await
+            .expect("download");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "replacement");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
     }
 
     #[tokio::test]
-    async fn a_new_file_is_created_either_way() {
+    async fn a_failed_overwrite_keeps_the_original_and_no_partial_file() {
         let dir = tempfile::tempdir().expect("temp dir");
-        assert!(open_download_target(&dir.path().join("a"), false).await.is_ok());
-        assert!(open_download_target(&dir.path().join("b"), true).await.is_ok());
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+
+        assert!(write_download(&mut BrokenAfter(b"half of the"), &path, true, never())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// Fails after another download has renamed its finished file over the
+    /// path this one was writing.
+    struct ReplacedThenBroken(PathBuf);
+
+    impl AsyncRead for ReplacedThenBroken {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let other = self.0.with_extension("other");
+            std::fs::write(&other, "finished by another download").expect("write");
+            std::fs::rename(&other, &self.0).expect("rename");
+            Poll::Ready(Err(std::io::ErrorKind::ConnectionReset.into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_new_download_spares_a_file_that_replaced_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+
+        assert!(
+            write_download(&mut ReplacedThenBroken(path.clone()), &path, false, never())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the other download's file"),
+            "finished by another download"
+        );
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_new_download_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+
+        assert!(write_download(&mut BrokenAfter(b"half of the"), &path, false, never())
+            .await
+            .is_err());
+        assert!(entries(dir.path()).is_empty());
+    }
+
+    /// Yields `data` and notes whether anything was at `path` while it did.
+    struct WatchesName {
+        path: PathBuf,
+        data: &'static [u8],
+        saw_the_name: bool,
+    }
+
+    impl AsyncRead for WatchesName {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let this = &mut *self;
+            this.saw_the_name |= std::fs::symlink_metadata(&this.path).is_ok();
+            let n = this.data.len().min(buf.remaining());
+            buf.put_slice(&this.data[..n]);
+            this.data = &this.data[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A new download is staged too, so its name never holds a partial file:
+    /// not while it runs, and not if the app quits part way through.
+    #[tokio::test]
+    async fn a_new_download_takes_its_name_only_once_complete() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for (name, overwrite) in [("a.txt", false), ("b.txt", true)] {
+            let path = dir.path().join(name);
+            let mut source = WatchesName {
+                path: path.clone(),
+                data: b"complete",
+                saw_the_name: false,
+            };
+            write_download(&mut source, &path, overwrite, never())
+                .await
+                .expect("download");
+            assert!(!source.saw_the_name, "{name} existed mid-download");
+            assert_eq!(std::fs::read_to_string(&path).expect("read"), "complete");
+        }
+        assert_eq!(entries(dir.path()), ["a.txt", "b.txt"]);
+    }
+
+    /// Writes another file at `path` as the download starts, then yields
+    /// `data`.
+    struct NameTakenDuring {
+        path: Option<PathBuf>,
+        data: &'static [u8],
+    }
+
+    impl AsyncRead for NameTakenDuring {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if let Some(path) = self.path.take() {
+                std::fs::write(path, "finished by another download").expect("write");
+            }
+            let n = self.data.len().min(buf.remaining());
+            buf.put_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_download_without_overwrite_never_replaces_a_file_that_took_its_name() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        let mut source = NameTakenDuring {
+            path: Some(path.clone()),
+            data: b"this download",
+        };
+
+        assert!(write_download(&mut source, &path, false, never())
+            .await
+            .is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            "finished by another download"
+        );
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// Yields `data`, then never answers again, like a peer that went quiet.
+    struct StallsAfter(&'static [u8]);
+
+    impl AsyncRead for StallsAfter {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.0.is_empty() {
+                return Poll::Pending;
+            }
+            let n = self.0.len().min(buf.remaining());
+            buf.put_slice(&self.0[..n]);
+            self.0 = &self.0[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn never() -> std::future::Pending<()> {
+        std::future::pending()
+    }
+
+    fn soon() -> tokio::time::Sleep {
+        tokio::time::sleep(std::time::Duration::from_millis(200))
+    }
+
+    #[tokio::test]
+    async fn a_download_stopped_by_a_close_leaves_the_original_and_nothing_else() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+
+        let stopped = write_download(&mut StallsAfter(b"half of the"), &path, true, soon()).await;
+        assert!(stopped.is_err(), "the stalled download finished");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+
+        let fresh = dir.path().join("new.txt");
+        assert!(write_download(&mut StallsAfter(b"half of the"), &fresh, true, soon())
+            .await
+            .is_err());
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// Yields `data`, then reports the session closed as the data runs out.
+    struct ClosesAtTheEnd {
+        data: &'static [u8],
+        closed: Arc<AtomicBool>,
+    }
+
+    impl AsyncRead for ClosesAtTheEnd {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.data.is_empty() {
+                self.closed.store(true, Ordering::SeqCst);
+                return Poll::Ready(Ok(()));
+            }
+            let n = self.data.len().min(buf.remaining());
+            buf.put_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A close that arrives once every byte has been read still stops the
+    /// download, wherever it is in making the file durable.
+    #[tokio::test]
+    async fn a_close_after_the_last_byte_still_leaves_the_original() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+        let closed = Arc::new(AtomicBool::new(false));
+        let mut source = ClosesAtTheEnd {
+            data: b"replacement",
+            closed: closed.clone(),
+        };
+        let signal = std::future::poll_fn(move |_| {
+            if closed.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        });
+
+        assert!(write_download(&mut source, &path, true, signal).await.is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// The replacement takes the original's permissions, so a private file
+    /// stays private.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overwrite_keeps_the_original_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("id_backup");
+        std::fs::write(&path, "original").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        write_download(&mut &b"replacement"[..], &path, true, never())
+            .await
+            .expect("download");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// A write in place clears set-user-ID and set-group-ID, so a replacement
+    /// does not carry them over.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overwrite_does_not_carry_set_id_bits_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("tool");
+        std::fs::write(&path, "original").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o6755)).expect("chmod");
+
+        write_download(&mut &b"replacement"[..], &path, true, never())
+            .await
+            .expect("download");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o7777;
+        assert_eq!(mode, 0o755);
+    }
+
+    /// A new download ends up with the permissions any new file in that
+    /// directory gets.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_download_gets_the_default_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let reference = dir.path().join("reference");
+        std::fs::write(&reference, "").expect("write");
+        let path = dir.path().join("report.txt");
+
+        write_download(&mut &b"data"[..], &path, true, never())
+            .await
+            .expect("download");
+        let mode = |path: &std::path::Path| {
+            std::fs::metadata(path).expect("stat").permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&path), mode(&reference));
+    }
+
+    /// A file the user could not have written in place is refused. A rename
+    /// needs write access only to the directory, so it must not stand in for
+    /// a write the user has no permission for.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overwrite_refuses_a_file_the_user_cannot_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).expect("chmod");
+        // An account that may write any file, root for one, has nothing to be
+        // refused here.
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return;
+        }
+
+        assert!(write_download(&mut &b"replacement"[..], &path, true, never())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
+    }
+
+    /// Overwriting through a symbolic link replaces the file it names and
+    /// leaves the link in place.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overwrite_through_a_link_replaces_the_file_it_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let real = dir.path().join("real.txt");
+        let link = dir.path().join("link.txt");
+        std::fs::write(&real, "original").expect("write");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        write_download(&mut &b"replacement"[..], &link, true, never())
+            .await
+            .expect("download");
+        assert!(std::fs::symlink_metadata(&link).expect("lstat").file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&real).expect("read"), "replacement");
+        assert_eq!(entries(dir.path()), ["link.txt", "real.txt"]);
+    }
+
+    /// Writing through a link whose file does not exist yet creates that file,
+    /// as writing through it in place would.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_overwrite_through_a_dangling_link_creates_the_file_it_names() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink("real.txt", &link).expect("symlink");
+
+        write_download(&mut &b"replacement"[..], &link, true, never())
+            .await
+            .expect("download");
+        assert!(std::fs::symlink_metadata(&link).expect("lstat").file_type().is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("real.txt")).expect("read"),
+            "replacement"
+        );
+        assert_eq!(entries(dir.path()), ["link.txt", "real.txt"]);
+    }
+
+    #[tokio::test]
+    async fn an_overwrite_works_for_a_name_at_the_length_limit() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(format!("{}.txt", "n".repeat(251)));
+        std::fs::write(&path, "original").expect("write");
+
+        write_download(&mut &b"replacement"[..], &path, true, never())
+            .await
+            .expect("download");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "replacement");
+    }
+
+    #[tokio::test]
+    async fn a_download_without_overwrite_keeps_an_existing_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("report.txt");
+        std::fs::write(&path, "original").expect("write");
+
+        assert!(write_download(&mut &b"replacement"[..], &path, false, never())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "original");
+        assert_eq!(entries(dir.path()), ["report.txt"]);
     }
 }

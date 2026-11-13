@@ -1,10 +1,11 @@
 //! One misbehaving peer must hold up nothing but its own session.
 //!
 //! These run the SSH and SFTP managers against an in-process russh server on
-//! loopback whose SFTP side never finishes a directory listing and whose shell
-//! exits as soon as it starts, or stops reading its input, and check that other
-//! sessions, a close and the drain a vault reset relies on all carry on
-//! regardless, and that a close always ends the connection and frees its id.
+//! loopback whose SFTP side never finishes a directory listing and can be
+//! slowed to a stop, and whose shell exits as soon as it starts, or stops
+//! reading its input, and check that other sessions, a close and the drain a
+//! vault reset relies on all carry on regardless, and that a close always ends
+//! the connection and frees its id.
 
 use clavyn_core::host::Host;
 use clavyn_core::known_hosts::KnownHosts;
@@ -749,13 +750,37 @@ async fn an_overwrite_upload_waits_for_one_already_writing_the_same_path() {
     manager.close_all().await;
 }
 
+/// Whether a download to `target` has written data to the staging file it
+/// keeps beside the target until it is complete.
+fn staging_has_data(target: &std::path::Path) -> bool {
+    let prefix = format!(".{}.", target.file_name().expect("name").to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(target.parent().expect("parent")) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        name.starts_with(&prefix)
+            && name.ends_with(".part")
+            && entry.metadata().is_ok_and(|meta| meta.len() > 0)
+    })
+}
+
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_download_waits_for_one_already_writing_the_same_local_file() {
     let dir = tempfile::tempdir().expect("temp dir");
     let target = dir.path().join("data.bin");
     // Slow reads keep the large download writing while the small one starts.
     let sftp = EndlessDirectory {
-        read_delay: Duration::from_millis(2),
+        read_delay: Duration::from_millis(20),
         ..EndlessDirectory::default()
     };
     {
@@ -783,13 +808,14 @@ async fn a_download_waits_for_one_already_writing_the_same_local_file() {
         async move { manager.download_to_local("first", "/large.bin", &target, true).await }
     });
     let started = async {
-        while std::fs::metadata(&target).map_or(true, |meta| meta.len() == 0) {
+        while !staging_has_data(&target) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     };
     tokio::time::timeout(Duration::from_secs(10), started)
         .await
         .expect("the first download never started writing");
+    assert!(!first.is_finished(), "the first download ended before the second began");
     // Reached through a second spelling of the same directory, which a
     // comparison of the paths as given would take for another file.
     std::fs::create_dir(dir.path().join("sub")).expect("sub dir");
@@ -800,8 +826,7 @@ async fn a_download_waits_for_one_already_writing_the_same_local_file() {
 
     first.await.expect("download task").expect("first download");
     second.expect("second download");
-    // The second download replaced the first's file once it was complete,
-    // rather than truncating and writing it while the first still was.
+    // The second download, started last, is the one left in place, whole.
     let contents = std::fs::read(&target).expect("downloaded file");
     assert!(
         contents == [b'b'; 100],
@@ -809,5 +834,59 @@ async fn a_download_waits_for_one_already_writing_the_same_local_file() {
         contents.len(),
         contents.iter().filter(|&&byte| byte == b'a').count()
     );
+    let left = names_in(dir.path());
+    assert!(!left.iter().any(|name| name.ends_with(".part")), "{left:?}");
     manager.close_all().await;
+}
+
+/// Closing a session ends a download stuck behind a peer that went quiet, and
+/// leaves the file the download was replacing as it was.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_from_a_quiet_peer_ends_with_the_close_and_keeps_the_original() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let sftp = EndlessDirectory {
+        read_delay: Duration::from_secs(3600),
+        ..EndlessDirectory::default()
+    };
+    sftp.files
+        .lock()
+        .expect("files")
+        .insert("/report.txt".into(), b"from the server".to_vec());
+    let port = serve(TestServer {
+        sftp,
+        ..TestServer::default()
+    })
+    .await;
+    let manager = Arc::new(SftpManager::new());
+    manager
+        .connect("stuck".into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+        .await
+        .expect("sftp connect");
+
+    let downloads = tempfile::tempdir().expect("download dir");
+    let target = downloads.path().join("report.txt");
+    std::fs::write(&target, "original").expect("write");
+    let download = tokio::spawn({
+        let manager = manager.clone();
+        let target = target.clone();
+        async move {
+            manager
+                .download_to_local("stuck", "/report.txt", &target, true)
+                .await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!download.is_finished(), "the stalled download ended on its own");
+
+    tokio::time::timeout(Duration::from_secs(5), manager.close("stuck"))
+        .await
+        .expect("close waited on the download")
+        .expect("close");
+    let result = tokio::time::timeout(Duration::from_secs(2), download)
+        .await
+        .expect("the download outlived its session")
+        .expect("download task");
+    assert!(result.is_err());
+    assert_eq!(std::fs::read_to_string(&target).expect("read"), "original");
+    assert_eq!(names_in(downloads.path()), ["report.txt"]);
 }
