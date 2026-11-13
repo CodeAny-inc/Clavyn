@@ -6,7 +6,7 @@ import IdentityManager from "./IdentityManager.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
-import type { Identity } from "../types";
+import type { Host, Identity } from "../types";
 
 // The backend refuses a host or identity write whose native confirmation was
 // cancelled, and tags the error so the form can tell it from a failure.
@@ -130,6 +130,52 @@ describe("HostForm when a save is not confirmed", () => {
 
     answer(undefined);
     await vi.waitFor(() => expect(wrapper!.emitted("close")).toHaveLength(1));
+  });
+});
+
+describe("HostForm startup command", () => {
+  const saved: Host = {
+    id: "lab-host", label: "Lab", hostname: "lab.example.test", port: 22, username: "deploy",
+    auth: { password: { credential_key: "default" } }, tags: [],
+    startup_command: "cd /srv\ntmux attach",
+  };
+
+  function field() {
+    return document.querySelector<HTMLTextAreaElement>("#host-startup-command")!;
+  }
+
+  async function editAndSave(edit: () => void) {
+    setInvokeHandler("list_hosts", () => [saved]);
+    setInvokeHandler("update_host", ({ host }) => host);
+    await useHostsStore().load();
+    wrapper = mount(HostForm, { props: { host: saved }, attachTo: document.body });
+    await flushPromises();
+    edit();
+    button("Save changes")!.click();
+    await vi.waitFor(() => expect(wrapper!.emitted("close")).toHaveLength(1));
+    return (calls("update_host")[0][1] as { host: Host }).host;
+  }
+
+  it("shows the saved command, line breaks included", async () => {
+    wrapper = mount(HostForm, { props: { host: saved }, attachTo: document.body });
+    await flushPromises();
+    expect(field().value).toBe("cd /srv\ntmux attach");
+  });
+
+  it("sends the saved command back unchanged when something else is edited", async () => {
+    const host = await editAndSave(() => input("#host-label", "Lab 2"));
+    expect(host.label).toBe("Lab 2");
+    expect(host.startup_command).toBe("cd /srv\ntmux attach");
+  });
+
+  it("saves an edited command as typed, and an emptied one as none", async () => {
+    let host = await editAndSave(() => input("#host-startup-command", " uptime"));
+    expect(host.startup_command).toBe(" uptime");
+
+    wrapper!.unmount();
+    getInvokeMock().mockClear();
+    host = await editAndSave(() => input("#host-startup-command", "  \n"));
+    expect(host.startup_command).toBeNull();
   });
 });
 

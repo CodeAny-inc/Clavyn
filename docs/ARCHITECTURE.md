@@ -62,9 +62,12 @@ shell.
   dialog (`host_change_prompt.rs`) naming every such host: its account, its
   server and port, the key and the startup command. `core::store::Store`
   refuses that write unless the caller passes a confirmation covering it, so a
-  writer added later fails instead of granting one by accident. A startup
-  command alone is not asked about: a session to an allowed destination can
-  already run any command. The dialog and the host key dialogs share one slot,
+  writer added later fails instead of granting one by accident. A write that
+  gives a host a startup command it did not have, or changes it, is asked about
+  in the same dialog (`core::startup_command`): a stored command keeps running
+  on every later connect, after whatever wrote it is gone. Clearing one is not
+  asked about. The host form shows the command, so it is never a value the
+  user cannot see. The dialog and the host key dialogs share one slot,
   so only one is on screen at a time, and repeated Cancels hold the dialog off
   for longer each time.
 - Frontend (`desktop/src`) — minimal HTML/JS now; upgrade to a real

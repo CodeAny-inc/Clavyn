@@ -64,6 +64,11 @@ pub enum CoreError {
     )]
     UnconfirmedKeyReach,
 
+    /// A store write would give a host a startup command it did not have, and
+    /// that is not among what the user confirmed. Nothing was written.
+    #[error("this change sets a startup command that was not confirmed")]
+    UnconfirmedStartupCommand,
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 
