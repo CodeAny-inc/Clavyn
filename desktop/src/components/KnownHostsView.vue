@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { HOST_KEY_DECLINED, hasTag, untagged } from "../lib/confirmation";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
 import Button from "./ui/Button.vue";
@@ -73,16 +75,13 @@ function parseHostPort(entry: string): [string, number] {
 }
 
 // Cancelling the native confirmation is an answer, not a failure, so it is not
-// reported as one. The tag is set by the backend that raises it.
-const DECLINED = "[host-key-confirmation-declined]";
-
+// reported as one.
 async function run(error: { value: string }, action: () => Promise<void>) {
   error.value = "";
   try {
     await action();
   } catch (cause) {
-    const message = String(cause);
-    if (!message.includes(DECLINED)) error.value = message;
+    if (!hasTag(cause, HOST_KEY_DECLINED)) error.value = untagged(cause);
   }
   await load();
 }
@@ -93,7 +92,7 @@ async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
   // The key is retained, not erased, so this asks in the page. Erasing it is
   // "Forget permanently", which the backend confirms natively.
-  if (!confirm(`Remove known host "${entry.host}"?`)) return;
+  if (!(await confirmAction(`Remove known host "${entry.host}"?`))) return;
   await run(removeError, () => api.removeKnownHost(host, port));
 }
 

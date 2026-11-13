@@ -108,7 +108,8 @@ describe("IdentityManager", () => {
       await button("Add identity").trigger("click");
       await flushPromises();
 
-      expect(wrapper.get('[role="alert"]').text()).toContain("Failed to save identity: Error: disk full");
+      expect(wrapper.get('[role="alert"]').text()).toContain("Could not save: Error: disk full");
+      expect(wrapper.get('[role="alert"]').text()).toContain("The key you added is in your vault and stays there.");
       expect(wrapper.find("#id-label").exists()).toBe(true);
 
       await button("Add identity").trigger("click");

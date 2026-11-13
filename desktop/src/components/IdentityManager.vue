@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
@@ -27,6 +28,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { deleteFailure, isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
 const identities = useIdentitiesStore();
@@ -41,6 +43,8 @@ let formSession = 0;
 const editing = ref<Identity | null>(null);
 const showGroupForm = ref(false);
 const newGroupName = ref("");
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
 const saving = ref(false);
 const formError = ref("");
 const groupError = ref("");
@@ -53,6 +57,11 @@ const importKeyText = ref("");
 const importKeyPassphrase = ref("");
 const creatingKey = ref(false);
 const browsingFile = ref(false);
+// True once a key in this form was generated or imported rather than picked
+// from the vault. That key is in the vault whether or not the identity is
+// saved, so a failed save says so instead of leaving it to be found later in
+// the key list.
+const keyAdded = ref(false);
 
 const form = ref({
   label: "",
@@ -125,7 +134,7 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (confirm(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
     listError.value = "";
     try {
       await hosts.deleteGroup(groupId);
@@ -160,6 +169,7 @@ function addIdentity() {
   newKeyLabel.value = "";
   clearKeyMaterial();
   formError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -186,6 +196,7 @@ function editIdentity(id: Identity) {
   newKeyLabel.value = "";
   clearKeyMaterial();
   formError.value = "";
+  keyAdded.value = false;
   showForm.value = true;
 }
 
@@ -215,6 +226,7 @@ function adoptCreatedKey(keyId: string) {
   keyMode.value = "select";
   newKeyLabel.value = "";
   clearKeyMaterial();
+  keyAdded.value = true;
 }
 
 async function ensureKey(): Promise<string | null> {
@@ -274,7 +286,11 @@ async function save() {
   try {
     await saveIdentity();
   } catch (e) {
-    if (session === formSession) formError.value = `Failed to save identity: ${e}`;
+    if (session === formSession) {
+      formError.value = keyAdded.value
+        ? `${saveFailure(e)} The key you added is in your vault and stays there.`
+        : saveFailure(e);
+    }
   } finally {
     saving.value = false;
   }
@@ -312,13 +328,14 @@ async function saveIdentity() {
 }
 
 async function deleteIdentity(id: Identity) {
-  if (confirm(`Delete identity "${id.label}"?`)) {
-    listError.value = "";
-    try {
-      await identities.deleteIdentity(id.id);
-    } catch (e) {
-      listError.value = `Failed to delete identity: ${e}`;
-    }
+  if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
+  listError.value = "";
+  try {
+    await identities.deleteIdentity(id.id);
+  } catch (e) {
+    // Cancelling the native confirmation was the user's answer, and the
+    // identity is still listed, so there is nothing more to say.
+    if (!isDeclinedHostChange(e)) listError.value = deleteFailure(e);
   }
 }
 
@@ -653,11 +670,10 @@ function hostsUsingIdentity(identityId: string): number {
           <Label for="id-tags">Tags (comma-separated)</Label>
           <Input id="id-tags" v-model="form.tags" placeholder="work, production" />
         </FormGroup>
-
-        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
+        <p v-if="formError" role="alert" class="basis-full text-[12px] text-destructive">{{ formError }}</p>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
         <Button :disabled="!canSave || creatingKey || saving" @click="save">
           <Loader2 v-if="creatingKey" class="size-3.5 mr-1 animate-spin" :stroke-width="1.75" />

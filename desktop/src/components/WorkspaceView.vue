@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import { useWorkspacesStore } from "../stores/workspaces";
 import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
@@ -163,7 +164,7 @@ async function saveForm() {
 }
 
 async function remove(id: string, name: string) {
-  if (confirm(`Delete workspace "${name}"?`)) {
+  if (await confirmAction(`Delete workspace "${name}"?`)) {
     actionError.value = "";
     try {
       await workspaces.deleteWorkspace(id);

@@ -8,9 +8,11 @@ import Dialog from "./ui/Dialog.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Select from "./ui/Select.vue";
+import Textarea from "./ui/Textarea.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
 import { FolderPlus } from "lucide-vue-next";
+import { saveFailure } from "../lib/hostChange";
 import type { Host, AuthMethod } from "../types";
 
 const props = defineProps<{ host: Host | null }>();
@@ -23,8 +25,12 @@ const identities = useIdentitiesStore();
 
 const showInlineGroup = ref(false);
 const inlineGroupName = ref("");
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
 const saving = ref(false);
-const error = ref("");
+// One line for whatever last failed in this dialog: the save or the inline
+// new-group request.
+const saveError = ref("");
 
 const form = ref({
   label: "",
@@ -38,6 +44,7 @@ const form = ref({
   keyId: "",
   groupId: "",
   tags: "",
+  startupCommand: "",
 });
 
 watch(
@@ -64,6 +71,7 @@ watch(
         keyId: host.key_id || "",
         groupId: host.group_id || "",
         tags: host.tags.join(", "),
+        startupCommand: host.startup_command ?? "",
       };
     } else {
       form.value = {
@@ -78,6 +86,7 @@ watch(
         keyId: "",
         groupId: "",
         tags: "",
+        startupCommand: "",
       };
     }
   },
@@ -128,14 +137,14 @@ function buildAuth(): AuthMethod {
 
 async function createInlineGroup() {
   if (!inlineGroupName.value.trim()) return;
-  error.value = "";
+  saveError.value = "";
   try {
     const group = await hosts.addGroup(inlineGroupName.value.trim());
     form.value.groupId = group.id;
     inlineGroupName.value = "";
     showInlineGroup.value = false;
   } catch (e) {
-    error.value = `Failed to create group: ${e}`;
+    saveError.value = `Failed to create group: ${e}`;
   }
 }
 
@@ -160,25 +169,30 @@ async function save() {
       .split(",")
       .map((t) => t.trim())
       .filter(Boolean),
-    startup_command: props.host?.startup_command ?? null,
+    // Kept as typed: a leading space keeps the command out of shell history in
+    // many shells. A command of nothing but blanks is none.
+    startup_command: form.value.startupCommand.trim() ? form.value.startupCommand : null,
     proxy_command: props.host?.proxy_command ?? null,
     jump_host_id: props.host?.jump_host_id ?? null,
     identity_id: form.value.useIdentity ? form.value.identityId || null : null,
   };
   saving.value = true;
-  error.value = "";
+  saveError.value = "";
   try {
     if (props.host) {
       await hosts.updateHost(host);
     } else {
       await hosts.addHost(host);
     }
-    emit("close");
-  } catch (e) {
-    error.value = `Failed to save host: ${e}`;
+  } catch (cause) {
+    // The form stays open with what was typed, so the user can adjust it or
+    // try again.
+    saveError.value = saveFailure(cause);
+    return;
   } finally {
     saving.value = false;
   }
+  emit("close");
 }
 </script>
 
@@ -329,10 +343,23 @@ async function save() {
         <Input id="host-tags" v-model="form.tags" placeholder="production, web" />
       </FormGroup>
 
-      <p v-if="error" class="text-[12px] text-destructive" role="alert">{{ error }}</p>
+      <FormGroup>
+        <Label for="host-startup-command">Startup command (optional)</Label>
+        <Textarea
+          id="host-startup-command"
+          v-model="form.startupCommand"
+          :rows="2"
+          class="font-mono"
+          placeholder="tmux attach"
+        />
+        <p class="text-[11px] text-muted-foreground mt-1">
+          Typed into the shell every time you connect, once the shell is ready. Setting or changing it asks for your confirmation.
+        </p>
+      </FormGroup>
     </div>
 
     <template #footer>
+      <p v-if="saveError" role="alert" class="basis-full text-[12px] text-destructive">{{ saveError }}</p>
       <Button variant="ghost" @click="emit('close')">Cancel</Button>
       <Button :disabled="!isValid || saving" @click="save">
         {{ host ? "Save changes" : "Add host" }}

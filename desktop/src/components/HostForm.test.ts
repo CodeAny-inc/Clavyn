@@ -81,7 +81,7 @@ describe("HostForm", () => {
     await addButton().trigger("click");
     await flushPromises();
 
-    expect(wrapper.get('[role="alert"]').text()).toContain("Failed to save host: Error: disk full");
+    expect(wrapper.get('[role="alert"]').text()).toContain("Could not save: Error: disk full");
     expect(wrapper.emitted("close")).toBeUndefined();
     expect(addButton().attributes("disabled")).toBeUndefined();
   });
