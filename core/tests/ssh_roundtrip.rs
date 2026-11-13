@@ -12,23 +12,17 @@ use clavyn_core::host::Host;
 use clavyn_core::keys::{
     generate_ed25519, import_openssh_private, parse_openssh_private, KeyMeta, KeyType,
 };
-use clavyn_core::known_hosts::KnownHosts;
-use clavyn_core::session::SessionManager;
 use clavyn_core::vault::Vault;
 use clavyn_core::CoreError;
 use common::{copy_fixture, passphrase_protected_ed25519, PASSPHRASE};
+use common::loopback::{known_hosts, password_host, random_host_key, serve, server_config};
+use common::loopback::{PASSWORD, USER};
 use russh::keys::{decode_secret_key, parse_public_key_base64, Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId, ChannelMsg, Preferred};
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::time::Duration;
-use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
-const USER: &str = "deploy";
-const PASSWORD: &str = "correct password";
 const VAULT_PASSPHRASE: &str = "vault passphrase";
 
 #[derive(Clone)]
@@ -80,20 +74,6 @@ impl server::Handler for TestServer {
     }
 }
 
-fn random_host_key() -> PrivateKey {
-    let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-    PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("generate host key")
-}
-
-fn server_config(host_key: PrivateKey) -> server::Config {
-    server::Config {
-        keys: vec![host_key],
-        auth_rejection_time: Duration::from_millis(10),
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        ..Default::default()
-    }
-}
-
 /// Serves every connection on a fresh loopback port and returns that port.
 async fn start_server(host_key: PrivateKey, handler: TestServer) -> u16 {
     serve(server_config(host_key), handler).await
@@ -115,24 +95,6 @@ async fn start_server_offering(
     serve(config, handler).await
 }
 
-async fn serve<H: server::Handler + Clone + Send + 'static>(config: server::Config, handler: H) -> u16 {
-    let config = Arc::new(config);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let config = config.clone();
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, handler).await {
-                    let _ = running.await;
-                }
-            });
-        }
-    });
-    port
-}
-
 fn host(port: u16, auth: serde_json::Value, key_id: Option<String>) -> Host {
     serde_json::from_value(serde_json::json!({
         "id": "00000000-0000-0000-0000-000000000001",
@@ -147,20 +109,6 @@ fn host(port: u16, auth: serde_json::Value, key_id: Option<String>) -> Host {
     .expect("host")
 }
 
-fn password_host(port: u16) -> Host {
-    host(
-        port,
-        serde_json::json!({"password": {"credential_key": "unused"}}),
-        None,
-    )
-}
-
-fn known_hosts(dir: &TempDir) -> Arc<Mutex<KnownHosts>> {
-    Arc::new(Mutex::new(
-        KnownHosts::load(dir.path().join("known_hosts.json")).expect("load known hosts"),
-    ))
-}
-
 #[tokio::test]
 async fn password_auth_connects_and_pins_the_host_key() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -171,7 +119,8 @@ async fn password_auth_connects_and_pins_the_host_key() {
 
     let session = connect(&password_host(port), None, pins.clone(), None, None, Some(PASSWORD))
         .await
-        .expect("password auth");
+        .expect("password auth")
+        .handle;
 
     // The session carries data both ways.
     let mut channel = session.channel_open_session().await.expect("open channel");
@@ -390,120 +339,3 @@ async fn a_host_key_signed_only_with_sha1_is_refused() {
     assert!(pins.lock().await.list().is_empty());
 }
 
-
-/// Accepts the test password, records every window change it receives, and
-/// closes the channel on a window change to a width of `CLOSE_ON_COLS`.
-#[derive(Clone)]
-struct WindowChangeServer {
-    window_changes: Arc<std::sync::Mutex<Vec<(u32, u32)>>>,
-}
-
-const CLOSE_ON_COLS: u32 = 7;
-
-impl server::Handler for WindowChangeServer {
-    type Error = russh::Error;
-
-    async fn auth_password(&mut self, user: &str, password: &str) -> Result<Auth, Self::Error> {
-        Ok(if user == USER && password == PASSWORD {
-            Auth::Accept
-        } else {
-            Auth::reject()
-        })
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        _channel: Channel<Msg>,
-        reply: ChannelOpenHandle,
-        _session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        reply.accept().await;
-        Ok(())
-    }
-
-    async fn window_change_request(
-        &mut self,
-        channel: ChannelId,
-        cols: u32,
-        rows: u32,
-        _pix_width: u32,
-        _pix_height: u32,
-        session: &mut Session,
-    ) -> Result<(), Self::Error> {
-        self.window_changes
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push((cols, rows));
-        if cols == CLOSE_ON_COLS {
-            session.close(channel)?;
-        }
-        Ok(())
-    }
-}
-
-/// `resize` reports success only for a window change that went to the server,
-/// in the order asked, and an error once the session's channel is gone. The
-/// terminal skips sizes it has already sent on the strength of that success.
-#[tokio::test]
-async fn resizes_reach_the_server_in_order_and_fail_once_the_channel_is_gone() {
-    let dir = tempfile::tempdir().expect("temp dir");
-    let window_changes = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let port = serve(
-        server_config(random_host_key()),
-        WindowChangeServer { window_changes: window_changes.clone() },
-    )
-    .await;
-    let closed = Arc::new(tokio::sync::Notify::new());
-    let on_close = closed.clone();
-    let sessions = SessionManager::new(
-        Arc::new(|_, _| {}),
-        Arc::new(move |_, _| on_close.notify_one()),
-    );
-    let claim = sessions.claim("pane").expect("claim");
-    sessions
-        .create_ssh_session(
-            &claim,
-            &password_host(port),
-            None,
-            known_hosts(&dir),
-            None,
-            None,
-            Some(PASSWORD),
-            80,
-            24,
-        )
-        .await
-        .expect("open session");
-
-    sessions.resize("pane", 120, 40).await.expect("first resize");
-    sessions.resize("pane", 100, 30).await.expect("second resize");
-    let seen = |count: usize| {
-        let window_changes = window_changes.clone();
-        async move {
-            loop {
-                let changes = window_changes.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if changes.len() >= count {
-                    return changes;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        }
-    };
-    let changes = tokio::time::timeout(Duration::from_secs(10), seen(2))
-        .await
-        .expect("server saw both window changes");
-    assert_eq!(changes, vec![(120, 40), (100, 30)]);
-
-    sessions
-        .resize("pane", CLOSE_ON_COLS, 24)
-        .await
-        .expect("resize that makes the server close the channel");
-    tokio::time::timeout(Duration::from_secs(10), closed.notified())
-        .await
-        .expect("session announced its close");
-    let error = sessions
-        .resize("pane", 90, 30)
-        .await
-        .expect_err("a resize after the channel closed was reported as sent");
-    assert!(matches!(error, CoreError::Ssh(_)), "{error}");
-}

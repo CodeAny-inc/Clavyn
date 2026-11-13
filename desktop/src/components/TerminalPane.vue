@@ -129,13 +129,15 @@ function sessionLive(sessionId: string | null): sessionId is string {
 }
 // Every resize reaches the remote as a window-change and the shell redraws, so
 // only a size the session is not known to have is sent. The known size is the
-// one the session was created with, then each size a resize confirmed; the
-// backend confirms only once the change has gone out, so a lost one is never
-// taken as applied. Resizes go out one at a time, because two in flight could
-// land in either order and leave the remote at the older size, and while one is
-// in flight only the newest size is kept. A failed resize forgets the known
-// size and is retried a few times with backoff, since nothing else refits a
-// pane whose geometry has stopped changing.
+// one the session was created with, then each size the backend accepted. The
+// backend takes a size without waiting on the peer, and an SSH session's
+// resizer task delivers the newest one when the connection allows, so an
+// accepted size is the backend's to deliver. Resizes go out one at a time,
+// because two in flight could be handled in either order and leave the remote
+// at the older size, and while one is in flight only the newest size is kept.
+// A failed resize forgets the known size and is retried a few times with
+// backoff, since nothing else refits a pane whose geometry has stopped
+// changing.
 type TerminalSize = { cols: number; rows: number };
 const RESIZE_RETRY_MS = 250;
 const RESIZE_RETRY_LIMIT = 3;
