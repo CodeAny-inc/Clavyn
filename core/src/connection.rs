@@ -6,7 +6,7 @@ use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::{self, Config, Handle};
 use russh::keys::{
-    decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg,
+    decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg, PublicKey,
     PublicKeyOrCertificate,
 };
 use russh::{mac, Channel, ChannelId, Preferred};
@@ -103,15 +103,84 @@ fn timed_out(stage: &str, addr: &str) -> CoreError {
 /// On first sight: record + accept. On match: accept. On mismatch: reject with
 /// `CoreError::HostKeyMismatch`, which russh propagates out of `connect` as the
 /// handler's own error type instead of the generic "unknown key" failure.
+///
+/// The check runs in `kex_done`, not in `check_server_key`: a pin records the
+/// host-key algorithm negotiated for the key, and only `kex_done` is told it.
+/// russh calls `check_server_key` first on the initial key exchange, with the
+/// bare key. The key is held until `kex_done` and checked there.
+///
+/// That ordering cannot let an unchecked key through. `client::connect_stream`
+/// hands out its `Handle`, which every authentication request goes through,
+/// only once `kex_done` has returned `Ok`, and an error from `kex_done` is the
+/// error `connect_stream` returns. A russh that called the two hooks in the
+/// other order would find no held key in `kex_done` and refuse every
+/// connection instead of skipping the check.
 pub struct SshHandler {
     host: String,
     port: u16,
     known_hosts: Arc<Mutex<KnownHosts>>,
-    /// The RSA hash of the host-key algorithm negotiated in the current key
-    /// exchange, `None` for any other key type. russh hands `check_server_key`
-    /// the bare key without it, so it is taken from `kex_done`, which russh
-    /// calls first with every negotiated algorithm.
-    host_key_hash: Option<HashAlg>,
+    /// The plain host key the server presented in the initial key exchange,
+    /// kept until `kex_done` checks it.
+    presented_key: Option<PublicKey>,
+    /// Whether a host key has passed the check on this connection. Later key
+    /// exchanges are rekeys, which present no key for `kex_done` to check.
+    host_key_checked: bool,
+}
+
+impl SshHandler {
+    fn new(host: String, port: u16, known_hosts: Arc<Mutex<KnownHosts>>) -> Self {
+        Self {
+            host,
+            port,
+            known_hosts,
+            presented_key: None,
+            host_key_checked: false,
+        }
+    }
+
+    /// Check the held host key against the pin, recording it on first use under
+    /// `hash`, the RSA hash of the host-key algorithm negotiated for it (`None`
+    /// for any other key type).
+    ///
+    /// A key exchange that ends without a held key is accepted only as a rekey
+    /// of a connection whose key has already passed; otherwise the server
+    /// finished the exchange without presenting a host key at all, which is
+    /// refused.
+    async fn check_presented_key(&mut self, hash: Option<HashAlg>) -> Result<()> {
+        let Some(key) = self.presented_key.take() else {
+            if self.host_key_checked {
+                return Ok(());
+            }
+            return Err(CoreError::Ssh(format!(
+                "connect {}:{}: the key exchange finished without the server presenting a \
+                 host key",
+                self.host, self.port
+            )));
+        };
+        let mut kh = self.known_hosts.lock().await;
+        if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, &key) {
+            // Hold the key so the user can accept this exact one after comparing
+            // fingerprints; unpinning the host would trust whatever answers next.
+            kh.hold_presented_key(&self.host, self.port, &key, hash);
+            tracing::warn!(
+                "host key mismatch for {}:{} — rejecting",
+                self.host,
+                self.port
+            );
+            return Err(mismatch);
+        }
+        // `verify` refuses only a key `check_mismatch` rejects, and that was
+        // ruled out above under the same lock. The refusal stays as a
+        // backstop so a change in `verify` cannot turn into acceptance.
+        if !kh.verify(&self.host, self.port, &key, hash)? {
+            return Err(CoreError::Ssh(format!(
+                "connect {}:{}: the host key was not accepted",
+                self.host, self.port
+            )));
+        }
+        self.host_key_checked = true;
+        Ok(())
+    }
 }
 
 impl client::Handler for SshHandler {
@@ -123,11 +192,11 @@ impl client::Handler for SshHandler {
         names: &russh::Names,
         _session: &mut client::Session,
     ) -> std::result::Result<(), Self::Error> {
-        self.host_key_hash = match names.key {
+        let hash = match names.key {
             Algorithm::Rsa { hash } => hash,
             _ => None,
         };
-        Ok(())
+        self.check_presented_key(hash).await
     }
 
     async fn check_server_key(
@@ -156,19 +225,10 @@ impl client::Handler for SshHandler {
                 )));
             }
         };
-        let mut kh = self.known_hosts.lock().await;
-        if let Err(mismatch) = kh.check_mismatch(&self.host, self.port, server_public_key) {
-            // Hold the key so the user can accept this exact one after comparing
-            // fingerprints; unpinning the host would trust whatever answers next.
-            kh.hold_presented_key(&self.host, self.port, server_public_key, self.host_key_hash);
-            tracing::warn!(
-                "host key mismatch for {}:{} — rejecting",
-                self.host,
-                self.port
-            );
-            return Err(mismatch);
-        }
-        kh.verify(&self.host, self.port, server_public_key, self.host_key_hash)
+        // Answering `true` only lets the key exchange reach `kex_done`, which
+        // checks this key before the connection can be used; see `SshHandler`.
+        self.presented_key = Some(server_public_key.clone());
+        Ok(true)
     }
 
     // Clavyn never requests agent or X11 forwarding, remote port forwards or
@@ -434,18 +494,14 @@ pub async fn connect(
         ));
     }
 
-    let handler = SshHandler {
-        host: host.hostname.clone(),
-        port: host.port,
-        known_hosts,
-        host_key_hash: None,
-    };
+    let handler = SshHandler::new(host.hostname.clone(), host.port, known_hosts);
 
     let addr = format!("{}:{}", host.hostname, host.port);
     // A changed host key keeps its own error variant: wrapping it in a generic
     // connect failure would hide the two fingerprints that make the change
-    // legible. `CoreError::Ssh` only reaches here from `check_server_key`, which
-    // already names the address, so it is passed through unwrapped too.
+    // legible. `CoreError::Ssh` only reaches here from the handler's host key
+    // checks, which already name the address, so it is passed through
+    // unwrapped too.
     let opened = async {
         let config = client_config();
         let socket = tokio::net::TcpStream::connect(&addr)
@@ -563,12 +619,8 @@ mod tests {
     /// russh server can only open the channel types russh knows.
     #[tokio::test]
     async fn channel_types_russh_has_no_hook_for_are_refused() {
-        let mut handler = SshHandler {
-            host: "must-not-connect.example.test".into(),
-            port: 22,
-            known_hosts: known_hosts(),
-            host_key_hash: None,
-        };
+        let mut handler =
+            SshHandler::new("must-not-connect.example.test".into(), 22, known_hosts());
         let id = ChannelId::decode(&mut &[0, 0, 0, 7][..]).unwrap();
         assert!(
             !handler
@@ -583,6 +635,82 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         Arc::new(Mutex::new(KnownHosts::load(path).unwrap()))
+    }
+
+    const PINNED_HOST: &str = "pin.example.test";
+
+    fn server_key() -> PublicKey {
+        let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
+        russh::keys::PrivateKey::random(&mut rng, Algorithm::Ed25519)
+            .expect("generate")
+            .public_key()
+            .clone()
+    }
+
+    fn pin_handler(known_hosts: Arc<Mutex<KnownHosts>>) -> SshHandler {
+        SshHandler::new(PINNED_HOST.into(), 22, known_hosts)
+    }
+
+    /// A key exchange that finishes without the server presenting a host key
+    /// is refused, not waved through: the check is the only thing standing
+    /// between the connection and authentication.
+    #[tokio::test]
+    async fn a_key_exchange_that_presents_no_host_key_is_refused() {
+        let mut handler = pin_handler(known_hosts());
+
+        let error = handler
+            .check_presented_key(None)
+            .await
+            .expect_err("no host key was presented");
+
+        assert!(matches!(error, CoreError::Ssh(_)), "{error}");
+        assert!(!handler.host_key_checked);
+    }
+
+    /// The first use of a key pins it, and a later key exchange on the same
+    /// connection, a rekey, presents no key and is accepted because one has
+    /// already passed.
+    #[tokio::test]
+    async fn a_presented_key_is_pinned_and_a_later_rekey_needs_no_key() {
+        let pins = known_hosts();
+        let key = server_key();
+        let mut handler = pin_handler(pins.clone());
+        handler.presented_key = Some(key.clone());
+
+        handler.check_presented_key(None).await.expect("first use");
+
+        assert!(handler.host_key_checked);
+        pins.lock()
+            .await
+            .check_mismatch(PINNED_HOST, 22, &key)
+            .expect("the key is pinned");
+        handler.check_presented_key(None).await.expect("rekey");
+    }
+
+    /// A key that differs from the pin is refused and held for review, the pin
+    /// is left alone, and the connection is not marked as checked.
+    #[tokio::test]
+    async fn a_presented_key_that_differs_from_the_pin_is_refused_and_held() {
+        let pins = known_hosts();
+        let pinned = server_key();
+        pins.lock()
+            .await
+            .verify(PINNED_HOST, 22, &pinned, None)
+            .expect("pin");
+        let mut handler = pin_handler(pins.clone());
+        handler.presented_key = Some(server_key());
+
+        let error = handler
+            .check_presented_key(None)
+            .await
+            .expect_err("a different key");
+
+        assert!(matches!(error, CoreError::HostKeyMismatch { .. }), "{error}");
+        assert!(!handler.host_key_checked);
+        let pins = pins.lock().await;
+        pins.check_mismatch(PINNED_HOST, 22, &pinned)
+            .expect("the original pin is kept");
+        assert_eq!(pins.pending_changes().len(), 1);
     }
 
     fn host(auth: serde_json::Value, identity_id: Option<&str>) -> Host {
