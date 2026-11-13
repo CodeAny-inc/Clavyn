@@ -132,6 +132,58 @@ describe("session output acknowledgement", () => {
     expect(acks()).toEqual([]);
   });
 
+  it("holds a batch's credit until its handler's promise settles", async () => {
+    let parsed!: () => void;
+    const channel = sessionOutput("s1", () => new Promise<void>(resolve => { parsed = resolve; }), vi.fn());
+    channel.onmessage(frame(OUTPUT_ACK_THRESHOLD));
+    vi.advanceTimersByTime(OUTPUT_ACK_DELAY_MS * 10);
+    expect(acks()).toEqual([]);
+
+    parsed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(acks()).toEqual([{ sessionId: "s1", bytes: OUTPUT_ACK_THRESHOLD }]);
+  });
+
+  it("releases a batch whose handler's promise rejects", async () => {
+    const channel = sessionOutput("s1", () => Promise.reject(new Error("not written")), vi.fn());
+    channel.onmessage(frame(10));
+    await vi.advanceTimersByTimeAsync(OUTPUT_ACK_DELAY_MS);
+    expect(acks()).toEqual([{ sessionId: "s1", bytes: 10 }]);
+  });
+
+  it("keeps delivering in order after a handler throws, and releases what it threw on", () => {
+    // The mock channel orders frames the way Tauri's does: a frame counts as
+    // delivered only once its handler returns.
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const onData = vi.fn().mockImplementationOnce(() => {
+      throw new Error("write data discarded, use flow control to avoid losing data");
+    });
+    const onEnd = vi.fn();
+    const channel = sessionOutput("s1", onData, onEnd) as unknown as {
+      receive(message: ArrayBuffer, index: number): void;
+    };
+    expect(() => channel.receive(frame(10), 0)).not.toThrow();
+    channel.receive(frame(5), 1);
+    expect(onData).toHaveBeenCalledTimes(2);
+
+    vi.advanceTimersByTime(OUTPUT_ACK_DELAY_MS);
+    expect(acks()).toEqual([{ sessionId: "s1", bytes: 15 }]);
+    channel.receive(new ArrayBuffer(0), 2);
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("does not acknowledge a batch released after the stream ended", async () => {
+    let parsed!: () => void;
+    const channel = sessionOutput("s1", () => new Promise<void>(resolve => { parsed = resolve; }), vi.fn());
+    channel.onmessage(frame(10));
+    channel.onmessage(new ArrayBuffer(0));
+    parsed();
+    await vi.advanceTimersByTimeAsync(OUTPUT_ACK_DELAY_MS * 10);
+    expect(acks()).toEqual([]);
+  });
+
   it("swallows a failed acknowledgement", async () => {
     setInvokeHandler("session_output_ack", () => Promise.reject(new Error("backend gone")));
     const { onData, deliver } = open();

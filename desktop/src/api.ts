@@ -66,6 +66,13 @@ export const pickKeyFile = () => invoke<string | null>("pick_key_file");
  */
 export type SessionOutput = Channel<ArrayBuffer>;
 
+/**
+ * Receives one batch of a session's output. Returning a promise keeps the
+ * batch counted against the session's window until the promise settles;
+ * returning nothing releases it at once.
+ */
+export type OutputHandler = (bytes: Uint8Array) => void | PromiseLike<unknown>;
+
 /** Received output that is acknowledged at once rather than on the timer. */
 export const OUTPUT_ACK_THRESHOLD = 256 * 1024;
 /** Longest received output waits to be acknowledged below the threshold. */
@@ -74,10 +81,10 @@ export const OUTPUT_ACK_DELAY_MS = 30;
 export const OUTPUT_ACK_MAX_RETRY_MS = 2000;
 
 /**
- * Reports output bytes as received. An SSH session stops reading from its
- * connection while too much of its output is unacknowledged, so a webview that
- * falls behind slows the remote end down rather than letting undelivered
- * output pile up in the IPC layer. Local terminals ignore it.
+ * Reports output bytes as consumed. A session stops reading its connection or
+ * PTY while too much of its output is unacknowledged, so a webview that falls
+ * behind slows the producer down rather than letting undelivered output pile up
+ * in the IPC layer or the emulator.
  */
 export const sessionOutputAck = (sessionId: string, bytes: number) =>
   invoke<void>("session_output_ack", { sessionId, bytes });
@@ -92,17 +99,20 @@ export const sessionOutputAck = (sessionId: string, bytes: number) =>
  * signal that says no more output is coming; the `session-closed` event carries
  * no index and can overtake output that is still in flight.
  *
- * Every batch is acknowledged on receipt, whether or not the pane still wants
- * it: the backend meters what the IPC layer holds, not what the emulator
- * renders. Acknowledgements are coalesced, going out once
- * `OUTPUT_ACK_THRESHOLD` bytes are pending or `OUTPUT_ACK_DELAY_MS` after the
- * first unacknowledged batch, so a trickle of output never leaves credit
- * stranded. Nothing is acknowledged once the stream has ended; the session is
- * gone by then.
+ * Every batch is acknowledged once `onData` is done with it, so the backend's
+ * window covers both the IPC layer and whatever the pane still holds. A batch
+ * whose handler returns a promise is acknowledged when the promise settles: the
+ * terminal pane returns one that settles once xterm has parsed the bytes, which
+ * keeps xterm's write buffer, which throws past its own limit, within the
+ * window. Any other batch is acknowledged on receipt. Acknowledgements are
+ * coalesced, going out once `OUTPUT_ACK_THRESHOLD` bytes are pending or
+ * `OUTPUT_ACK_DELAY_MS` after the first unacknowledged batch, so a trickle of
+ * output never leaves credit stranded. Nothing is acknowledged once the stream
+ * has ended; the session is gone by then.
  */
 export function sessionOutput(
   sessionId: string,
-  onData: (bytes: Uint8Array) => void,
+  onData: OutputHandler,
   onEnd: () => void,
 ): SessionOutput {
   const channel: SessionOutput = new Channel();
@@ -138,19 +148,40 @@ export function sessionOutput(
       },
     );
   };
+  const release = (bytes: number) => {
+    if (ended) return;
+    pending += bytes;
+    if (pending >= OUTPUT_ACK_THRESHOLD) acknowledge();
+    else if (timer === null) timer = setTimeout(acknowledge, OUTPUT_ACK_DELAY_MS);
+  };
+  // The channel delivers frames in order and counts a frame as delivered only
+  // once its handler returns, so a handler that throws parks every later frame,
+  // the end of the stream included, for good. A failing handler is reported
+  // and its batch released instead.
   channel.onmessage = (message) => {
     const bytes = new Uint8Array(message);
     if (bytes.length === 0) {
       ended = true;
       stopTimer();
       pending = 0;
-      onEnd();
+      try {
+        onEnd();
+      } catch (cause) {
+        console.error("Session output end handler failed:", cause);
+      }
       return;
     }
-    pending += bytes.length;
-    if (pending >= OUTPUT_ACK_THRESHOLD) acknowledge();
-    else if (timer === null) timer = setTimeout(acknowledge, OUTPUT_ACK_DELAY_MS);
-    onData(bytes);
+    let held: void | PromiseLike<unknown> = undefined;
+    try {
+      held = onData(bytes);
+    } catch (cause) {
+      console.error("Session output handler failed:", cause);
+    }
+    if (held && typeof held.then === "function") {
+      held.then(() => release(bytes.length), () => release(bytes.length));
+    } else {
+      release(bytes.length);
+    }
   };
   return channel;
 }
