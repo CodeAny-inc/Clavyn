@@ -31,6 +31,7 @@ pub mod known_hosts;
 pub mod output;
 pub mod session;
 pub mod sftp;
+pub mod startup_command;
 pub mod store;
 pub mod transport;
 pub mod vault;

@@ -8,6 +8,7 @@ import Dialog from "./ui/Dialog.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Select from "./ui/Select.vue";
+import Textarea from "./ui/Textarea.vue";
 import FormGroup from "./ui/FormGroup.vue";
 import Label from "./ui/Label.vue";
 import { FolderPlus } from "lucide-vue-next";
@@ -41,6 +42,7 @@ const form = ref({
   keyId: "",
   groupId: "",
   tags: "",
+  startupCommand: "",
 });
 
 watch(
@@ -67,6 +69,7 @@ watch(
         keyId: host.key_id || "",
         groupId: host.group_id || "",
         tags: host.tags.join(", "),
+        startupCommand: host.startup_command ?? "",
       };
     } else {
       form.value = {
@@ -81,6 +84,7 @@ watch(
         keyId: "",
         groupId: "",
         tags: "",
+        startupCommand: "",
       };
     }
   },
@@ -150,7 +154,9 @@ async function save() {
       .split(",")
       .map((t) => t.trim())
       .filter(Boolean),
-    startup_command: props.host?.startup_command ?? null,
+    // Kept as typed: a leading space keeps the command out of shell history in
+    // many shells. A command of nothing but blanks is none.
+    startup_command: form.value.startupCommand.trim() ? form.value.startupCommand : null,
     proxy_command: props.host?.proxy_command ?? null,
     jump_host_id: props.host?.jump_host_id ?? null,
     identity_id: form.value.useIdentity ? form.value.identityId || null : null,
@@ -317,6 +323,20 @@ async function save() {
       <FormGroup>
         <Label for="host-tags">Tags (comma-separated)</Label>
         <Input id="host-tags" v-model="form.tags" placeholder="production, web" />
+      </FormGroup>
+
+      <FormGroup>
+        <Label for="host-startup-command">Startup command (optional)</Label>
+        <Textarea
+          id="host-startup-command"
+          v-model="form.startupCommand"
+          :rows="2"
+          class="font-mono"
+          placeholder="tmux attach"
+        />
+        <p class="text-[11px] text-muted-foreground mt-1">
+          Typed into the shell every time you connect, once the shell is ready. Setting or changing it asks for your confirmation.
+        </p>
       </FormGroup>
     </div>
 

@@ -6,10 +6,9 @@
 //! something the user has to confirm outside the page. This module decides
 //! which writes do, by comparing what the store allows before and after.
 //!
-//! A host's startup command is not part of the permission. Once a vault key
-//! signs in somewhere, the page can open a session there and type whatever it
-//! likes, so a command on its own grants nothing new. It travels with a new
-//! reach only so the confirmation can show what will run on arrival.
+//! A host's startup command is not part of the permission: whether a command
+//! needs confirming is decided on its own, by `startup_command`. It travels
+//! with a new reach so the confirmation can show what will run on arrival.
 
 use crate::connection::credentials;
 use crate::host::{AuthMethod, Host};

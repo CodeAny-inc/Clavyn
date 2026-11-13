@@ -9,7 +9,7 @@ use russh::keys::{
     decode_secret_key, Algorithm, EcdsaCurve, HashAlg, PrivateKeyWithHashAlg,
     PublicKeyOrCertificate,
 };
-use russh::{mac, Preferred};
+use russh::{mac, Channel, ChannelId, Preferred};
 use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, PoisonError};
@@ -170,6 +170,115 @@ impl client::Handler for SshHandler {
         }
         kh.verify(&self.host, self.port, server_public_key, self.host_key_hash)
     }
+
+    // Clavyn never requests agent or X11 forwarding, remote port forwards or
+    // anything else a server could legitimately open a channel back for, so
+    // every server-initiated channel is refused, types russh has no hook for
+    // included. Each refusal is spelled out here rather than left to russh's
+    // defaults, so it does not move with a dependency upgrade: those defaults
+    // accept every typed channel, and an accepted channel nobody reads stays in
+    // the connection's channel table for as long as the session lives, so a
+    // server could keep opening them for free.
+
+    async fn should_accept_unknown_server_channel(
+        &mut self,
+        _id: ChannelId,
+        _channel_type: &str,
+    ) -> bool {
+        false
+    }
+
+    async fn server_channel_open_unknown(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _connected_address: &str,
+        _connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_forwarded_streamlocal(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_agent_forward(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_session(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_direct_streamlocal(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _socket_path: &str,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+
+    async fn server_channel_open_x11(
+        &mut self,
+        _channel: Channel<client::Msg>,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> std::result::Result<(), Self::Error> {
+        refuse(reply).await
+    }
+}
+
+/// Decline a channel the server tried to open.
+async fn refuse(reply: client::ChannelOpenHandle) -> Result<()> {
+    reply
+        .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+        .await;
+    Ok(())
 }
 
 /// Extra context for a key-exchange failure, which russh surfaces as the bare
@@ -446,6 +555,27 @@ pub async fn connect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use russh::client::Handler as _;
+    use russh::keys::ssh_key::encoding::Decode;
+
+    /// A channel type russh has no hook for is refused whatever russh's own
+    /// default for it is. An end-to-end check cannot cover this, because a
+    /// russh server can only open the channel types russh knows.
+    #[tokio::test]
+    async fn channel_types_russh_has_no_hook_for_are_refused() {
+        let mut handler = SshHandler {
+            host: "must-not-connect.example.test".into(),
+            port: 22,
+            known_hosts: known_hosts(),
+            host_key_hash: None,
+        };
+        let id = ChannelId::decode(&mut &[0, 0, 0, 7][..]).unwrap();
+        assert!(
+            !handler
+                .should_accept_unknown_server_channel(id, "tun@openssh.com")
+                .await
+        );
+    }
 
     fn known_hosts() -> Arc<Mutex<KnownHosts>> {
         let path = std::env::temp_dir().join(format!(
