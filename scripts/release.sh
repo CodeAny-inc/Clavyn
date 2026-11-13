@@ -204,10 +204,14 @@ if [[ "$DRY_RUN" == "false" ]]; then
   # Use --private-key (string) + --password instead of --private-key-path.
   # The latter triggers an interactive password prompt even when the key has
   # no password, which fails in non-interactive environments (no tty).
+  # `--app-version` binds the signature to this release's version. The app
+  # sets `requireSignedVersion`, so it refuses a signature without one, or
+  # one whose version differs from what latest.json announces.
   cd desktop
   npx @tauri-apps/cli signer sign \
     --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
     --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
+    --app-version "$VERSION" \
     "$TARBALL" 2>/dev/null
   cd "$ROOT"
   ok "Signed: $(basename "$SIG_FILE")"

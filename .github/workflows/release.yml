@@ -313,7 +313,7 @@ jobs:
     steps:
       - name: Build the Tauri signer
         run: |
-          cargo install tauri-cli --version 2.11.4 --locked --root "$RUNNER_TEMP/tauri-cli"
+          cargo install tauri-cli --version 2.12.3 --locked --root "$RUNNER_TEMP/tauri-cli"
           install -m 755 "$RUNNER_TEMP/tauri-cli/bin/cargo-tauri" "$RUNNER_TEMP/cargo-tauri"
 
       - name: Publish the signer digest
@@ -386,15 +386,22 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          # `--app-version` puts the version into the signed trusted comment.
+          # The app sets `requireSignedVersion`, so it refuses a signature
+          # without one, and one whose version differs from what `latest.json`
+          # announces: an unsigned manifest cannot pair a new version number
+          # with an older release's artifact and signature.
           for file in "$RUNNER_TEMP"/assets/*; do
-            "$RUNNER_TEMP/signer/cargo-tauri" signer sign "$file"
+            "$RUNNER_TEMP/signer/cargo-tauri" signer sign --app-version "$VERSION" "$file"
           done
 
       - name: Verify signatures against the updater pubkey
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           # `signer sign` never checks the key against `plugins.updater.pubkey`,
           # so a rotated or mismatched secret would ship silently and break
@@ -458,10 +465,39 @@ jobs:
                    "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
                    "-keyform", "DER"],
                   capture_output=True, text=True)
-              if r.returncode == 0:
-                  print(f"{name}: signature verified")
-              else:
+              if r.returncode != 0:
                   print(f"{name}: {r.stderr.strip() or 'signature verification failed'}")
+                  failed.append(name)
+                  continue
+              # The app requires the signed version to match the manifest's,
+              # so a signature without it would leave the release
+              # uninstallable. The trusted comment is covered by minisign's
+              # global signature over [signature | trusted comment].
+              trusted = next(
+                  (l[len("trusted comment: "):] for l in box.splitlines()
+                   if l.startswith("trusted comment: ")), None)
+              global_line = box.splitlines()[-1] if box.strip() else ""
+              fields = dict(
+                  f.split(":", 1) for f in (trusted or "").split("\t") if ":" in f)
+              if fields.get("version") != os.environ["VERSION"]:
+                  print(f"{name}: trusted comment does not carry version {os.environ['VERSION']}")
+                  failed.append(name)
+                  continue
+              with open(f"{runner_temp}/global.msg", "wb") as f:
+                  f.write(sig[10:] + trusted.encode())
+              with open(f"{runner_temp}/global.sig", "wb") as f:
+                  f.write(base64.b64decode(global_line))
+              r = subprocess.run(
+                  ["openssl", "pkeyutl", "-verify", "-rawin",
+                   "-in", f"{runner_temp}/global.msg",
+                   "-sigfile", f"{runner_temp}/global.sig",
+                   "-pubin", "-inkey", f"{runner_temp}/pubkey.der",
+                   "-keyform", "DER"],
+                  capture_output=True, text=True)
+              if r.returncode == 0:
+                  print(f"{name}: signature and signed version verified")
+              else:
+                  print(f"{name}: trusted comment signature does not verify")
                   failed.append(name)
 
           if failed:
