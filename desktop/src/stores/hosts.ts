@@ -10,15 +10,23 @@ export const useHostsStore = defineStore("hosts", () => {
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
   let pendingLoad: Promise<void> | null = null;
-  // Bumped whenever a mutation has been applied locally. A read that started
-  // before the bump carries a snapshot taken before that change, so it is
-  // discarded rather than written over newer state.
+  // Bumped whenever a host or group has been added, changed or deleted locally.
+  // A read that started before the bump carries a snapshot taken before that
+  // change, so it is discarded rather than written over newer state.
   //
   // Counted per list, because the two reads are independent: adding a host
   // says nothing about the group list that came back with it, and one counter
   // would throw away a current answer for the collection nothing touched.
   let hostsRevision = 0;
   let groupsRevision = 0;
+  // Deletes that cascade to other records do not bump the revisions. The
+  // backend applies the cascade in the same write as the delete, so a read that
+  // was already in flight when the delete completed can still carry the links
+  // it removed. While a load is pending these remember what such deletes
+  // removed, and load() applies them to the snapshot as it arrives. Dropping
+  // the snapshot instead would leave a list that had not loaded yet empty.
+  const unlinkedIdentityIds = new Set<string>();
+  const deletedGroupIds = new Set<string>();
 
   const filteredHosts = computed(() => {
     let result = hosts.value;
@@ -49,23 +57,41 @@ export const useHostsStore = defineStore("hosts", () => {
   // result is dropped if its own collection was mutated after the read began.
   // Each result is checked on its own, so a host being added does not also
   // throw away the group list that arrived alongside it.
+  //
+  // A result is not dropped for a delete that cascades (an identity or a
+  // group): it is reconciled with what that delete removed, so a delete during
+  // the first load still leaves the lists loaded.
   function load(): Promise<void> {
     if (pendingLoad) return pendingLoad;
     const hostsStartedAt = hostsRevision;
     const groupsStartedAt = groupsRevision;
     pendingLoad = Promise.all([
       api.listHosts().then((loaded) => {
-        if (hostsRevision === hostsStartedAt) hosts.value = loaded;
+        if (hostsRevision === hostsStartedAt) hosts.value = withoutCascaded(loaded);
       }),
       api.listGroups().then((loaded) => {
-        if (groupsRevision === groupsStartedAt) groups.value = loaded;
+        if (groupsRevision === groupsStartedAt) {
+          groups.value = loaded.filter((g) => !deletedGroupIds.has(g.id));
+        }
       }),
     ])
       .then(() => undefined)
       .finally(() => {
         pendingLoad = null;
+        unlinkedIdentityIds.clear();
+        deletedGroupIds.clear();
       });
     return pendingLoad;
+  }
+
+  // Applies, to a host snapshot that was read before them, the links that the
+  // deletes completed since then removed.
+  function withoutCascaded(snapshot: Host[]): Host[] {
+    for (const host of snapshot) {
+      if (host.identity_id && unlinkedIdentityIds.has(host.identity_id)) host.identity_id = null;
+      if (host.group_id && deletedGroupIds.has(host.group_id)) host.group_id = null;
+    }
+    return snapshot;
   }
 
   async function addHost(host: Host) {
@@ -99,9 +125,8 @@ export const useHostsStore = defineStore("hosts", () => {
   async function deleteGroup(id: string) {
     await api.deleteGroup(id);
     // Touches both lists: the group goes, and every host that pointed at it is
-    // unassigned.
-    groupsRevision += 1;
-    hostsRevision += 1;
+    // unassigned. A load in flight is reconciled with this when it lands.
+    if (pendingLoad) deletedGroupIds.add(id);
     groups.value = groups.value.filter((g) => g.id !== id);
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;
@@ -112,9 +137,10 @@ export const useHostsStore = defineStore("hosts", () => {
   }
 
   // The backend unlinks hosts from an identity it deletes; this applies the
-  // same change locally so those hosts do not keep pointing at nothing.
+  // same change locally so those hosts do not keep pointing at nothing. A load
+  // in flight is reconciled with this when it lands.
   function unlinkIdentity(identityId: string) {
-    hostsRevision += 1;
+    if (pendingLoad) unlinkedIdentityIds.add(identityId);
     hosts.value.forEach((h) => {
       if (h.identity_id === identityId) h.identity_id = null;
     });
