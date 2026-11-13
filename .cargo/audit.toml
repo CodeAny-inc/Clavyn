@@ -18,4 +18,20 @@ ignore = [
   # signing with a stored RSA key. Ed25519 and ECDSA keys are not affected.
   # review-by: 2026-12-31
   "RUSTSEC-2023-0071",
+
+  # zip 4.6.1: symlinks and Unix permissions (including SUID/SGID) applied
+  # outside the destination by `ZipArchive::extract`. Fixed in zip 9, but
+  # tauri-plugin-updater 2.13 and 2.14 still require zip 4, and its `zip`
+  # feature cannot be turned off: the same feature carries the tar.gz path the
+  # macOS and AppImage updates use. The plugin only extracts a zip on Windows,
+  # inside `install` after `download` has verified the minisign signature
+  # against the key in tauri.conf.json, and Clavyn's Windows updates are NSIS
+  # executables, not zips. Exploiting it takes an archive signed with the
+  # release key. Drop these once the updater moves to zip >= 9.
+  # review-by: 2026-12-31
+  "RUSTSEC-2026-0367",
+  # review-by: 2026-12-31
+  "RUSTSEC-2026-0368",
+  # review-by: 2026-12-31
+  "RUSTSEC-2026-0369",
 ]
