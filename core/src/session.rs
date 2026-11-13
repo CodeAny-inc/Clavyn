@@ -1,7 +1,7 @@
 use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
-use crate::output::{OutputBatcher, OutputCredit};
+use crate::output::{sleep_until, OutputBatcher, OutputCredit};
 use crate::transport::{self, CloseSignal, Transport};
 use crate::vault::Vault;
 use crate::{CoreError, Result};
@@ -36,14 +36,6 @@ pub type DataCallback = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 /// Callback invoked when a session closes.
 pub type CloseCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
-
-/// Resolves at `deadline`, or never when there is nothing to wait for.
-async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
-        None => std::future::pending().await,
-    }
-}
 
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {

@@ -212,6 +212,66 @@ impl Default for OutputCredit {
     }
 }
 
+/// Resolves at `deadline`, or never when there is nothing to wait for.
+pub(crate) async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Spends a batch's bytes and hands it to `deliver`, keeping any remainder.
+fn deliver_batch(batcher: &mut OutputBatcher, credit: &OutputCredit, deliver: &mut impl FnMut(&[u8])) {
+    if batcher.is_empty() {
+        return;
+    }
+    let batch = batcher.batch();
+    // Spent before the batch is handed over, so an acknowledgement can never
+    // arrive ahead of the spend it pays back.
+    credit.spend(batch.len());
+    deliver(batch);
+    batcher.mark_flushed(Instant::now());
+}
+
+/// Hands the output arriving on `chunks` to `deliver` in batches, holding back
+/// while `credit` is spent, until every sender is gone and the last byte has
+/// been delivered.
+///
+/// Meant for a producer that blocks once `chunks` is full, such as the thread
+/// reading a local PTY: while the window is spent the channel is left unread,
+/// so the producer stops reading the PTY and the program writing to it blocks
+/// in turn. A batch already due is still delivered meanwhile. A caller whose
+/// output will no longer be acknowledged has to [`OutputCredit::lift`] the
+/// limit for this to reach the end of the stream.
+pub async fn pump(
+    mut chunks: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    credit: &OutputCredit,
+    mut deliver: impl FnMut(&[u8]),
+) {
+    let mut batcher = OutputBatcher::new(Instant::now());
+    loop {
+        let flush_at = batcher.deadline();
+        let reading = credit.has_room();
+        tokio::select! {
+            () = credit.room(), if !reading => {}
+            chunk = chunks.recv(), if reading => match chunk {
+                Some(chunk) => {
+                    if batcher.push(&chunk, Instant::now()) {
+                        deliver_batch(&mut batcher, credit, &mut deliver);
+                    }
+                }
+                None => {
+                    while !batcher.is_empty() {
+                        deliver_batch(&mut batcher, credit, &mut deliver);
+                    }
+                    return;
+                }
+            },
+            () = sleep_until(flush_at) => deliver_batch(&mut batcher, credit, &mut deliver),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,5 +563,122 @@ mod tests {
             .await
             .expect("lifting did not wake the reader")
             .expect("waiter");
+    }
+
+    /// Feeds `total` bytes in `chunk`-sized pieces through a channel holding
+    /// `capacity` chunks into a pump, counting what was produced and what
+    /// was delivered.
+    struct Pumped {
+        credit: std::sync::Arc<OutputCredit>,
+        produced: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        delivered: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        largest: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        pump: tokio::task::JoinHandle<()>,
+    }
+
+    fn start_pump(total: u64, chunk: usize, capacity: usize) -> Pumped {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+        let credit = Arc::new(OutputCredit::new());
+        let produced = Arc::new(AtomicU64::new(0));
+        let delivered = Arc::new(AtomicU64::new(0));
+        let largest = Arc::new(AtomicU64::new(0));
+        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<u8>>(capacity);
+        tokio::spawn({
+            let produced = produced.clone();
+            async move {
+                while produced.load(Ordering::SeqCst) < total {
+                    if tx.send(vec![b'x'; chunk]).await.is_err() {
+                        return;
+                    }
+                    produced.fetch_add(chunk as u64, Ordering::SeqCst);
+                }
+            }
+        });
+        let pump = tokio::spawn({
+            let credit = credit.clone();
+            let delivered = delivered.clone();
+            let largest = largest.clone();
+            async move {
+                pump(rx, &credit, |batch| {
+                    delivered.fetch_add(batch.len() as u64, Ordering::SeqCst);
+                    largest.fetch_max(batch.len() as u64, Ordering::SeqCst);
+                })
+                .await
+            }
+        });
+        Pumped {
+            credit,
+            produced,
+            delivered,
+            largest,
+            pump,
+        }
+    }
+
+    /// Waits until `counter` holds still for a while and returns its value.
+    async fn settled(counter: &std::sync::atomic::AtomicU64) -> u64 {
+        let settle = async {
+            let mut last = counter.load(Ordering::SeqCst);
+            loop {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let now = counter.load(Ordering::SeqCst);
+                if now == last {
+                    return now;
+                }
+                last = now;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), settle)
+            .await
+            .expect("the count kept changing")
+    }
+
+    #[tokio::test]
+    async fn the_pump_holds_the_producer_back_at_the_window_until_credit_returns() {
+        const CHUNK: usize = 8 * 1024;
+        const CAPACITY: usize = 16;
+        let total = OUTPUT_WINDOW * 4;
+        let pumped = start_pump(total, CHUNK, CAPACITY);
+        // A due batch still goes out once the window is spent, and the batcher
+        // can hold one chunk past a full batch.
+        let ceiling = OUTPUT_WINDOW + (MAX_BATCH + CHUNK) as u64;
+
+        let first = settled(&pumped.delivered).await;
+        assert!(first >= OUTPUT_WINDOW, "stalled at {first} bytes, short of the window");
+        assert!(first <= ceiling, "{first} bytes delivered past the window");
+        // The producer stops once the channel is full: it is held back too,
+        // rather than having its output buffered without limit.
+        let produced = settled(&pumped.produced).await;
+        let buffered = (MAX_BATCH + CHUNK * (CAPACITY + 1)) as u64;
+        assert!(produced <= first + buffered, "the producer ran {produced} bytes ahead");
+        assert!(!pumped.pump.is_finished());
+
+        pumped.credit.refund(first);
+        let second = settled(&pumped.delivered).await;
+        assert!(second > first, "a refund did not resume the pump");
+        assert!(second - first <= ceiling, "{} bytes delivered past a refund", second - first);
+
+        // Lifting the limit lets the rest through, and the pump ends with the
+        // producer.
+        pumped.credit.lift();
+        tokio::time::timeout(Duration::from_secs(10), pumped.pump)
+            .await
+            .expect("the pump never reached the end of the stream")
+            .expect("pump");
+        assert_eq!(pumped.delivered.load(Ordering::SeqCst), total);
+    }
+
+    #[tokio::test]
+    async fn the_pump_delivers_everything_in_capped_batches_once_the_producer_is_done() {
+        // A chunk larger than a batch leaves a remainder that has to go out too.
+        let total = (MAX_BATCH * 3 + 100) as u64;
+        let pumped = start_pump(total, MAX_BATCH * 3 + 100, 1);
+        tokio::time::timeout(Duration::from_secs(10), pumped.pump)
+            .await
+            .expect("the pump never reached the end of the stream")
+            .expect("pump");
+        assert_eq!(pumped.delivered.load(Ordering::SeqCst), total);
+        assert!(pumped.largest.load(Ordering::SeqCst) <= MAX_BATCH as u64);
     }
 }
