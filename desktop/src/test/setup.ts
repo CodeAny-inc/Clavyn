@@ -55,6 +55,9 @@ const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
     return mockInvokeHandlers.get(cmd)!(args);
   }
   if (cmd === "list_identities") return [];
+  // The native OK/Cancel dialog behind `confirmAction` answers OK, like the
+  // `window.confirm` stub above.
+  if (cmd === "plugin:dialog|message") return "Ok";
   if (cmd === "connect_ssh") {
     // Like the backend, resolve the host by id from what the app has saved.
     const { useHostsStore } = await import("../stores/hosts");
