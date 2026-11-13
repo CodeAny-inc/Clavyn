@@ -29,6 +29,7 @@ import {
   sshConfigurationKey,
   sshIdentityReady,
 } from "../lib/sshIdentity";
+import { readableName } from "../lib/readableName";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -284,7 +285,7 @@ async function confirmRename() {
 
 async function deleteEntry(entry: SftpEntry) {
   closeContextMenu();
-  if (!(await confirmAction(`Delete "${entry.name}"?`))) return;
+  if (!(await confirmAction(`Delete "${readableName(entry.name)}"?`))) return;
   try {
     await sftp.deleteEntry(entry);
   } catch {
@@ -487,7 +488,7 @@ async function upload() {
               "
               @click="navigateToSegment(index)"
             >
-              {{ segment }}
+              {{ readableName(segment) }}
             </button>
           </template>
         </div>
@@ -548,7 +549,7 @@ async function upload() {
                     :class="entry.is_dir ? 'text-primary' : 'text-muted-foreground'"
                     :stroke-width="1.75"
                   />
-                  <span class="truncate">{{ entry.name }}</span>
+                  <span class="truncate">{{ readableName(entry.name) }}</span>
                 </div>
               </td>
               <td class="px-3 py-1.5 text-right text-[12px] tabular-nums text-muted-foreground">
@@ -577,7 +578,7 @@ async function upload() {
       <div class="flex items-center gap-3 border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
         <span>{{ sftp.entries.length }} items</span>
         <span v-if="sftp.selectedEntry" class="truncate">
-          Selected: {{ sftp.selectedEntry.name }}
+          Selected: {{ readableName(sftp.selectedEntry.name) }}
         </span>
       </div>
     </div>
