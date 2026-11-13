@@ -818,7 +818,7 @@ pub async fn create_local_terminal(
     let terminal = LocalTerminal {
         writer,
         master,
-        child,
+        child: crate::state::LocalShell::new(child),
         owns_session_id: owns_session_id.clone(),
     };
     let refused = {
@@ -1018,9 +1018,11 @@ pub async fn close_session(state: State<'_, Arc<AppState>>, session_id: String) 
     if state.sessions.contains(&session_id).await {
         return state.sessions.close(&session_id).await.map_err(err);
     }
-    // Try local terminal
-    let mut locals = state.local_terminals.lock().await;
-    locals.remove(&session_id);
+    // Try local terminal. The terminal is dropped with the lock released:
+    // dropping its writer writes EOF to the PTY, which blocks while the tty
+    // input queue is full, and every other session needs this lock.
+    let closed = state.local_terminals.lock().await.remove(&session_id);
+    drop(closed);
     Ok(())
 }
 
