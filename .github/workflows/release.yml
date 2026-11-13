@@ -143,7 +143,7 @@ jobs:
           node-version: 22
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
           targets: ${{ matrix.rust_target }}
@@ -328,9 +328,7 @@ jobs:
   # crates) including their build scripts and proc-macros, none of which may
   # run on the machine that holds the key. This job produces the binary on an
   # isolated runner, publishes it as an artifact and exports its sha256 so
-  # `sign` can verify the exact bytes it is about to execute. The version
-  # matches @tauri-apps/cli in desktop/package-lock.json, the CLI release.sh
-  # signs with, so both sign with `signer sign --app-version`.
+  # `sign` can verify the exact bytes it is about to execute.
   signer-tool:
     needs: prepare
     runs-on: ubuntu-22.04
@@ -341,7 +339,7 @@ jobs:
     steps:
       - name: Build the Tauri signer
         run: |
-          cargo install tauri-cli --version 2.12.0 --locked --root "$RUNNER_TEMP/tauri-cli"
+          cargo install tauri-cli --version 2.12.3 --locked --root "$RUNNER_TEMP/tauri-cli"
           install -m 755 "$RUNNER_TEMP/tauri-cli/bin/cargo-tauri" "$RUNNER_TEMP/cargo-tauri"
 
       - name: Publish the signer digest
@@ -412,14 +410,16 @@ jobs:
           ls -la "$RUNNER_TEMP/assets"
 
       - name: Sign
-        # `--app-version` binds each signature to this version through its
-        # signed trusted comment; an updater with `requireSignedVersion`
-        # rejects a manifest that pairs the file with any other version.
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
+          # `--app-version` puts the version into the signed trusted comment.
+          # The app sets `requireSignedVersion`, so it refuses a signature
+          # without one, and one whose version differs from what `latest.json`
+          # announces: an unsigned manifest cannot pair a new version number
+          # with an older release's artifact and signature.
           for file in "$RUNNER_TEMP"/assets/*; do
             "$RUNNER_TEMP/signer/cargo-tauri" signer sign --app-version "$VERSION" "$file"
           done
@@ -513,9 +513,10 @@ jobs:
                   print(f"{name}: {err or 'signature verification failed'}")
                   failed.append(name)
                   continue
-              # The version in the trusted comment is what an updater with
-              # `requireSignedVersion` compares against latest.json, and the
-              # global signature is what makes that comment trustworthy.
+              # The app sets `requireSignedVersion` and requires the version in
+              # the trusted comment to match the manifest's, so a signature
+              # without it would leave the release uninstallable. The global
+              # signature is what makes that comment trustworthy.
               if f"version:{version}" not in trusted.split("\t"):
                   print(f"{name}: signature is not bound to version {version}")
                   failed.append(name)

@@ -2,6 +2,7 @@ use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
 use crate::output::OutputBatcher;
+use crate::transport::{self, CloseSignal, Transport};
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::Handle;
@@ -9,7 +10,9 @@ use russh::ChannelMsg;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{watch, Mutex};
+
+type SessionMap = HashMap<String, Arc<SshSession>>;
 
 /// Callback invoked when a session receives data from the remote end.
 /// The Tauri layer uses this to forward a batch of output to the frontend.
@@ -28,7 +31,11 @@ async fn sleep_until(deadline: Option<Instant>) {
 
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, SshSession>>,
+    /// Live sessions by id. Held only to look an entry up, insert or remove
+    /// it, never across network I/O: one peer that stops reading would
+    /// otherwise stall writes, resizes and closes on every other session, and
+    /// keep a vault reset from draining the map.
+    sessions: Arc<Mutex<SessionMap>>,
     /// Every id held by an SSH session, from the moment it is claimed — before
     /// the connection exists — until the session is closed. `sessions` only
     /// learns an id once the connection is up, seconds later, so it cannot tell
@@ -106,14 +113,40 @@ fn lock_claims(
 }
 
 struct SshSession {
-    #[allow(dead_code)]
-    id: String,
-    handle: Arc<Mutex<Handle<connection::SshHandler>>>,
+    /// Shared with the goodbye sent after the session is closed, which needs
+    /// nothing else from it, so that goodbye does not keep the id claimed.
+    handle: Arc<Handle<connection::SshHandler>>,
+    transport: Transport,
+    /// Raised once the session is closed. A write stuck behind a peer that
+    /// stopped reading watches it and gives up at once rather than when the
+    /// goodbye ends the connection.
+    closed: CloseSignal,
     channel_id: russh::ChannelId,
-    resize_tx: mpsc::Sender<(u32, u32)>,
+    /// Serializes writes to this session so keystrokes reach the channel in
+    /// the order they were sent. Per session, so a stalled peer only holds up
+    /// its own input.
+    writes: Mutex<()>,
+    /// The size the remote terminal should have. Only the latest one matters,
+    /// so a resize replaces it and never waits; the session's resizer task
+    /// sends it on whenever the connection takes it.
+    size: watch::Sender<(u32, u32)>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
     claim: Arc<ClaimedId>,
+}
+
+impl SshSession {
+    /// Mark the session closed and say goodbye to the peer, cutting the
+    /// connection if the goodbye does not get through in time. The goodbye
+    /// holds only the handle and the transport, so the id is released as soon
+    /// as the map entry and the reader are gone, and the reader goes once the
+    /// connection does, so within [`transport::GOODBYE_GRACE`] at most.
+    fn retire(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        self.closed.raise();
+        let handle = self.handle.clone();
+        let transport = self.transport.clone();
+        async move { transport::goodbye(&handle, &transport).await }
+    }
 }
 
 // Re-export the handler type so the session manager can use it.
@@ -122,7 +155,7 @@ pub use connection::SshHandler;
 impl SessionManager {
     pub fn new(data_callback: DataCallback, close_callback: CloseCallback) -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             claimed: Arc::new(std::sync::Mutex::new(HashSet::new())),
             data_callback,
             close_callback,
@@ -170,68 +203,93 @@ impl SessionManager {
         rows: u32,
     ) -> Result<()> {
         let session_id = claim.id.clone();
-        let handle =
+        let connection::Connection { handle, transport } =
             connection::connect(host, identity, known_hosts, vault, passphrase, password).await?;
-        let channel = handle.channel_open_session().await.map_err(|e| {
-            CoreError::Ssh(format!("channel open: {e}"))
-        })?;
-        let channel_id = channel.id();
+        let opened = async {
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|e| CoreError::Ssh(format!("channel open: {e}")))?;
 
-        // Request PTY
-        channel
-            .request_pty(
-                false,
-                "xterm-256color",
-                cols,
-                rows,
-                0,
-                0,
-                &[], // default terminal modes
-            )
-            .await
-            .map_err(|e| CoreError::Ssh(format!("request pty: {e}")))?;
+            // Request PTY
+            channel
+                .request_pty(
+                    false,
+                    "xterm-256color",
+                    cols,
+                    rows,
+                    0,
+                    0,
+                    &[], // default terminal modes
+                )
+                .await
+                .map_err(|e| CoreError::Ssh(format!("request pty: {e}")))?;
 
-        // Request shell
-        channel
-            .request_shell(false)
-            .await
-            .map_err(|e| CoreError::Ssh(format!("request shell: {e}")))?;
+            // Request shell
+            channel
+                .request_shell(false)
+                .await
+                .map_err(|e| CoreError::Ssh(format!("request shell: {e}")))?;
 
-        // Run startup command if set
-        if let Some(cmd) = &host.startup_command {
-            if !cmd.is_empty() {
-                channel
-                    .exec(false, cmd.clone())
-                    .await
-                    .map_err(|e| CoreError::Ssh(format!("startup exec: {e}")))?;
+            // Run startup command if set
+            if let Some(cmd) = &host.startup_command {
+                if !cmd.is_empty() {
+                    channel
+                        .exec(false, cmd.clone())
+                        .await
+                        .map_err(|e| CoreError::Ssh(format!("startup exec: {e}")))?;
+                }
             }
-        }
-
-        let handle = Arc::new(Mutex::new(handle));
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u32, u32)>(32);
+            Ok::<_, CoreError>(channel)
+        };
+        let channel = match opened.await {
+            Ok(channel) => channel,
+            Err(e) => {
+                transport.cut();
+                return Err(e);
+            }
+        };
+        let channel_id = channel.id();
+        // The reader keeps only the read half, so nothing it does waits on the
+        // connection taking outbound messages; it always drains what arrives.
+        let (mut reader, writer) = channel.split();
+        let (size, mut size_rx) = watch::channel((cols, rows));
 
         let held = claim.commit();
-        let session = SshSession {
-            id: session_id.clone(),
-            handle: handle.clone(),
+        let session = Arc::new(SshSession {
+            handle: Arc::new(handle),
+            transport,
+            closed: CloseSignal::new(),
             channel_id,
-            resize_tx,
+            writes: Mutex::new(()),
+            size,
             claim: held.clone(),
-        };
+        });
 
         self.sessions.lock().await.insert(session_id.clone(), session);
+        let sessions = self.sessions.clone();
+
+        // Window changes wait whenever the connection does, so they go out from
+        // a task of their own. It ends once the entry, and the sender with it,
+        // is gone, or once the connection is.
+        tokio::spawn(async move {
+            while size_rx.changed().await.is_ok() {
+                let (cols, rows) = *size_rx.borrow_and_update();
+                if writer.window_change(cols, rows, 0, 0).await.is_err() {
+                    break;
+                }
+            }
+        });
 
         // Spawn the reading task
         let sid = session_id.clone();
         let data_cb = self.data_callback.clone();
         let close_cb = self.close_callback.clone();
-        let mut channel = channel;
 
         tokio::spawn(async move {
             // Dropped when this task ends, after the close has been announced,
             // which is the moment the id is free for another session.
-            let _held = held;
-            let mut pending_resize: Option<(u32, u32)> = None;
+            let held = held;
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
@@ -244,7 +302,7 @@ impl SessionManager {
                 // batcher while another branch's handler mutates it.
                 let flush_at = batcher.deadline();
                 tokio::select! {
-                    msg = channel.wait() => {
+                    msg = reader.wait() => {
                         match msg {
                             Some(ChannelMsg::Data { data })
                             | Some(ChannelMsg::ExtendedData { data, .. }) => {
@@ -259,20 +317,21 @@ impl SessionManager {
                                 // order; see `AppState::init`.
                                 flush(&mut batcher);
                                 close_cb(&sid, "session closed");
+                                // A shell that exits leaves the connection up;
+                                // end it, unless a close already took the entry.
+                                // The goodbye runs on its own so the id is free
+                                // for a reconnect as soon as this task ends.
+                                if let Some(session) = take_if_held(&sessions, &sid, &held).await {
+                                    tokio::spawn(session.retire());
+                                }
                                 break;
                             }
                             _ => {}
                         }
                     }
-                    resize = resize_rx.recv() => {
-                        pending_resize = resize;
-                    }
                     () = sleep_until(flush_at) => {
                         flush(&mut batcher);
                     }
-                }
-                if let Some((c, r)) = pending_resize.take() {
-                    let _ = channel.window_change(c, r, 0, 0).await;
                 }
             }
         });
@@ -280,42 +339,62 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Write data to a session's terminal.
-    pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
-        let handle = session.handle.lock().await;
-        handle
-            .data(session.channel_id, data.to_vec())
+    /// The live session behind `session_id`, taken out from under the map lock.
+    async fn get(&self, session_id: &str) -> Result<Arc<SshSession>> {
+        self.sessions
+            .lock()
             .await
-            .map_err(|_| CoreError::Ssh("write failed".into()))?;
-        Ok(())
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))
     }
 
-    /// Resize a session's terminal.
-    pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
-        let sessions = self.sessions.lock().await;
-        let session = sessions
-            .get(session_id)
-            .ok_or_else(|| CoreError::SessionNotFound(session_id.to_string()))?;
+    /// Whether an SSH session is live under `session_id`.
+    pub async fn contains(&self, session_id: &str) -> bool {
+        self.sessions.lock().await.contains_key(session_id)
+    }
+
+    /// Write data to a session's terminal.
+    ///
+    /// The send waits for as long as the peer leaves the connection unread,
+    /// and only this session's writes wait behind it. A close ends the wait.
+    pub async fn write(&self, session_id: &str, data: &[u8]) -> Result<()> {
+        let session = self.get(session_id).await?;
+        let send = async {
+            let _order = session.writes.lock().await;
+            session
+                .handle
+                .data(session.channel_id, data.to_vec())
+                .await
+                .map_err(|_| CoreError::Ssh("write failed".into()))
+        };
         session
-            .resize_tx
-            .send((cols, rows))
+            .closed
+            .guard(send, || CoreError::SessionNotFound(session_id.to_string()))
             .await
-            .map_err(|_| CoreError::Ssh("resize channel closed".into()))?;
+    }
+
+    /// Resize a session's terminal. Never waits on the peer: the new size
+    /// replaces any that has not gone out yet.
+    pub async fn resize(&self, session_id: &str, cols: u32, rows: u32) -> Result<()> {
+        self.get(session_id).await?.size.send_replace((cols, rows));
         Ok(())
     }
 
     /// Close a session.
+    ///
+    /// The entry leaves the map before the goodbye is sent, so the session
+    /// stops being addressable at once even if the peer never answers, and the
+    /// entry's share of the id goes with it rather than waiting on the
+    /// goodbye. The reader task still holds a share until it has flushed and
+    /// announced the close, which the goodbye guarantees within
+    /// [`transport::GOODBYE_GRACE`].
     pub async fn close(&self, session_id: &str) -> Result<()> {
-        let mut sessions = self.sessions.lock().await;
-        if let Some(session) = sessions.remove(session_id) {
-            // The entry's share of the id goes with it; the reader task still
-            // holds one until it has flushed and announced the close.
-            let handle = session.handle.lock().await;
-            let _ = handle.disconnect(russh::Disconnect::ByApplication, "", "en").await;
+        let removed = self.sessions.lock().await.remove(session_id);
+        if let Some(session) = removed {
+            let goodbye = session.retire();
+            drop(session);
+            goodbye.await;
         }
         Ok(())
     }
@@ -329,21 +408,39 @@ impl SessionManager {
     ///
     /// The map is drained under the lock and the guard is released before any
     /// network work, so a session stops being addressable the moment this is
-    /// called. A remote that never acknowledges the disconnect can therefore
-    /// only delay the polite goodbye, never keep a session reachable.
+    /// called. The goodbyes then run side by side, each bounded by
+    /// [`transport::GOODBYE_GRACE`] and ending its connection either way, so
+    /// one peer that never answers cannot hold up the others or outlive the
+    /// call.
     pub async fn close_all(&self) -> usize {
-        let drained: Vec<SshSession> = {
+        let drained: Vec<Arc<SshSession>> = {
             let mut sessions = self.sessions.lock().await;
             sessions.drain().map(|(_, session)| session).collect()
         };
         let count = drained.len();
-        for session in &drained {
-            let handle = session.handle.lock().await;
-            let _ = handle
-                .disconnect(russh::Disconnect::ByApplication, "", "en")
-                .await;
+        let goodbyes: Vec<_> = drained
+            .into_iter()
+            .map(|session| tokio::spawn(session.retire()))
+            .collect();
+        for goodbye in goodbyes {
+            let _ = goodbye.await;
         }
         count
+    }
+}
+
+/// Remove `session_id` from the map if the entry there is still the session
+/// `held` belongs to. An id is reused once its session has ended, and a
+/// reader finishing late must not take a newer session's entry.
+async fn take_if_held(
+    sessions: &Mutex<SessionMap>,
+    session_id: &str,
+    held: &Arc<ClaimedId>,
+) -> Option<Arc<SshSession>> {
+    let mut sessions = sessions.lock().await;
+    match sessions.get(session_id) {
+        Some(session) if Arc::ptr_eq(&session.claim, held) => sessions.remove(session_id),
+        _ => None,
     }
 }
 

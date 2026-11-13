@@ -1,4 +1,4 @@
-use crate::host_key_prompt::PromptGate as HostKeyPromptGate;
+use crate::host_key_prompt::{DialogSlot, PromptGate};
 use clavyn_core::known_hosts::KnownHosts;
 use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
@@ -199,8 +199,13 @@ pub struct AppState {
     pub vault: Mutex<Vault>,
     pub known_hosts: Arc<Mutex<KnownHosts>>,
     /// Serializes the native confirmation shown before a host key is forgotten
-    /// or replaced, so a caller cannot stack dialogs on top of each other.
-    pub host_key_prompt: HostKeyPromptGate,
+    /// or replaced, so a caller cannot stack dialogs on top of each other. It
+    /// shares one dialog slot with `host_change_prompt`, so the two kinds of
+    /// question do not stack either, and keeps a cooldown of its own.
+    pub host_key_prompt: PromptGate,
+    /// Serializes the native confirmation shown before a host or identity write
+    /// lets a vault key sign in somewhere new; see `host_change_prompt`.
+    pub host_change_prompt: PromptGate,
     pub vault_session: VaultSessionSlot,
     pub auth_generation: AuthGeneration,
     /// Serializes Keychain credential creation/deletion with destructive vault
@@ -421,11 +426,13 @@ impl AppState {
         let sessions = Arc::new(SessionManager::new(data_callback, close_callback));
         let sftp = Arc::new(SftpManager::new());
 
+        let dialogs = DialogSlot::default();
         Ok(Arc::new(Self {
             store: Mutex::new(store),
             vault: Mutex::new(vault),
             known_hosts: Arc::new(Mutex::new(known_hosts)),
-            host_key_prompt: HostKeyPromptGate::new(),
+            host_key_prompt: PromptGate::new().sharing(dialogs.clone()),
+            host_change_prompt: crate::host_change_prompt::gate().sharing(dialogs),
             vault_session: VaultSessionSlot::new(),
             auth_generation: AuthGeneration::new(),
             biometric_mutation: Mutex::new(()),

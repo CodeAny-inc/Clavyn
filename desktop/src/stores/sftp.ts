@@ -21,6 +21,12 @@ export const useSftpStore = defineStore("sftp", () => {
   let connectPendingKey: string | null = null;
   let connectGeneration = 0;
 
+  // Listings of one session run side by side in the backend, so a slow one can
+  // answer after a newer one. Only the latest listing of the current session
+  // publishes its result, so an older answer never moves the browser back to
+  // a directory the user has already left.
+  let listGeneration = 0;
+
   function clearPublishedConnection() {
     sessionId.value = null;
     connectedHost.value = null;
@@ -130,18 +136,25 @@ export const useSftpStore = defineStore("sftp", () => {
   }
 
   async function listDir(path: string) {
-    if (!sessionId.value) return;
+    const id = sessionId.value;
+    if (!id) return;
+    const generation = ++listGeneration;
+    const current = () => generation === listGeneration && sessionId.value === id;
     error.value = null;
     loading.value = true;
     try {
-      entries.value = await api.sftpListDir(sessionId.value, path);
+      const listed = await api.sftpListDir(id, path);
+      if (!current()) return;
+      entries.value = listed;
       currentPath.value = path;
       selectedEntry.value = null;
     } catch (e) {
+      // A superseded listing's failure is about a directory the user has left.
+      if (!current()) return;
       error.value = String(e);
       throw e;
     } finally {
-      loading.value = false;
+      if (generation === listGeneration) loading.value = false;
     }
   }
 
@@ -220,8 +233,8 @@ export const useSftpStore = defineStore("sftp", () => {
         fullPath,
         overwrite,
       );
-      entries.value = await api.sftpListDir(sessionId.value, currentPath.value);
-      selectedEntry.value = null;
+      // Through `listDir`, so the refresh cannot overwrite a newer listing.
+      await listDir(currentPath.value);
     } catch (e) {
       error.value = String(e);
       throw e;

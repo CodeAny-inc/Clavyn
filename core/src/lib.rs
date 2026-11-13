@@ -25,12 +25,14 @@ pub mod error;
 mod fs_util;
 pub mod host;
 pub mod identity;
+pub mod key_reach;
 pub mod keys;
 pub mod known_hosts;
 pub mod output;
 pub mod session;
 pub mod sftp;
 pub mod store;
+pub mod transport;
 pub mod vault;
 pub mod workspace;
 

@@ -271,9 +271,10 @@ if [[ "$DRY_RUN" == "false" ]]; then
   # never as an argument, where any local user could read it from `ps`. The
   # password is always set, empty included: with none at all the signer
   # prompts for one, which fails without a tty. `--app-version` binds the
-  # signature to this version through its signed trusted comment, and an
-  # updater with `requireSignedVersion` rejects a manifest announcing any
-  # other version. Only the signer's stdout is dropped, so its errors show.
+  # signature to this release's version. The app sets `requireSignedVersion`,
+  # so it refuses a signature without one, or one whose version differs from
+  # what latest.json announces. Only the signer's stdout is dropped, so its
+  # errors show.
   if [[ -n "$SIGNING_KEY" ]]; then
     TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY" \
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD" \
