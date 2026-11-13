@@ -225,7 +225,7 @@ export interface AppInfo {
 }
 export const getAppInfo = () => invoke<AppInfo>("get_app_info");
 export interface UpdateProgress {
-  chunk_length: number;
+  downloaded: number;
   content_length: number | null;
 }
 export const checkForUpdates = () => invoke<UpdateInfo>("check_for_updates");

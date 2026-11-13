@@ -76,6 +76,13 @@
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "startup_failure") return null;
+      // The native message dialog, answered by the browser's own so a scenario
+      // accepts or dismisses it through Playwright's dialog events.
+      if (command === "plugin:dialog|message") {
+        if (args.buttons === "OkCancel") return window.confirm(args.message) ? "Ok" : "Cancel";
+        window.alert(args.message);
+        return "Ok";
+      }
       // Keep the exact objects served, including any edits a scenario makes to
       // them, so connects can resolve a host by id the way the backend does.
       if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
