@@ -28,6 +28,8 @@ const inlineGroupName = ref("");
 // The save can wait on a native confirmation, so a second click must not send
 // a second write behind it.
 const saving = ref(false);
+// One line for whatever last failed in this dialog: the save or the inline
+// new-group request.
 const saveError = ref("");
 
 const form = ref({
@@ -104,11 +106,17 @@ watch(
   },
 );
 
+// The backend stores the port as a u16. An empty number input binds as "".
+const portValid = computed(() => {
+  const port = form.value.port;
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+});
+
 const isValid = computed(() => {
   return (
     form.value.label.trim() &&
     form.value.hostname.trim() &&
-    form.value.port > 0 &&
+    portValid.value &&
     (form.value.useIdentity ? form.value.identityId : form.value.username.trim())
   );
 });
@@ -129,12 +137,19 @@ function buildAuth(): AuthMethod {
 
 async function createInlineGroup() {
   if (!inlineGroupName.value.trim()) return;
-  const group = await hosts.addGroup(inlineGroupName.value.trim());
-  form.value.groupId = group.id;
-  inlineGroupName.value = "";
-  showInlineGroup.value = false;
+  saveError.value = "";
+  try {
+    const group = await hosts.addGroup(inlineGroupName.value.trim());
+    form.value.groupId = group.id;
+    inlineGroupName.value = "";
+    showInlineGroup.value = false;
+  } catch (e) {
+    saveError.value = `Failed to create group: ${e}`;
+  }
 }
 
+// A new host gets a fresh id per call, so a second click while the first save
+// is in flight would add a duplicate host rather than repeat the same write.
 async function save() {
   if (!isValid.value || saving.value) return;
   const host: Host = {
@@ -203,6 +218,9 @@ async function save() {
         <FormGroup>
           <Label for="host-port">Port</Label>
           <Input id="host-port" v-model.number="form.port" type="number" />
+          <p v-if="!portValid" class="text-[11px] text-destructive mt-1">
+            Port must be a whole number from 1 to 65535.
+          </p>
         </FormGroup>
       </div>
 

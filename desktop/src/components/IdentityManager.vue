@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, onUnmounted, computed, watch } from "vue";
 import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
@@ -37,9 +37,18 @@ const keys = useKeysStore();
 const vault = useVaultStore();
 
 const showForm = ref(false);
+// Changes whenever the dialog opens or closes. A key being created for one
+// opening must not write into a later one.
+let formSession = 0;
 const editing = ref<Identity | null>(null);
 const showGroupForm = ref(false);
 const newGroupName = ref("");
+// The save can wait on a native confirmation, so a second click must not send
+// a second write behind it.
+const saving = ref(false);
+const formError = ref("");
+const groupError = ref("");
+const listError = ref("");
 
 // Inline key creation state
 const keyMode = ref<"select" | "generate" | "import">("select");
@@ -48,10 +57,6 @@ const importKeyText = ref("");
 const importKeyPassphrase = ref("");
 const creatingKey = ref(false);
 const browsingFile = ref(false);
-// The save can wait on a native confirmation, so a second click must not send
-// a second write behind it.
-const saving = ref(false);
-const saveError = ref("");
 // True once a key in this form was generated or imported rather than picked
 // from the vault. That key is in the vault whether or not the identity is
 // saved, so a failed save says so instead of leaving it to be found later in
@@ -73,21 +78,70 @@ onMounted(() => {
   hosts.load();
 });
 
+function clearKeyMaterial() {
+  importKeyText.value = "";
+  importKeyPassphrase.value = "";
+}
+
+// The dialog's contents are destroyed by `v-if`, but the import refs are not,
+// so a private key left in them would be rendered straight back into the
+// textarea the next time the dialog opens. Every exit from the dialog discards
+// the key material. Synchronous so nothing can observe the refs between the
+// close and the clear.
+watch(showForm, (open) => {
+  formSession += 1;
+  if (!open) clearKeyMaterial();
+}, { flush: "sync" });
+
+// This view stays mounted across lock/unlock, including automatic locks, so
+// neither the watcher above nor unmount fires at the lock. Close the dialog and
+// discard the key material synchronously at the lock so no plaintext key stays
+// in the form or in the rendered textarea.
+watch(
+  () => vault.unlocked,
+  (unlocked) => {
+    if (!unlocked) {
+      showForm.value = false;
+      clearKeyMaterial();
+    }
+  },
+  { flush: "sync" },
+);
+
+onUnmounted(clearKeyMaterial);
+
 // --- groups ---
 function selectGroup(groupId: string | null) {
   identities.selectedGroupId = groupId;
 }
 
+function openGroupForm() {
+  groupError.value = "";
+  showGroupForm.value = true;
+}
+
 async function createGroup() {
   if (!newGroupName.value.trim()) return;
-  await hosts.addGroup(newGroupName.value.trim());
+  groupError.value = "";
+  try {
+    await hosts.addGroup(newGroupName.value.trim());
+  } catch (e) {
+    groupError.value = `Failed to create group: ${e}`;
+    return;
+  }
   newGroupName.value = "";
   showGroupForm.value = false;
 }
 
 async function deleteGroup(groupId: string, name: string) {
   if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
-    await hosts.deleteGroup(groupId);
+    listError.value = "";
+    try {
+      await hosts.deleteGroup(groupId);
+    } catch (e) {
+      listError.value = `Failed to delete group: ${e}`;
+      return;
+    }
     if (identities.selectedGroupId === groupId) {
       identities.selectedGroupId = null;
     }
@@ -113,9 +167,8 @@ function addIdentity() {
   };
   keyMode.value = "select";
   newKeyLabel.value = "";
-  importKeyText.value = "";
-  importKeyPassphrase.value = "";
-  saveError.value = "";
+  clearKeyMaterial();
+  formError.value = "";
   keyAdded.value = false;
   showForm.value = true;
 }
@@ -141,9 +194,8 @@ function editIdentity(id: Identity) {
   };
   keyMode.value = "select";
   newKeyLabel.value = "";
-  importKeyText.value = "";
-  importKeyPassphrase.value = "";
-  saveError.value = "";
+  clearKeyMaterial();
+  formError.value = "";
   keyAdded.value = false;
   showForm.value = true;
 }
@@ -165,18 +217,32 @@ const canSave = computed(() => {
   return false;
 });
 
+// The key is in the vault from here on, whatever happens to the identity
+// write. Point the form at it as an existing key so a retry links this key
+// rather than generating or importing another, and drop the imported material,
+// which the form no longer needs.
+function adoptCreatedKey(keyId: string) {
+  form.value.keyId = keyId;
+  keyMode.value = "select";
+  newKeyLabel.value = "";
+  clearKeyMaterial();
+  keyAdded.value = true;
+}
+
 async function ensureKey(): Promise<string | null> {
   if (keyMode.value === "select") {
     return form.value.keyId || null;
   }
   if (keyMode.value === "generate") {
     if (!newKeyLabel.value.trim()) return null;
+    const session = formSession;
     creatingKey.value = true;
     try {
       const key = await keys.generateKey(newKeyLabel.value.trim());
+      if (session === formSession) adoptCreatedKey(key.id);
       return key.id;
     } catch (e) {
-      alert(`Failed to generate key: ${e}`);
+      if (session === formSession) formError.value = `Failed to generate key: ${e}`;
       return null;
     } finally {
       creatingKey.value = false;
@@ -184,6 +250,7 @@ async function ensureKey(): Promise<string | null> {
   }
   if (keyMode.value === "import") {
     if (!newKeyLabel.value.trim() || !importKeyText.value.trim()) return null;
+    const session = formSession;
     creatingKey.value = true;
     try {
       const key = await keys.importKey(
@@ -191,9 +258,15 @@ async function ensureKey(): Promise<string | null> {
         importKeyText.value,
         importKeyPassphrase.value || null,
       );
+      if (session === formSession) adoptCreatedKey(key.id);
       return key.id;
     } catch (e) {
-      alert(`Failed to import key: ${e}`);
+      // A rejected key is still a key, so the secret goes. The label stays: the
+      // usual rejection is a wrong passphrase on an encrypted key.
+      if (session === formSession) {
+        clearKeyMaterial();
+        formError.value = `Failed to import key: ${e}`;
+      }
       return null;
     } finally {
       creatingKey.value = false;
@@ -202,19 +275,36 @@ async function ensureKey(): Promise<string | null> {
   return null;
 }
 
+// Generate and import create a key before the identity is written, so a second
+// click while the first save is in flight would create a second key and a
+// second identity.
 async function save() {
   if (!canSave.value || saving.value) return;
+  const session = formSession;
+  saving.value = true;
+  formError.value = "";
+  try {
+    await saveIdentity();
+  } catch (e) {
+    if (session === formSession) {
+      formError.value = keyAdded.value
+        ? `${saveFailure(e)} The key you added is in your vault and stays there.`
+        : saveFailure(e);
+    }
+  } finally {
+    saving.value = false;
+  }
+}
+
+// A save can outlive the dialog it started in. Once the session changes, the
+// key and fields it holds belong to a closed dialog, so it writes nothing and
+// leaves the current dialog alone.
+async function saveIdentity() {
+  const session = formSession;
   let keyId: string | null = form.value.authMode === "agent" ? editing.value?.key_id ?? null : null;
   if (form.value.authMode === "publickey") {
-    const adding = keyMode.value !== "select";
     keyId = await ensureKey();
-    if (!keyId) return;
-    // A key created here is in the vault now, whatever happens to the save. If
-    // the save does not go through, saving again picks this key rather than
-    // creating another one.
-    form.value.keyId = keyId;
-    keyMode.value = "select";
-    if (adding) keyAdded.value = true;
+    if (!keyId || session !== formSession) return;
   }
   const identity: Identity = {
     id: editing.value?.id ?? crypto.randomUUID(),
@@ -228,32 +318,24 @@ async function save() {
       .filter(Boolean),
     group_id: form.value.groupId || null,
   };
-  saving.value = true;
-  saveError.value = "";
-  try {
-    if (editing.value) {
-      await identities.updateIdentity(identity);
-    } else {
-      await identities.addIdentity(identity);
-    }
-    showForm.value = false;
-  } catch (e) {
-    saveError.value = keyAdded.value
-      ? `${saveFailure(e)} The key you added is in your vault and stays there.`
-      : saveFailure(e);
-  } finally {
-    saving.value = false;
+  if (editing.value) {
+    await identities.updateIdentity(identity);
+  } else {
+    await identities.addIdentity(identity);
   }
+  if (session !== formSession) return;
+  showForm.value = false;
 }
 
 async function deleteIdentity(id: Identity) {
   if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
+  listError.value = "";
   try {
     await identities.deleteIdentity(id.id);
   } catch (e) {
     // Cancelling the native confirmation was the user's answer, and the
     // identity is still listed, so there is nothing more to say.
-    if (!isDeclinedHostChange(e)) alert(deleteFailure(e));
+    if (!isDeclinedHostChange(e)) listError.value = deleteFailure(e);
   }
 }
 
@@ -290,11 +372,11 @@ function hostsUsingIdentity(identityId: string): number {
     <div class="flex h-11 items-center gap-2 border-b border-border px-4 pl-12 md:pl-4">
       <h2 class="text-[14px] font-semibold truncate">Identities</h2>
       <div class="ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
           <span class="hidden sm:inline">New Group</span>
         </Button>
-        <Button size="sm" variant="ghost" class="sm:hidden" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="sm:hidden" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
         </Button>
         <Button size="sm" @click="addIdentity">
@@ -314,6 +396,7 @@ function hostsUsingIdentity(identityId: string): number {
           class="pl-8"
         />
       </div>
+      <p v-if="listError" class="mt-2 text-[11px] text-destructive" role="alert">{{ listError }}</p>
     </div>
 
     <!-- Content area -->
@@ -349,7 +432,7 @@ function hostsUsingIdentity(identityId: string): number {
         </div>
         <button
           class="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[12px] text-muted-foreground/70 hover:text-muted-foreground transition-colors duration-100"
-          @click="showGroupForm = true"
+          @click="openGroupForm"
         >
           <FolderPlus class="size-3" :stroke-width="1.75" />
           <span>Add group...</span>
@@ -590,7 +673,7 @@ function hostsUsingIdentity(identityId: string): number {
       </div>
 
       <template #footer>
-        <p v-if="saveError" role="alert" class="basis-full text-[12px] text-destructive">{{ saveError }}</p>
+        <p v-if="formError" role="alert" class="basis-full text-[12px] text-destructive">{{ formError }}</p>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
         <Button :disabled="!canSave || creatingKey || saving" @click="save">
           <Loader2 v-if="creatingKey" class="size-3.5 mr-1 animate-spin" :stroke-width="1.75" />
@@ -618,6 +701,7 @@ function hostsUsingIdentity(identityId: string): number {
             @keydown.enter="createGroup"
           />
         </FormGroup>
+        <p v-if="groupError" class="text-[12px] text-destructive" role="alert">{{ groupError }}</p>
       </div>
       <template #footer>
         <Button variant="ghost" @click="showGroupForm = false">Cancel</Button>

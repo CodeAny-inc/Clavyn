@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useIdentitiesStore } from "./identities";
+import { useHostsStore } from "./hosts";
 import type { Identity } from "../types";
+import * as api from "../api";
 
 const mockIdentity: Identity = {
   id: "id-1",
@@ -34,6 +36,43 @@ describe("identities store", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     vi.clearAllMocks();
+  });
+
+  describe("load racing a local change", () => {
+    it("keeps a group removal made while the load was in flight", async () => {
+      const store = useIdentitiesStore();
+      const grouped: Identity = { ...mockIdentity, group_id: "group-1" };
+      vi.mocked(api.listIdentities).mockResolvedValueOnce([grouped]);
+      await store.load();
+
+      let resolveList: ((items: Identity[]) => void) | undefined;
+      vi.mocked(api.listIdentities)
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveList = resolve; }))
+        .mockResolvedValueOnce([{ ...mockIdentity, group_id: null }]);
+      const pending = store.load();
+      store.ungroup("group-1");
+      resolveList!([{ ...mockIdentity, group_id: "group-1" }]);
+      await pending;
+
+      expect(store.identities[0].group_id).toBeNull();
+    });
+
+    it("repeats the read when a local change lands during it, so the list still loads", async () => {
+      const store = useIdentitiesStore();
+      let resolveFirst!: (items: Identity[]) => void;
+      vi.mocked(api.listIdentities)
+        .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve; }))
+        .mockResolvedValueOnce([{ ...mockIdentity, group_id: null }]);
+
+      const pending = store.load();
+      store.ungroup("group-1");
+      resolveFirst([{ ...mockIdentity, group_id: "group-1" }]);
+      await pending;
+
+      expect(api.listIdentities).toHaveBeenCalledTimes(2);
+      expect(store.loaded).toBe(true);
+      expect(store.identities[0].group_id).toBeNull();
+    });
   });
 
   describe("load", () => {
@@ -87,6 +126,25 @@ describe("identities store", () => {
       await store.deleteIdentity("id-1");
       expect(store.identities).toHaveLength(1);
       expect(store.identities.find((i) => i.id === "id-1")).toBeUndefined();
+    });
+
+    it("unlinks hosts that used the identity, as the backend does", async () => {
+      const store = useIdentitiesStore();
+      const hosts = useHostsStore();
+      const host = {
+        label: "Server", hostname: "example.com", port: 22, username: "root",
+        group_id: null, key_id: null, auth: "publickey" as const, tags: [],
+      };
+      hosts.hosts = [
+        { ...host, id: "linked", identity_id: "id-1" },
+        { ...host, id: "other", identity_id: "id-2" },
+      ];
+      await store.load();
+
+      await store.deleteIdentity("id-1");
+
+      expect(hosts.hosts.find((h) => h.id === "linked")?.identity_id).toBeNull();
+      expect(hosts.hosts.find((h) => h.id === "other")?.identity_id).toBe("id-2");
     });
   });
 });

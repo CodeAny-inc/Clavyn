@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
 import { confirmAction } from "../lib/confirmAction";
 import { useWorkspacesStore } from "../stores/workspaces";
 import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
@@ -37,7 +37,17 @@ const identities = useIdentitiesStore();
 const { maskAddress } = useMaskedAddress();
 
 const showForm = ref(false);
+// Changes whenever the dialog opens or closes. A save still in flight from one
+// opening must not retarget a later one.
+let formSession = 0;
+watch(showForm, () => {
+  formSession += 1;
+}, { flush: "sync" });
 const editing = ref<Workspace | null>(null);
+const saving = ref(false);
+const formError = ref("");
+const pickerError = ref("");
+const actionError = ref("");
 
 // Form state
 const form = ref({
@@ -89,6 +99,7 @@ function addWorkspace() {
     autoConnect: false,
     hostIds: [],
   };
+  formError.value = "";
   showForm.value = true;
 }
 
@@ -101,11 +112,28 @@ function editWorkspace(ws: Workspace) {
     autoConnect: ws.auto_connect ?? false,
     hostIds: [...(ws.host_ids ?? [])],
   };
+  formError.value = "";
   showForm.value = true;
 }
 
+// Creating is two writes, and the first one makes a new workspace each time it
+// runs. A second click while a save is in flight would create a duplicate.
 async function save() {
-  if (!form.value.name.trim()) return;
+  if (!form.value.name.trim() || saving.value) return;
+  saving.value = true;
+  formError.value = "";
+  const session = formSession;
+  try {
+    await saveForm();
+    if (session === formSession) showForm.value = false;
+  } catch (e) {
+    if (session === formSession) formError.value = `Failed to save workspace: ${e}`;
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function saveForm() {
   const wsData: Workspace = {
     id: editing.value?.id ?? crypto.randomUUID(),
     name: form.value.name.trim(),
@@ -119,25 +147,30 @@ async function save() {
   if (editing.value) {
     await workspaces.saveWorkspace(wsData);
   } else {
-    await workspaces.createWorkspace(form.value.name.trim());
-    // If we created new, also save the extra fields
-    const created = workspaces.workspaces[workspaces.workspaces.length - 1];
-    if (created) {
-      await workspaces.saveWorkspace({
-        ...created,
-        description: form.value.description.trim() || null,
-        color: form.value.color || null,
-        host_ids: form.value.hostIds,
-        auto_connect: form.value.autoConnect,
-      });
-    }
+    const session = formSession;
+    const created = await workspaces.createWorkspace(form.value.name.trim());
+    // The workspace exists from here on. Should saving the remaining fields
+    // fail, a retry updates this one instead of creating another, as long as
+    // the dialog that made it is still open.
+    if (session === formSession) editing.value = created;
+    await workspaces.saveWorkspace({
+      ...created,
+      description: wsData.description,
+      color: wsData.color,
+      host_ids: wsData.host_ids,
+      auto_connect: wsData.auto_connect,
+    });
   }
-  showForm.value = false;
 }
 
 async function remove(id: string, name: string) {
   if (await confirmAction(`Delete workspace "${name}"?`)) {
-    await workspaces.deleteWorkspace(id);
+    actionError.value = "";
+    try {
+      await workspaces.deleteWorkspace(id);
+    } catch (e) {
+      actionError.value = `Failed to delete workspace: ${e}`;
+    }
   }
 }
 
@@ -165,7 +198,12 @@ async function saveCurrentLayout(ws: Workspace) {
     title: tab.title,
     layout: paneTreeToLayout(tab.tree),
   }));
-  await workspaces.saveWorkspace({ ...ws, tabs: tabLayouts });
+  actionError.value = "";
+  try {
+    await workspaces.saveWorkspace({ ...ws, tabs: tabLayouts });
+  } catch (e) {
+    actionError.value = `Failed to save layout: ${e}`;
+  }
 }
 
 // --- restore a workspace layout into tabs ---
@@ -225,6 +263,7 @@ function restoreWorkspace(ws: Workspace) {
 function openHostPicker(ws: Workspace) {
   pickerWorkspace.value = ws;
   hostSearchQuery.value = "";
+  pickerError.value = "";
   showHostPicker.value = true;
 }
 
@@ -246,7 +285,13 @@ function toggleHostInPicker(hostId: string) {
 
 async function saveHostAssociations() {
   if (!pickerWorkspace.value) return;
-  await workspaces.saveWorkspace(pickerWorkspace.value);
+  pickerError.value = "";
+  try {
+    await workspaces.saveWorkspace(pickerWorkspace.value);
+  } catch (e) {
+    pickerError.value = `Failed to save associations: ${e}`;
+    return;
+  }
   showHostPicker.value = false;
   pickerWorkspace.value = null;
 }
@@ -305,6 +350,9 @@ const colorOptions = [
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3 sm:p-4">
+      <p v-if="actionError" class="mb-3 max-w-[800px] mx-auto text-[12px] text-destructive" role="alert">
+        {{ actionError }}
+      </p>
       <div v-if="workspaces.workspaces.length" class="flex flex-col gap-3 max-w-[800px] mx-auto">
         <div
           v-for="ws in workspaces.workspaces"
@@ -503,11 +551,13 @@ const colorOptions = [
           {{ form.hostIds.length }} host{{ form.hostIds.length === 1 ? '' : 's' }} associated.
           Use the link icon on the workspace card to manage hosts.
         </div>
+
+        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
-        <Button :disabled="!form.name.trim()" @click="save">
+        <Button :disabled="!form.name.trim() || saving" @click="save">
           {{ editing ? "Save changes" : "Create workspace" }}
         </Button>
       </template>
@@ -563,6 +613,7 @@ const colorOptions = [
         <p class="text-[11px] text-muted-foreground">
           {{ (pickerWorkspace.host_ids ?? []).length }} host{{ (pickerWorkspace.host_ids ?? []).length === 1 ? '' : 's' }} selected
         </p>
+        <p v-if="pickerError" class="text-[12px] text-destructive" role="alert">{{ pickerError }}</p>
       </div>
 
       <template #footer>
