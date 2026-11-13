@@ -14,7 +14,7 @@ use russh::keys::{Algorithm, PrivateKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Session};
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{
-    Attrs, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
+    Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -41,6 +41,8 @@ struct EndlessDirectory {
     stat_delay: Duration,
     /// Pause before each WRITE answer.
     write_delay: Duration,
+    /// Pause before each READ answer.
+    read_delay: Duration,
     /// Handles closed so far.
     closes: Arc<AtomicUsize>,
     /// Every file created so far, by path, with its contents.
@@ -54,6 +56,7 @@ impl Default for EndlessDirectory {
             page_delay: Duration::from_millis(5),
             stat_delay: Duration::ZERO,
             write_delay: Duration::ZERO,
+            read_delay: Duration::ZERO,
             closes: Arc::default(),
             files: Arc::default(),
         }
@@ -148,6 +151,27 @@ impl russh_sftp::server::Handler for EndlessDirectory {
         }
         contents[start..start + data.len()].copy_from_slice(&data);
         Ok(ok_status(id))
+    }
+
+    async fn read(
+        &mut self,
+        id: u32,
+        handle: String,
+        offset: u64,
+        len: u32,
+    ) -> Result<Data, Self::Error> {
+        tokio::time::sleep(self.read_delay).await;
+        let files = self.files.lock().expect("files");
+        let contents = files.get(&handle).ok_or(StatusCode::NoSuchFile)?;
+        let start = offset as usize;
+        if start >= contents.len() {
+            return Err(StatusCode::Eof);
+        }
+        let end = contents.len().min(start + len as usize);
+        Ok(Data {
+            id,
+            data: contents[start..end].to_vec(),
+        })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -719,6 +743,69 @@ async fn an_overwrite_upload_waits_for_one_already_writing_the_same_path() {
     assert!(
         contents == [b'b'; 100],
         "the file holds {} bytes, {} of them from the first upload, not the second upload's 100",
+        contents.len(),
+        contents.iter().filter(|&&byte| byte == b'a').count()
+    );
+    manager.close_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_download_waits_for_one_already_writing_the_same_local_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let target = dir.path().join("data.bin");
+    // Slow reads keep the large download writing while the small one starts.
+    let sftp = EndlessDirectory {
+        read_delay: Duration::from_millis(2),
+        ..EndlessDirectory::default()
+    };
+    {
+        let mut files = sftp.files.lock().expect("files");
+        files.insert("/large.bin".into(), vec![b'a'; 1024 * 1024]);
+        files.insert("/small.bin".into(), vec![b'b'; 100]);
+    }
+    let port = serve(TestServer {
+        sftp,
+        ..TestServer::default()
+    })
+    .await;
+    // Two sessions, since the local disk is shared by all of them.
+    let manager = Arc::new(SftpManager::new());
+    for id in ["first", "second"] {
+        manager
+            .connect(id.into(), &host(port), None, known_hosts(&dir), None, None, Some(PASSWORD))
+            .await
+            .expect("sftp connect");
+    }
+
+    let first = tokio::spawn({
+        let manager = manager.clone();
+        let target = target.clone();
+        async move { manager.download_to_local("first", "/large.bin", &target, true).await }
+    });
+    let started = async {
+        while std::fs::metadata(&target).map_or(true, |meta| meta.len() == 0) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), started)
+        .await
+        .expect("the first download never started writing");
+    // Reached through a second spelling of the same directory, which a
+    // comparison of the paths as given would take for another file.
+    std::fs::create_dir(dir.path().join("sub")).expect("sub dir");
+    let same_file = dir.path().join("sub").join("..").join("data.bin");
+    let second = manager
+        .download_to_local("second", "/small.bin", &same_file, true)
+        .await;
+
+    first.await.expect("download task").expect("first download");
+    second.expect("second download");
+    // The second download replaced the first's file once it was complete,
+    // rather than truncating and writing it while the first still was.
+    let contents = std::fs::read(&target).expect("downloaded file");
+    assert!(
+        contents == [b'b'; 100],
+        "the file holds {} bytes, {} of them from the first download, not the second download's 100",
         contents.len(),
         contents.iter().filter(|&&byte| byte == b'a').count()
     );

@@ -11,7 +11,8 @@ use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::Path;
+use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -76,6 +77,9 @@ impl SftpEntry {
 /// `close_all` can always take an entry out of reach at once.
 pub struct SftpManager {
     sessions: Mutex<HashMap<String, Arc<SftpConnection>>>,
+    /// The local files a download is under way to, across every session: the
+    /// local disk is one for all of them. See [`download_destination`].
+    downloads: WriterLocks<PathBuf>,
 }
 
 struct SftpConnection {
@@ -97,42 +101,84 @@ struct SftpConnection {
     /// The remote paths an upload or write is under way to, each with the
     /// lock the next writer to that path waits on; see
     /// [`SftpConnection::claim_destination`].
-    writers: WriterLocks,
+    writers: WriterLocks<String>,
 }
 
-type WriterLocks = std::sync::Mutex<HashMap<String, Arc<Mutex<()>>>>;
+/// One lock per destination a writer is under way to, the next writer to the
+/// same destination waiting on it.
+type WriterLocks<K> = std::sync::Mutex<HashMap<K, Arc<Mutex<()>>>>;
 
-fn lock_writers(
-    writers: &WriterLocks,
-) -> std::sync::MutexGuard<'_, HashMap<String, Arc<Mutex<()>>>> {
+fn lock_writers<K>(
+    writers: &WriterLocks<K>,
+) -> std::sync::MutexGuard<'_, HashMap<K, Arc<Mutex<()>>>> {
     // The map only ever holds valid locks, whatever a panicking holder was doing.
     writers.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Sole right to write one remote path on one connection, released on drop.
-struct DestinationGuard<'a> {
-    writers: &'a WriterLocks,
-    path: String,
+/// Sole right to write one destination, released on drop.
+struct DestinationGuard<'a, K: Eq + Hash> {
+    writers: &'a WriterLocks<K>,
+    destination: K,
     lock: Option<Arc<Mutex<()>>>,
     held: Option<OwnedMutexGuard<()>>,
 }
 
-impl Drop for DestinationGuard<'_> {
+impl<K: Eq + Hash> Drop for DestinationGuard<'_, K> {
     fn drop(&mut self) {
         drop(self.held.take());
         let mut writers = lock_writers(self.writers);
         drop(self.lock.take());
-        // Every writer holding or waiting on the path keeps a clone, so a
-        // count of one means the map's own copy is the last and the entry can
-        // go. The count is read under the map lock, which every clone is taken
-        // under, so no writer can be joining at the same moment.
+        // Every writer holding or waiting on the destination keeps a clone, so
+        // a count of one means the map's own copy is the last and the entry
+        // can go. The count is read under the map lock, which every clone is
+        // taken under, so no writer can be joining at the same moment.
         if writers
-            .get(&self.path)
+            .get(&self.destination)
             .is_some_and(|lock| Arc::strong_count(lock) == 1)
         {
-            writers.remove(&self.path);
+            writers.remove(&self.destination);
         }
     }
+}
+
+/// Wait until no other writer in `writers` is writing `destination`, then hold
+/// it until the guard drops.
+async fn claim<K: Eq + Hash + Clone>(
+    writers: &WriterLocks<K>,
+    destination: K,
+) -> DestinationGuard<'_, K> {
+    let lock = lock_writers(writers)
+        .entry(destination.clone())
+        .or_default()
+        .clone();
+    // Built before the wait so that a writer cancelled while waiting still
+    // takes its entry out of the map when nothing else needs it.
+    let mut guard = DestinationGuard {
+        writers,
+        destination,
+        lock: Some(lock.clone()),
+        held: None,
+    };
+    guard.held = Some(lock.lock_owned().await);
+    guard
+}
+
+/// The key a download to `local_path` is serialized under: the path with its
+/// directory resolved, so that two spellings of one directory, through a
+/// symlink or a `..`, still name one file. Falls back to the path as given
+/// when the directory cannot be resolved; the open that follows then fails
+/// on its own.
+async fn download_destination(local_path: &Path) -> PathBuf {
+    let resolved = match (local_path.parent(), local_path.file_name()) {
+        (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => {
+            tokio::fs::canonicalize(parent)
+                .await
+                .ok()
+                .map(|parent| parent.join(name))
+        }
+        _ => None,
+    };
+    resolved.unwrap_or_else(|| local_path.to_path_buf())
 }
 
 impl SftpConnection {
@@ -142,21 +188,8 @@ impl SftpConnection {
     /// and write it at once, leaving a mix of both that each reports as a
     /// success. Paths are compared as given, which is how the browser builds
     /// them.
-    async fn claim_destination(&self, path: &str) -> DestinationGuard<'_> {
-        let lock = lock_writers(&self.writers)
-            .entry(path.to_owned())
-            .or_default()
-            .clone();
-        // Built before the wait so that a writer cancelled while waiting still
-        // takes its entry out of the map when nothing else needs it.
-        let mut guard = DestinationGuard {
-            writers: &self.writers,
-            path: path.to_owned(),
-            lock: Some(lock.clone()),
-            held: None,
-        };
-        guard.held = Some(lock.lock_owned().await);
-        guard
+    async fn claim_destination(&self, path: &str) -> DestinationGuard<'_, String> {
+        claim(&self.writers, path.to_owned()).await
     }
 
     /// Run `operation` until it finishes or the connection is closed.
@@ -255,6 +288,7 @@ impl SftpManager {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            downloads: WriterLocks::default(),
         }
     }
 
@@ -448,7 +482,8 @@ impl SftpManager {
 
     /// Stream a remote file directly to a local path. An existing local file is
     /// refused unless the caller explicitly opts in to overwrite, mirroring
-    /// `upload_from_local`.
+    /// `upload_from_local`. A download waits for any other download to the same
+    /// local file, from any session, to finish first.
     pub async fn download_to_local(
         &self,
         session_id: &str,
@@ -459,6 +494,11 @@ impl SftpManager {
         let conn = self.get(session_id).await?;
 
         conn.until_closed(async {
+            // Two downloads to one local file would otherwise truncate and
+            // write it at once, from any two sessions, leaving a mix of both
+            // that each reports as a success.
+            let destination = download_destination(local_path).await;
+            let _destination = claim(&self.downloads, destination).await;
             let mut remote = conn
                 .sftp
                 .open(remote_path)
