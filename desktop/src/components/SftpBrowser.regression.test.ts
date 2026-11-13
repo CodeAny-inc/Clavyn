@@ -97,14 +97,15 @@ describe("SFTP browser entry actions across navigation", () => {
   });
 
   it("deletes in the directory the menu was opened on and names the full path", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    setInvokeHandler("plugin:dialog|message", () => "Ok");
     const wrapper = await mountConnected();
 
     await row(wrapper, "notes.txt").trigger("contextmenu");
     await menuButton(wrapper, "Delete")!.trigger("click");
     await flushPromises();
 
-    expect(confirm).toHaveBeenCalledWith('Delete "/home/u/notes.txt"?');
+    expect(calls("plugin:dialog|message").map(([, args]) => args.message))
+      .toEqual(['Delete "/home/u/notes.txt"?']);
     expect(calls("sftp_remove_file").map(([, args]) => args.path)).toEqual(["/home/u/notes.txt"]);
   });
 });

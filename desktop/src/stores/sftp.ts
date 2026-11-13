@@ -175,19 +175,21 @@ export const useSftpStore = defineStore("sftp", () => {
     const id = sessionId.value;
     if (!id) return;
     const request = ++listGeneration;
+    const current = () => request === listGeneration && sessionId.value === id;
     listPending = true;
     destinationPath = path;
     error.value = null;
     loading.value = true;
     try {
       const listed = await api.sftpListDir(id, path);
-      if (request !== listGeneration || id !== sessionId.value) return;
+      if (!current()) return;
       entries.value = listed;
       currentPath.value = path;
       selectedEntry.value = null;
       if (staleDir === path) staleDir = null;
     } catch (e) {
-      if (request !== listGeneration || id !== sessionId.value) return;
+      // A superseded listing's failure is about a directory the user has left.
+      if (!current()) return;
       destinationPath = currentPath.value;
       error.value = String(e);
       if (staleDir === currentPath.value) {

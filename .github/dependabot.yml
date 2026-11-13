@@ -8,6 +8,11 @@ updates:
     directory: /desktop
     schedule:
       interval: weekly
+    # A release is only proposed once it has been public for a week, which
+    # leaves time for a compromised or broken version to be pulled first.
+    # Security updates are not delayed.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     ignore:
       # typescript 7.x is the Go-native compiler line and ships no JS API
@@ -47,6 +52,8 @@ updates:
     directory: /desktop/e2e
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       e2e-minor-and-patch:
@@ -59,6 +66,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     groups:
       cargo-minor-and-patch:
@@ -74,4 +83,6 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5

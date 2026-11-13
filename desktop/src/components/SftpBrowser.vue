@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { confirmAction } from "../lib/confirmAction";
 import {
   AlertCircle,
   ArrowUp,
@@ -28,6 +29,7 @@ import {
   sshConfigurationKey,
   sshIdentityReady,
 } from "../lib/sshIdentity";
+import { readableName } from "../lib/readableName";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -303,7 +305,8 @@ async function confirmRename() {
 
 async function deleteEntry(target: SftpEntryRef) {
   closeContextMenu();
-  if (!confirm(`Delete "${joinPath(target.dir, target.entry.name)}"?`)) return;
+  const path = readableName(joinPath(target.dir, target.entry.name));
+  if (!(await confirmAction(`Delete "${path}"?`))) return;
   try {
     await sftp.deleteEntry(target);
   } catch {
@@ -347,7 +350,7 @@ async function upload() {
         sftp.error = `A directory named "${fileName}" already exists`;
         return;
       }
-      overwrite = confirm(
+      overwrite = await confirmAction(
         `"${fileName}" already exists on the remote host. Overwrite it?`,
       );
       if (!overwrite) return;
@@ -506,7 +509,7 @@ async function upload() {
               "
               @click="navigateToSegment(index)"
             >
-              {{ segment }}
+              {{ readableName(segment) }}
             </button>
           </template>
         </div>
@@ -567,7 +570,7 @@ async function upload() {
                     :class="entry.is_dir ? 'text-primary' : 'text-muted-foreground'"
                     :stroke-width="1.75"
                   />
-                  <span class="truncate">{{ entry.name }}</span>
+                  <span class="truncate">{{ readableName(entry.name) }}</span>
                 </div>
               </td>
               <td class="px-3 py-1.5 text-right text-[12px] tabular-nums text-muted-foreground">
@@ -596,7 +599,7 @@ async function upload() {
       <div class="flex items-center gap-3 border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
         <span>{{ sftp.entries.length }} items</span>
         <span v-if="sftp.selectedEntry" class="truncate">
-          Selected: {{ sftp.selectedEntry.name }}
+          Selected: {{ readableName(sftp.selectedEntry.name) }}
         </span>
       </div>
     </div>

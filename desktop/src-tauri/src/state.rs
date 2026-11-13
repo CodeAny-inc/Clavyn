@@ -1,5 +1,6 @@
-use crate::host_key_prompt::PromptGate as HostKeyPromptGate;
+use crate::host_key_prompt::{DialogSlot, PromptGate};
 use clavyn_core::known_hosts::KnownHosts;
+use clavyn_core::output::OutputCredit;
 use clavyn_core::session::SessionManager;
 use clavyn_core::sftp::SftpManager;
 use clavyn_core::store::Store;
@@ -199,8 +200,13 @@ pub struct AppState {
     pub vault: Mutex<Vault>,
     pub known_hosts: Arc<Mutex<KnownHosts>>,
     /// Serializes the native confirmation shown before a host key is forgotten
-    /// or replaced, so a caller cannot stack dialogs on top of each other.
-    pub host_key_prompt: HostKeyPromptGate,
+    /// or replaced, so a caller cannot stack dialogs on top of each other. It
+    /// shares one dialog slot with `host_change_prompt`, so the two kinds of
+    /// question do not stack either, and keeps a cooldown of its own.
+    pub host_key_prompt: PromptGate,
+    /// Serializes the native confirmation shown before a host or identity write
+    /// lets a vault key sign in somewhere new; see `host_change_prompt`.
+    pub host_change_prompt: PromptGate,
     pub vault_session: VaultSessionSlot,
     pub auth_generation: AuthGeneration,
     /// Serializes Keychain credential creation/deletion with destructive vault
@@ -315,15 +321,19 @@ impl LocalTerminals {
         removed
     }
 
-    /// Drops every live terminal and forgets every reservation. Live terminals
-    /// are disowned first so a still-running reader cannot speak for an id a
-    /// later session reuses, and a reservation left behind would hold a slot
-    /// for a terminal nobody wants any more.
-    pub fn clear(&mut self) {
-        for (_, terminal) in self.live.drain() {
-            terminal.disown();
-        }
+    /// Takes out every live terminal and forgets every reservation, returning
+    /// the terminals so the caller can drop them with the lock released. Live
+    /// terminals are disowned here so a still-running reader cannot speak for
+    /// an id a later session reuses, and a reservation left behind would hold a
+    /// slot for a terminal nobody wants any more.
+    #[must_use = "dropping the terminals under the map lock stalls every other session"]
+    pub fn clear(&mut self) -> Vec<LocalTerminal> {
         self.opening.clear();
+        self.live
+            .drain()
+            .map(|(_, terminal)| terminal)
+            .inspect(LocalTerminal::disown)
+            .collect()
     }
 
     /// Takes out the terminals `exited` reports as finished, returning them so
@@ -348,6 +358,14 @@ impl LocalTerminals {
 
 /// A local terminal session backed by portable-pty.
 pub struct LocalTerminal {
+    /// Polled with `try_wait` to tell a live terminal from one whose shell
+    /// has already exited. Dropping the terminal ends and reaps the shell.
+    ///
+    /// Declared first so it is dropped first: the shell gets its hangup before
+    /// the writer is dropped. The writer's drop writes EOF to the master, which
+    /// blocks while the tty input queue is full until the shell's side of the
+    /// tty closes.
+    pub child: LocalShell,
     /// Behind its own lock so a write never runs under the terminal map's
     /// lock. A write to a PTY master blocks once the tty input buffer fills and
     /// the foreground process is not reading its stdin, and holding the map
@@ -356,9 +374,6 @@ pub struct LocalTerminal {
     /// which take the same lock to admit a session id.
     pub writer: Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
     pub master: Box<dyn portable_pty::MasterPty + Send>,
-    /// Kept alive so the shell is not reaped, and polled with `try_wait` to
-    /// tell a live terminal from one whose shell has already exited.
-    pub child: Box<dyn portable_pty::Child + Send + Sync>,
     /// Cleared when this terminal stops holding its session id.
     ///
     /// The thread draining the PTY outlives the map entry: it is detached, and
@@ -369,12 +384,134 @@ pub struct LocalTerminal {
     /// receive the old shell's output and then be disconnected by its
     /// `session-closed`. The reader checks this before it emits.
     pub owns_session_id: Arc<AtomicBool>,
+    /// Output delivered to the webview and not yet acknowledged, shared with
+    /// the task batching this terminal's output, which stops taking output
+    /// from the PTY while it is spent.
+    pub credit: Arc<OutputCredit>,
+}
+
+/// How long a closed tab's shell gets to exit on its own after the terminal
+/// hangs up, before it is signalled.
+const SHELL_EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The shell process behind a local terminal.
+///
+/// Dropping it ends the shell and reaps it, so a closed tab leaves neither a
+/// running shell nor a zombie behind. All of that happens on a thread of its
+/// own, because the shutdown can take seconds and a terminal is dropped by an
+/// async command handler. On Unix the shell is sent SIGHUP, as closing a
+/// terminal window does, and gets [`SHELL_EXIT_GRACE`] to finish whatever it
+/// does on hangup. Only then is it forced: portable-pty's kill, which ends in
+/// SIGKILL on Unix and process termination on Windows. Background jobs the
+/// user detached from the shell are not touched.
+pub struct LocalShell {
+    child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
+    /// Set once `try_wait` has collected the exit status. The process id may
+    /// belong to an unrelated process from then on, so it is never signalled.
+    reaped: bool,
+}
+
+impl LocalShell {
+    pub fn new(child: Box<dyn portable_pty::Child + Send + Sync>) -> Self {
+        Self {
+            child: Some(child),
+            reaped: false,
+        }
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+        let Some(child) = self.child.as_mut() else {
+            return Ok(None);
+        };
+        let status = child.try_wait()?;
+        self.reaped |= status.is_some();
+        Ok(status)
+    }
+}
+
+/// Whether `try_wait` reports `child` as still running.
+///
+/// A status that cannot be read counts as not running. On Unix that is how a
+/// process something else has already collected shows up (`ECHILD`), and its
+/// pid may name an unrelated process from then on, so nothing may signal it.
+fn shell_still_running(child: &mut (dyn portable_pty::Child + Send + Sync)) -> bool {
+    matches!(child.try_wait(), Ok(None))
+}
+
+/// End `child` and collect its exit status, blocking until it is gone.
+///
+/// Every signal goes to a raw pid, so each one is sent only right after
+/// [`shell_still_running`] has confirmed the shell is still this process's
+/// uncollected child. A shell that has exited, or whose status cannot be
+/// read, is left alone.
+fn end_shell(mut child: Box<dyn portable_pty::Child + Send + Sync>) {
+    if !shell_still_running(&mut *child) {
+        return;
+    }
+    // The PTY hangup only reaches the shell once every copy of the master is
+    // closed, and the output reader holds one until the slave side closes, so
+    // the shell is sent SIGHUP directly.
+    #[cfg(unix)]
+    if let Some(pid) = child.process_id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: kill(2) takes plain integers and has no memory effects.
+        unsafe {
+            libc::kill(pid, libc::SIGHUP);
+        }
+    }
+    let deadline = std::time::Instant::now() + SHELL_EXIT_GRACE;
+    loop {
+        if !shell_still_running(&mut *child) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+impl Drop for LocalShell {
+    fn drop(&mut self) {
+        let Some(child) = self.child.take() else {
+            return;
+        };
+        if self.reaped {
+            return;
+        }
+        // The slot lets this thread take the child back if no reaper thread
+        // can be started, and end it here rather than leave a zombie.
+        let slot = Arc::new(std::sync::Mutex::new(Some(child)));
+        let reaper_slot = slot.clone();
+        let spawned = std::thread::Builder::new()
+            .name("local-shell-reaper".into())
+            .spawn(move || {
+                let child = reaper_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(child) = child {
+                    end_shell(child);
+                }
+            });
+        if spawned.is_err() {
+            let child = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(child) = child {
+                end_shell(child);
+            }
+        }
+    }
 }
 
 impl LocalTerminal {
-    /// Marks the terminal as no longer holding its session id.
+    /// Marks the terminal as no longer holding its session id, and stops
+    /// holding its output back.
+    ///
+    /// Acknowledgements find a terminal by its id, so none reach one that has
+    /// given its id up. Its output task still has to reach the end of the
+    /// stream to deliver the tail and end the stream for the pane, and with
+    /// the limit in place it could wait on credit for good.
     pub fn disown(&self) {
         self.owns_session_id.store(false, Ordering::Release);
+        self.credit.lift();
     }
 }
 
@@ -421,11 +558,13 @@ impl AppState {
         let sessions = Arc::new(SessionManager::new(data_callback, close_callback));
         let sftp = Arc::new(SftpManager::new());
 
+        let dialogs = DialogSlot::default();
         Ok(Arc::new(Self {
             store: Mutex::new(store),
             vault: Mutex::new(vault),
             known_hosts: Arc::new(Mutex::new(known_hosts)),
-            host_key_prompt: HostKeyPromptGate::new(),
+            host_key_prompt: PromptGate::new().sharing(dialogs.clone()),
+            host_change_prompt: crate::host_change_prompt::gate().sharing(dialogs),
             vault_session: VaultSessionSlot::new(),
             auth_generation: AuthGeneration::new(),
             biometric_mutation: Mutex::new(()),
@@ -527,8 +666,9 @@ mod local_terminal_ownership_tests {
             LocalTerminal {
                 writer,
                 master: pair.master,
-                child,
+                child: LocalShell::new(child),
                 owns_session_id: owns_session_id.clone(),
+                credit: Default::default(),
             },
             owns_session_id,
         )
@@ -549,9 +689,262 @@ mod local_terminal_ownership_tests {
 
         // The id is free for reuse from here, so the reader still draining the
         // old shell must stop addressing it.
-        let mut closed = locals.remove("local-0").expect("the terminal was live");
+        let _closed = locals.remove("local-0").expect("the terminal was live");
         assert!(!owns.load(Ordering::Acquire));
-        let _ = closed.child.kill();
+    }
+
+    /// Closing a tab ends its shell and collects it, rather than leaving a
+    /// running shell or a zombie for as long as the app runs.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_a_terminal_ends_and_reaps_its_shell() {
+        let (terminal, _) = terminal();
+        let pid = terminal.child.child.as_ref().and_then(|c| c.process_id()).expect("pid");
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        assert!(proc_entry.exists());
+        drop(terminal);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while proc_entry.exists() {
+            assert!(std::time::Instant::now() < deadline, "the shell is still around");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    /// A shell that ignores the hangup is still ended, after its grace period,
+    /// and the drop that starts all this returns at once: it runs on an async
+    /// command handler.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_shell_that_ignores_the_hangup_is_ended_without_blocking_the_drop() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        // `exec` makes the HUP-ignoring sleep the process that is ended. Forked
+        // instead, it would survive its shell and outlive the test.
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap '' HUP; exec sleep 60"]);
+        let child = pair.slave.spawn_command(command).expect("a shell can be spawned");
+        let pid = child.process_id().expect("pid");
+        let terminal = LocalTerminal {
+            writer: Arc::new(std::sync::Mutex::new(
+                pair.master.take_writer().expect("the master has a writer"),
+            )),
+            master: pair.master,
+            child: LocalShell::new(child),
+            owns_session_id: Arc::new(AtomicBool::new(true)),
+            credit: Default::default(),
+        };
+        // Let the trap and the exec take effect before the hangup arrives.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let started = std::time::Instant::now();
+        drop(terminal);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while proc_entry.exists() {
+            assert!(std::time::Instant::now() < deadline, "the shell is still around");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// The output reader keeps its own copy of the PTY master, so closing the
+    /// terminal does not hang the tty up while the reader is blocked. The shell
+    /// still hears about the close at once rather than after the grace period.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_busy_shell_gets_the_hangup_without_waiting_for_the_reader() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "trap 'exit 0' HUP; while :; do sleep 0.05; done"]);
+        let child = pair.slave.spawn_command(command).expect("a shell can be spawned");
+        let pid = child.process_id().expect("pid");
+        let reader = pair.master.try_clone_reader().expect("a reader");
+        let terminal = LocalTerminal {
+            writer: Arc::new(std::sync::Mutex::new(
+                pair.master.take_writer().expect("the master has a writer"),
+            )),
+            master: pair.master,
+            child: LocalShell::new(child),
+            owns_session_id: Arc::new(AtomicBool::new(true)),
+            credit: Default::default(),
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        drop(terminal);
+        let proc_entry = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+        while proc_entry.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell did not get the hangup while the reader held the master"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(reader);
+    }
+
+    /// Stands in for the real writer, whose drop writes EOF to the master and
+    /// blocks while the tty input queue is full. This one blocks until the
+    /// shell is gone, up to a deadline, and records whether it got there.
+    #[cfg(target_os = "linux")]
+    struct WriterBlockedUntilShellExits {
+        proc_entry: std::path::PathBuf,
+        unblocked: Arc<AtomicBool>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl std::io::Write for WriterBlockedUntilShellExits {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for WriterBlockedUntilShellExits {
+        fn drop(&mut self) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+            while self.proc_entry.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            self.unblocked
+                .store(!self.proc_entry.exists(), Ordering::Release);
+        }
+    }
+
+    /// Only the shell's side of the tty closing unblocks the writer's drop, so
+    /// the shell is hung up before the writer is dropped rather than after.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_terminal_hangs_its_shell_up_before_dropping_its_writer() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty can be opened");
+        let mut command = CommandBuilder::new("/bin/sh");
+        command.args(["-c", "while :; do sleep 0.05; done"]);
+        let child = pair.slave.spawn_command(command).expect("a shell can be spawned");
+        let pid = child.process_id().expect("pid");
+        let unblocked = Arc::new(AtomicBool::new(false));
+        let writer: Box<dyn std::io::Write + Send> = Box::new(WriterBlockedUntilShellExits {
+            proc_entry: std::path::PathBuf::from(format!("/proc/{pid}")),
+            unblocked: unblocked.clone(),
+        });
+        let terminal = LocalTerminal {
+            child: LocalShell::new(child),
+            writer: Arc::new(std::sync::Mutex::new(writer)),
+            master: pair.master,
+            owns_session_id: Arc::new(AtomicBool::new(true)),
+            credit: Default::default(),
+        };
+
+        drop(terminal);
+        assert!(
+            unblocked.load(Ordering::Acquire),
+            "the writer was dropped before the shell was hung up"
+        );
+    }
+
+    /// A child whose status cannot be read, which is how a shell that
+    /// something else has already collected reports itself, while its pid
+    /// names another process.
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct CollectedElsewhere {
+        pid: u32,
+        killed: Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::ChildKiller for CollectedElsewhere {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.killed.store(true, Ordering::Release);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(Self {
+                pid: self.pid,
+                killed: self.killed.clone(),
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl portable_pty::Child for CollectedElsewhere {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Err(std::io::Error::from_raw_os_error(libc::ECHILD))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::from_raw_os_error(libc::ECHILD))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(self.pid)
+        }
+    }
+
+    /// Once something else has collected the shell, its pid may belong to an
+    /// unrelated process, so ending the shell signals nothing at all.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_whose_status_cannot_be_read_is_never_signalled() {
+        // The unrelated process that now holds the shell's old pid.
+        let mut bystander = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleep can be spawned");
+        let killed = Arc::new(AtomicBool::new(false));
+
+        end_shell(Box::new(CollectedElsewhere {
+            pid: bystander.id(),
+            killed: killed.clone(),
+        }));
+        // A SIGHUP sent to the pid would end the bystander within this time.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let bystander_alive = bystander
+            .try_wait()
+            .expect("the bystander can be polled")
+            .is_none();
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+
+        assert!(!killed.load(Ordering::Acquire), "the shell was force-killed");
+        assert!(bystander_alive, "the process holding the pid was signalled");
+    }
+
+    #[test]
+    fn clearing_hands_back_every_terminal_and_forgets_reservations() {
+        let mut locals = LocalTerminals::default();
+        let owns = live(&mut locals, "local-0");
+        let _pending = locals.reserve("local-1".to_string());
+
+        let closed = locals.clear();
+        assert_eq!(closed.len(), 1);
+        assert!(!owns.load(Ordering::Acquire));
+        assert_eq!(locals.len(), 0);
     }
 
     #[test]
@@ -562,9 +955,33 @@ mod local_terminal_ownership_tests {
         let reaped = locals.reap_exited(|_| true);
         assert_eq!(reaped.len(), 1);
         assert!(!owns.load(Ordering::Acquire));
-        for mut terminal in reaped {
-            let _ = terminal.child.kill();
-        }
+    }
+
+    /// Every way a terminal leaves the map lifts its output limit, so its
+    /// output task reaches the end of the stream with nothing acknowledging.
+    #[test]
+    fn a_terminal_leaving_the_map_stops_holding_its_output_back() {
+        let spent = |locals: &LocalTerminals, id: &str| {
+            let credit = locals.get_live(id).expect("live").credit.clone();
+            credit.spend(clavyn_core::output::OUTPUT_WINDOW as usize);
+            assert!(!credit.has_room());
+            credit
+        };
+        let mut locals = LocalTerminals::default();
+        live(&mut locals, "closed");
+        live(&mut locals, "reaped");
+        live(&mut locals, "cleared");
+        let closed = spent(&locals, "closed");
+        let reaped = spent(&locals, "reaped");
+        let cleared = spent(&locals, "cleared");
+
+        let _closed = locals.remove("closed").expect("live");
+        assert!(closed.has_room());
+        let _reaped = locals.reap_exited(|term| Arc::ptr_eq(&term.credit, &reaped));
+        assert!(reaped.has_room());
+        assert!(!cleared.has_room());
+        let _cleared = locals.clear();
+        assert!(cleared.has_room());
     }
 
     #[test]
@@ -576,8 +993,7 @@ mod local_terminal_ownership_tests {
         assert!(locals.remove("other").is_none());
         assert!(owns.load(Ordering::Acquire));
 
-        let mut open = locals.remove("local-0").expect("the terminal was live");
-        let _ = open.child.kill();
+        let _open = locals.remove("local-0").expect("the terminal was live");
     }
 
     /// The window the token closes: a close drops the first open's
@@ -597,10 +1013,9 @@ mod local_terminal_ownership_tests {
 
         // And its fulfil installs nothing — the caller tears the shell down.
         let (stale_terminal, _) = terminal();
-        let mut refused = locals
+        let _refused = locals
             .fulfil("local-0", stale, stale_terminal)
             .expect_err("the reservation is no longer the first request's");
-        let _ = refused.child.kill();
         assert!(locals.contains("local-0"));
         assert!(locals.get_live("local-0").is_none());
 
@@ -608,8 +1023,7 @@ mod local_terminal_ownership_tests {
         assert!(locals.fulfil("local-0", current, live_terminal).is_ok());
         assert!(owns.load(Ordering::Acquire));
 
-        let mut open = locals.remove("local-0").expect("the terminal is live");
-        let _ = open.child.kill();
+        let _open = locals.remove("local-0").expect("the terminal is live");
     }
 }
 

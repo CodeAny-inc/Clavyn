@@ -25,8 +25,9 @@ reference this same canonical CLI.
 It holds a persistent Chromium + page (the "harness") so state survives across
 commands — `navigate` then `snapshot` then `screenshot` all share one session.
 The renderer is loaded from the Vite dev server with `tauri-fixture.js` mocking
-the full Tauri IPC surface, so SSH/SFTP/vault calls are deterministic and never
-touch the network. Every command prints one JSON object on stdout; use
+the IPC calls the terminal, SFTP and vault-status flows make, so those are
+deterministic and never touch the network; any other command throws
+`Unhandled test IPC` until the fixture gets a stub for it. Every command prints one JSON object on stdout; use
 `--pretty` for humans. Errors include a `remedy` field telling you what to do.
 
 ### Prerequisites (run once per machine)

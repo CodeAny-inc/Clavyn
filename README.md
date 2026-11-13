@@ -28,12 +28,12 @@ Clavyn/
     src/
       connection.rs       # SSH transport (russh)
       host.rs             # host / auth models
-      keys.rs             # key parse / generate (russh-keys)
+      keys.rs             # key parse / generate (russh)
       known_hosts.rs      # TOFU known_hosts store
       vault.rs            # encrypted-at-rest key vault
       error.rs
   desktop/                # Tauri desktop app
-    src/                  # frontend (HTML/JS, to be upgraded to a framework)
+    src/                  # frontend (Vue 3 + Pinia, xterm.js)
     src-tauri/            # Rust backend + Tauri config
       src/
         commands.rs       # Tauri commands exposed to the frontend
@@ -51,7 +51,7 @@ Clavyn/
   ```sh
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
-- **Node.js** 18+ and npm
+- **Node.js** 22.12+ (or 24) and npm
 - **Tauri v2 system dependencies**:
   - macOS: `xcode-select --install`
   - Linux (Debian): `sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
@@ -64,7 +64,7 @@ Clavyn/
 cd desktop
 npm install
 npm run tauri dev    # launches the app with hot reload
-npm run tauri build  # produces installers in src-tauri/target/release/bundle
+npm run tauri build  # produces installers in target/release/bundle at the repo root
 ```
 
 ## A note on "damaged app" / SmartScreen warnings
