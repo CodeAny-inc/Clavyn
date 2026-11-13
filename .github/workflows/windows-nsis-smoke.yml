@@ -31,14 +31,18 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run in progress for it. Any
+# other run gets a group of its own, so a push to main never cancels or
+# replaces the smoke test of the commit before it.
 concurrency:
-  group: windows-nsis-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: windows-nsis-smoke-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows-nsis-smoke:
     name: Windows NSIS smoke test
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,7 +52,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # v1
+      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -74,7 +78,9 @@ jobs:
           # bash passes the single-quoted JSON through verbatim. Under PowerShell,
           # how embedded quotes reach npx depends on which npx shim it resolves
           # (.cmd or .ps1), so no one escaping works everywhere.
-          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # Everything after `--` goes to cargo; `--locked` builds against the
+          # committed Cargo.lock and fails if it is out of date.
+          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
       - name: Verify NSIS installer was produced
         shell: pwsh
         run: |

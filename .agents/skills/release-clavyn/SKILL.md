@@ -69,7 +69,11 @@ Maintain `CHANGELOG.md` at repo root in
     ./scripts/version.sh 0.1.2-alpha.4   # or: alpha | beta | patch | minor | major | stable
 
 This updates `Cargo.toml`, `desktop/package.json`, and
-`desktop/src-tauri/tauri.conf.json` together.
+`desktop/src-tauri/tauri.conf.json` together, then runs `cargo update -w` so
+the workspace entries in `Cargo.lock` follow. CI builds with `--locked`, so
+`Cargo.lock` must be in the release commit. The step needs cargo, plus network
+access if the local registry cache cannot resolve offline. If it fails, all
+four files are restored.
 
 ### 4. Verify before tagging
 
