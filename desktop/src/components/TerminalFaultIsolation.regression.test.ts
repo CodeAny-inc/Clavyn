@@ -28,6 +28,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
     root.append(this.textarea); container.append(root);
   }
   onData(handler: (data: string) => void) { this.input = handler; }
+  onBinary() { return { dispose() {} }; }
   focus() { this.textarea.focus(); }
   write(data: string | Uint8Array, callback?: () => void) {
     this.output.push(typeof data === "string" ? data : new TextDecoder().decode(data));

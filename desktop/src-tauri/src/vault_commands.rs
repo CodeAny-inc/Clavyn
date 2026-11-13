@@ -39,7 +39,12 @@ async fn contain_open_sessions(
     // session reachable once the budget lapses.
     tokio::time::timeout(budget, async {
         tokio::join!(
-            async { local_terminals.lock().await.clear() },
+            async {
+                // Dropped once the guard is gone, so a terminal whose teardown
+                // blocks does not hold the map lock while it does.
+                let closed = local_terminals.lock().await.clear();
+                drop(closed);
+            },
             sftp.close_all(),
             sessions.close_all(),
         );
