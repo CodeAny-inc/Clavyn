@@ -1,6 +1,7 @@
 use crate::host::{AuthMethod, Host};
 use crate::identity::Identity;
 use crate::known_hosts::KnownHosts;
+use crate::transport::Transport;
 use crate::vault::Vault;
 use crate::{CoreError, Result};
 use russh::client::{self, Config, Handle};
@@ -252,6 +253,14 @@ fn rsa_hash_for(advertised: Option<Option<HashAlg>>) -> HashAlg {
     }
 }
 
+/// An authenticated SSH connection.
+pub struct Connection {
+    pub handle: Handle<SshHandler>,
+    /// Ends the connection when the peer will not take a goodbye; see
+    /// [`crate::transport`].
+    pub transport: Transport,
+}
+
 /// The account, method and vault key a host signs in with.
 pub struct Credentials<'a> {
     pub username: &'a str,
@@ -289,7 +298,7 @@ pub fn credentials<'a>(host: &'a Host, identity: Option<&'a Identity>) -> Result
     })
 }
 
-/// Open an authenticated SSH session and return the handle.
+/// Open an authenticated SSH session and return it.
 /// The caller is responsible for opening a channel and starting the shell.
 /// The credentials come from `credentials`.
 pub async fn connect(
@@ -299,7 +308,7 @@ pub async fn connect(
     vault: Option<&Vault>,
     passphrase: Option<&str>,
     password: Option<&str>,
-) -> Result<Handle<SshHandler>> {
+) -> Result<Connection> {
     let Credentials {
         username,
         auth,
@@ -328,22 +337,33 @@ pub async fn connect(
     // connect failure would hide the two fingerprints that make the change
     // legible. `CoreError::Ssh` only reaches here from `check_server_key`, which
     // already names the address, so it is passed through unwrapped too.
-    let mut session = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        client::connect(client_config(), &addr, handler),
-    )
-    .await
-    .map_err(|_| timed_out("connect", &addr))?
-    .map_err(|e| match e {
-        CoreError::HostKeyMismatch { .. } | CoreError::Ssh(_) => e,
-        other => CoreError::Ssh(format!(
-            "connect {addr}: {other}{}",
-            negotiation_hint(&other)
-        )),
-    })?;
+    let opened = async {
+        let config = client_config();
+        let socket = tokio::net::TcpStream::connect(&addr)
+            .await
+            .map_err(|e| CoreError::from(russh::Error::IO(e)))?;
+        if config.nodelay {
+            if let Err(e) = socket.set_nodelay(true) {
+                tracing::warn!("set_nodelay failed for {addr}: {e}");
+            }
+        }
+        let (stream, transport) = Transport::wrap(socket);
+        let handle = client::connect_stream(config, stream, handler).await?;
+        Ok::<_, CoreError>((handle, transport))
+    };
+    let (mut session, transport) = tokio::time::timeout(CONNECT_TIMEOUT, opened)
+        .await
+        .map_err(|_| timed_out("connect", &addr))?
+        .map_err(|e| match e {
+            CoreError::HostKeyMismatch { .. } | CoreError::Ssh(_) => e,
+            other => CoreError::Ssh(format!(
+                "connect {addr}: {other}{}",
+                negotiation_hint(&other)
+            )),
+        })?;
 
     // Authentication is bounded separately, and the two bounds cover disjoint
-    // stages. `client::connect` does not return until russh has read the
+    // stages. `client::connect_stream` does not return until russh has read the
     // server's banner and the key exchange has completed, so a peer that
     // answers the TCP handshake and then goes silent trips the connect timeout
     // above and never reaches this point. What is left for this bound is a
@@ -402,12 +422,25 @@ pub async fn connect(
         outcome.map_err(|e| CoreError::Ssh(format!("auth: {e}")))
     })
     .await
-    .map_err(|_| timed_out("auth", &addr))??;
-
-    if !auth_ok.success() {
-        return Err(CoreError::Ssh("authentication rejected by server".into()));
+    .map_err(|_| timed_out("auth", &addr))
+    .and_then(|outcome| outcome)
+    .and_then(|outcome| {
+        if outcome.success() {
+            Ok(())
+        } else {
+            Err(CoreError::Ssh("authentication rejected by server".into()))
+        }
+    });
+    if let Err(e) = auth_ok {
+        // The session task would otherwise run on until it noticed the
+        // dropped handle, holding an unauthenticated connection open.
+        transport.cut();
+        return Err(e);
     }
-    Ok(session)
+    Ok(Connection {
+        handle: session,
+        transport,
+    })
 }
 
 #[cfg(test)]
