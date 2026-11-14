@@ -63,9 +63,10 @@ pub async fn secure_initialize_vault(
         };
     }
 
-    state.record_vault_epoch(&vault).await;
+    let mark = crate::state::EpochMark::of(&vault);
     drop(vault);
     drop(_biometric_mutation);
+    state.record_vault_epoch(mark).await;
 
     let unlocked = state
         .vault_session
