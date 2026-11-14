@@ -4,6 +4,17 @@ import { useSettingsStore } from "../stores/settings";
 
 const IDLE_CHECK_INTERVAL_MS = 5_000;
 const BACKGROUND_GAP_SECONDS = 60;
+const ACTIVITY_EVENTS = [
+  "mousemove",
+  "mousedown",
+  "keydown",
+  "touchstart",
+  "scroll",
+] as const;
+// Capture phase so activity is seen before any target stops propagation:
+// xterm stops keys it handles, so bubble-phase listeners never see typing in
+// a terminal.
+const ACTIVITY_LISTENER_OPTIONS = { capture: true, passive: true } as const;
 
 /**
  * Auto-lock composable. Tracks user activity and locks the vault after a
@@ -96,22 +107,18 @@ export function useAutoLock() {
   onMounted(() => {
     lastIdleCheck = Date.now();
 
-    window.addEventListener("mousemove", onActivity, { passive: true });
-    window.addEventListener("mousedown", onActivity, { passive: true });
-    window.addEventListener("keydown", onActivity, { passive: true });
-    window.addEventListener("touchstart", onActivity, { passive: true });
-    window.addEventListener("scroll", onActivity, { passive: true });
+    for (const type of ACTIVITY_EVENTS) {
+      window.addEventListener(type, onActivity, ACTIVITY_LISTENER_OPTIONS);
+    }
     document.addEventListener("visibilitychange", onVisibilityChange);
 
     idleTimer = setInterval(checkIdle, IDLE_CHECK_INTERVAL_MS);
   });
 
   onUnmounted(() => {
-    window.removeEventListener("mousemove", onActivity);
-    window.removeEventListener("mousedown", onActivity);
-    window.removeEventListener("keydown", onActivity);
-    window.removeEventListener("touchstart", onActivity);
-    window.removeEventListener("scroll", onActivity);
+    for (const type of ACTIVITY_EVENTS) {
+      window.removeEventListener(type, onActivity, ACTIVITY_LISTENER_OPTIONS);
+    }
     document.removeEventListener("visibilitychange", onVisibilityChange);
     if (idleTimer) clearInterval(idleTimer);
   });

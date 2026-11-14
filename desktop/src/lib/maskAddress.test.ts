@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maskAddress, maskHostname } from "./maskAddress";
+import { maskAddress, maskHostname, maskHostnamesIn } from "./maskAddress";
 
 const M = "••••••••••••";
 
@@ -74,5 +74,51 @@ describe("maskAddress", () => {
 
   it("passes empty input through unchanged", () => {
     expect(maskAddress("")).toBe("");
+  });
+});
+
+describe("maskHostnamesIn", () => {
+  it("masks a hostname regardless of letter case", () => {
+    expect(maskHostnamesIn("server.example.com:22 refused", ["Server.Example.com"]))
+      .toBe(`Se${M}:22 refused`);
+  });
+
+  it("leaves a longer word that starts with a saved hostname alone", () => {
+    expect(maskHostnamesIn("authentication rejected by server", ["auth"]))
+      .toBe("authentication rejected by server");
+  });
+
+  it("masks a saved hostname followed by a port", () => {
+    expect(maskHostnamesIn("auth:22 refused", ["auth"])).toBe(`au${M}:22 refused`);
+  });
+
+  it("treats regular-expression characters in a hostname literally", () => {
+    expect(maskHostnamesIn("host a+b.test is down", ["a+b.test"]))
+      .toBe(`host a+${M} is down`);
+  });
+
+  it("masks a hostname that ends a sentence", () => {
+    expect(maskHostnamesIn("Could not resolve atlas.example.test.", ["atlas.example.test"]))
+      .toBe(`Could not resolve at${M}.`);
+  });
+
+  it("masks a hostname next to punctuation", () => {
+    expect(maskHostnamesIn('connect to "atlas.example.test", (atlas.example.test) or atlas.example.test;', ["atlas.example.test"]))
+      .toBe(`connect to "at${M}", (at${M}) or at${M};`);
+  });
+
+  it("leaves a longer hostname that starts with a saved hostname alone", () => {
+    expect(maskHostnamesIn("atlas.example.test.internal refused", ["atlas.example.test"]))
+      .toBe("atlas.example.test.internal refused");
+    expect(maskHostnamesIn("db-replica refused", ["db"])).toBe("db-replica refused");
+  });
+
+  it("masks a saved fully qualified name written with a trailing dot", () => {
+    expect(maskHostnamesIn("host key for atlas.example.test:22 changed", ["atlas.example.test."]))
+      .toBe(`host key for at${M}:22 changed`);
+  });
+
+  it("ignores a saved hostname that is only dots", () => {
+    expect(maskHostnamesIn("nothing to mask.", ["."])).toBe("nothing to mask.");
   });
 });

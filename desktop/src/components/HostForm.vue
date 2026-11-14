@@ -304,6 +304,9 @@ async function save() {
           <p v-else-if="vault.needsSetup" class="text-[11px] text-muted-foreground mt-1">
             Set up the vault in the Vault section to add and choose keys.
           </p>
+          <p v-else-if="vault.statusUnavailable" class="text-[11px] text-muted-foreground mt-1">
+            The vault could not be checked, so its keys cannot be listed. Retry from the Keys or Vault section.
+          </p>
           <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
             No keys available. Add one in the Keys section.
           </p>
