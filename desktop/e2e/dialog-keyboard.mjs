@@ -2,7 +2,9 @@
 // dialog, Tab stays in it, Escape closes it and focus goes back to the button
 // that opened it. A click on the backdrop leaves a form and its input alone.
 // The update prompt, shown above an open form, owns Tab and Escape until it
-// closes. App shortcuts leave an open form alone.
+// closes. Escape answers the topmost modal: the prompt over a pending
+// confirmation, a native session picker over the prompt, and the prompt over a
+// modal that opened after it. App shortcuts leave an open form alone.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -152,6 +154,83 @@ try {
     await page.keyboard.press("Control+,");
     await addHostButton(page).waitFor({ state: "detached" });
   });
+
+  await scenario("escape-answers-the-modal-above-a-confirmation", async page => {
+    // Dismiss the prompt raised at startup so it can come back over the question.
+    await updatePrompt(page).waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+
+    await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().hover();
+    await page.getByRole("button", { name: "Delete host" }).filter({ visible: true }).first().click();
+    const question = page.getByRole("alertdialog");
+    await question.waitFor();
+    await raiseUpdatePrompt(page);
+    await updatePrompt(page).waitFor();
+
+    // The question is hidden behind the prompt, so Escape is the prompt's.
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+    assert.equal(await question.count(), 1, "Escape left the question open");
+    await page.keyboard.press("Escape");
+    await question.waitFor({ state: "detached" });
+    const deletes = await page.evaluate(() => window.__terminalTest.calls.filter(call => call.command === "delete_host"));
+    assert.deepEqual(deletes, [], "Declining the question deleted nothing");
+  }, { update: release });
+
+  await scenario("the-modal-drawn-on-top-keeps-the-keys-when-a-lower-one-opens-later", async page => {
+    // The update prompt is up first and the unlock prompt opens beneath it, the
+    // way it does when the vault locks itself. The prompt is drawn above the
+    // unlock prompt, so Escape is the prompt's although it opened earlier.
+    await updatePrompt(page).waitFor();
+    await page.evaluate(async () => {
+      const { useUiStore } = await import("/src/stores/ui.ts");
+      window.__unlockRequest = useUiStore().requestVaultUnlock();
+    });
+    const unlock = page.getByRole("dialog", { name: "Unlock Vault" });
+    await unlock.waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+    assert.equal(await unlock.count(), 1, "Escape left the unlock prompt open");
+    await page.keyboard.press("Escape");
+    await unlock.waitFor({ state: "detached" });
+  }, { update: release });
+
+  await scenario("native-session-picker-keeps-its-keys-under-the-update-prompt", async page => {
+    await updatePrompt(page).waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    await page.getByRole("button", { name: "New session" }).first().click();
+    await page.getByRole("textbox", { name: "Search sessions" }).waitFor();
+    await raiseUpdatePrompt(page);
+    assert.equal(await updatePrompt(page).count(), 1, "The prompt is up behind the picker");
+
+    // The picker is in the top layer and the page is inert, so Tab is the
+    // picker's: it has to move between its controls, not stall or leave. A
+    // native dialog wraps Tab through the document once per lap, so focus
+    // passing `<body>` is expected; landing anywhere else on the page is not.
+    const seen = new Set();
+    for (let step = 0; step < 6; step++) {
+      await page.keyboard.press("Tab");
+      const here = await page.evaluate(() => {
+        const element = document.activeElement;
+        if (element?.closest("dialog[open]")) return element.getAttribute("aria-label") ?? element.tagName;
+        return element === document.body ? "(document)" : null;
+      });
+      assert.ok(here, `Tab ${step + 1} stays in the picker`);
+      seen.add(here);
+    }
+    assert.ok(seen.size >= 3, `Tab moves between the picker's controls (saw ${[...seen].join(", ")})`);
+
+    // Escape closes the picker and leaves the prompt, which the user has not seen yet.
+    await page.keyboard.press("Escape");
+    await page.locator("dialog[open]").waitFor({ state: "hidden" });
+    assert.equal(await updatePrompt(page).count(), 1, "The prompt is still up");
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+  }, { update: release });
 } finally {
   await browser.close();
   await writeFile(`${output}/dialog-keyboard-results.json`, JSON.stringify(results, null, 2));
