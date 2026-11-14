@@ -90,15 +90,20 @@ export function maskAddress(address: string): string {
  * {host} changed`, `{host}:{port}: connection refused`). Longer names go
  * first so a hostname that contains another is masked as a whole. A match is
  * case-insensitive and must not be part of a longer hostname, so a saved host
- * named `auth` leaves `authentication` in the text alone.
+ * named `auth` leaves `authentication` in the text alone. A dot ends the name
+ * unless another label follows it, so a hostname that closes a sentence is
+ * still masked.
+ *
+ * The root dot of a saved fully qualified name is dropped before matching,
+ * because error text normally names the host without it.
  */
 export function maskHostnamesIn(text: string, hostnames: readonly (string | null | undefined)[]): string {
   if (!text) return text;
-  const known = [...new Set(hostnames.filter((name): name is string => !!name))]
+  const known = [...new Set(hostnames.map((name) => name?.replace(/\.+$/, "")).filter((name): name is string => !!name))]
     .sort((a, b) => b.length - a.length);
   let masked = text;
   for (const hostname of known) {
-    const pattern = new RegExp(`(^|[^A-Za-z0-9.-])${escapeRegExp(hostname)}(?![A-Za-z0-9.-])`, "gi");
+    const pattern = new RegExp(`(^|[^A-Za-z0-9.-])${escapeRegExp(hostname)}(?![A-Za-z0-9-]|\\.[A-Za-z0-9-])`, "gi");
     masked = masked.replace(pattern, (_match, before: string) => before + maskHostname(hostname));
   }
   return masked;
