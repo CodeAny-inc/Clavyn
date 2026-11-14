@@ -28,6 +28,9 @@
   const state = {
     calls: [], connects: [], closes: [], writes: [], live: {}, pending: [],
     holdNext: false, failNext: false, servedHosts: null,
+    // The release `check_for_updates` reports. A scenario sets it before the
+    // page boots so the startup check raises the update prompt.
+    update: null,
     hostById(id) { return id ? (state.servedHosts ?? hosts).find(host => host.id === id) ?? null : null; },
     // Frames waiting on the asynchronous delivery route, and the switch that
     // puts them there.
@@ -76,6 +79,20 @@
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "startup_failure") return null;
+      // The dialog plugin registers no `confirm` command and no permission
+      // allows it, so the ACL refuses it before anything runs.
+      if (command === "plugin:dialog|confirm") {
+        throw new Error("dialog.confirm not allowed. Permissions associated with this command: dialog:allow-confirm, dialog:default");
+      }
+      // The native message dialog, which the capability grants, answered by the
+      // browser's own so a scenario accepts or dismisses it through
+      // Playwright's dialog events.
+      if (command === "plugin:dialog|message") {
+        if (args.buttons === "OkCancel") return nativeConfirm(args.message) ? "Ok" : "Cancel";
+        nativeAlert(args.message);
+        return "Ok";
+      }
+      if (["delete_host", "delete_key"].includes(command)) return;
       // Keep the exact objects served, including any edits a scenario makes to
       // them, so connects can resolve a host by id the way the backend does.
       if (command === "list_hosts") return (state.servedHosts = structuredClone(hosts));
@@ -84,7 +101,7 @@
       if (["is_vault_unlocked"].includes(command)) return vaultUnlocked;
       if (["biometric_available", "biometric_passphrase_stored"].includes(command)) return false;
       if (command === "get_app_info") return { name: "Clavyn", version: "0.1.1-ui-test", platform: "linux", arch: "x86_64" };
-      if (command === "check_for_updates") return { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
+      if (command === "check_for_updates") return state.update ?? { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;
         const host = args.host ?? state.hostById(args.hostId);
@@ -111,6 +128,7 @@
         return;
       }
       if (command === "session_resize") return;
+      if (command === "session_output_ack") return;
       if (command === "session_write") {
         const text = new TextDecoder().decode(new Uint8Array(args.data));
         state.writes.push({ id: args.sessionId, text });
@@ -138,5 +156,17 @@
       ];
       throw new Error(`Unhandled test IPC: ${command}`);
     },
+  };
+  // What tauri-plugin-dialog's init script installs in every desktop webview:
+  // `confirm` becomes async, so its result is a Promise and always truthy, and
+  // `alert` returns before anything is shown. The browser's own dialogs are
+  // kept for the `message` handler above, which would otherwise call itself.
+  const nativeAlert = window.alert.bind(window);
+  const nativeConfirm = window.confirm.bind(window);
+  window.alert = function (message) {
+    window.__TAURI_INTERNALS__.invoke("plugin:dialog|message", { message: String(message) });
+  };
+  window.confirm = async function (message) {
+    return await window.__TAURI_INTERNALS__.invoke("plugin:dialog|confirm", { message: String(message) });
   };
 })();

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { setActivePinia, createPinia } from "pinia";
 import { useHostsStore } from "./hosts";
+import { useIdentitiesStore } from "./identities";
 import type { Host, HostGroup } from "../types";
 
 const mockHost: Host = {
@@ -250,6 +251,20 @@ describe("hosts store", () => {
       // host-2 had group_id = "group-1", should now be null
       const host2 = store.hosts.find((h) => h.id === "host-2");
       expect(host2?.group_id).toBeNull();
+    });
+
+    it("ungroups identities in that group, as the backend does", async () => {
+      const store = useHostsStore();
+      const identities = useIdentitiesStore();
+      identities.identities = [
+        { id: "id-1", label: "Grouped", username: "root", auth: "publickey", key_id: null, tags: [], group_id: "group-1" },
+        { id: "id-2", label: "Other", username: "root", auth: "publickey", key_id: null, tags: [], group_id: "group-2" },
+      ];
+
+      await store.deleteGroup("group-1");
+
+      expect(identities.identities.find((i) => i.id === "id-1")?.group_id).toBeNull();
+      expect(identities.identities.find((i) => i.id === "id-2")?.group_id).toBe("group-2");
     });
   });
 

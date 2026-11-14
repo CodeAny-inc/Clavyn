@@ -8,6 +8,8 @@
 // Every test crate compiles this module on its own and uses only part of it.
 #![allow(dead_code)]
 
+pub mod loopback;
+
 use clavyn_core::keys::{generate_ed25519, parse_openssh_private};
 use russh::keys::ssh_key::{LineEnding, PrivateKey};
 use std::path::PathBuf;

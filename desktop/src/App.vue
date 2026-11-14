@@ -8,6 +8,7 @@ import { useTabsStore } from "./stores/tabs";
 import { useUiStore } from "./stores/ui";
 import { useUpdateStore } from "./stores/update";
 import { useAutoLock } from "./composables/useAutoLock";
+import { isModalOpen } from "./lib/modalOpen";
 import { Menu } from "lucide-vue-next";
 
 // Shell, landing view and unlock prompt stay in the entry chunk: the shell and
@@ -17,6 +18,7 @@ import AppSidebar from "./components/AppSidebar.vue";
 import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 
 // Everything else is reachable only through navigation or a shortcut, so it is
 // split out of the entry chunk and fetched when first rendered.
@@ -53,14 +55,23 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault(); ui.exitFullscreen(); return;
   }
   const cmd = e.metaKey || e.ctrlKey;
+  // A modal owns the keyboard, so a shortcut must not act on the page behind
+  // it: switching view would unmount an open form with its input, and a new tab
+  // would open beneath the unlock prompt. The chord is still claimed, so the
+  // webview's own binding for it does not run either.
+  const blocked = cmd && isModalOpen();
   if (cmd && e.key === "k") {
-    e.preventDefault(); commandPaletteOpen.value = !commandPaletteOpen.value;
+    e.preventDefault();
+    if (!blocked) commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
-    e.preventDefault(); activeView.value = "terminal"; tabs.newTab();
+    e.preventDefault();
+    if (!blocked) { activeView.value = "terminal"; tabs.newTab(); }
   } else if (cmd && e.key === "u") {
-    e.preventDefault(); if (update.available) update.showUpdateDialog();
+    e.preventDefault();
+    if (!blocked && update.available) update.showUpdateDialog();
   } else if (cmd && e.key === ",") {
-    e.preventDefault(); activeView.value = "settings";
+    e.preventDefault();
+    if (!blocked) activeView.value = "settings";
   } else if (e.key === "Escape" && commandPaletteOpen.value) {
     commandPaletteOpen.value = false;
   }
@@ -119,5 +130,6 @@ onUnmounted(() => {
       @navigate="activeView = $event; commandPaletteOpen = false" />
     <UpdateModal />
     <VaultUnlockModal />
+    <ConfirmDialog />
   </div>
 </template>
