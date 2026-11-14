@@ -49,9 +49,16 @@ export const useVaultStore = defineStore("vault", () => {
 
   let biometricStateRevision = 0;
   let biometricMutationTail: Promise<void> = Promise.resolve();
+  // Identifies the most recent status probe. Probes can overlap, and only the
+  // latest one may publish, so an older probe settling late cannot overwrite
+  // the answer the user is looking at.
+  let statusRequest = 0;
 
   function publishDestroyedVaultState() {
     ++biometricStateRevision;
+    // A probe still in flight read the vault before it was destroyed. Whatever
+    // it reports, initialized or unreadable, describes a vault that is gone.
+    ++statusRequest;
     initialized.value = false;
     statusUnavailable.value = false;
     unlocked.value = false;
@@ -113,11 +120,6 @@ export const useVaultStore = defineStore("vault", () => {
       throw e;
     }
   }
-
-  // Identifies the most recent status probe. Probes can overlap, and only the
-  // latest one may publish, so an older probe settling late cannot overwrite
-  // the answer the user is looking at.
-  let statusRequest = 0;
 
   async function checkStatus() {
     const request = ++statusRequest;
