@@ -71,6 +71,10 @@ export function useModalFocus(
   }
 
   function onKeydown(event: KeyboardEvent) {
+    // An input method owns its keys while it composes: Escape cancels the
+    // composition, and answering it here would also close the dialog and lose
+    // what was typed. WebKit reports the key that ends a composition as 229.
+    if (event.isComposing || event.keyCode === 229) return;
     if (topModal()?.token !== token || behindNativeDialog()) return;
     if (event.key === "Escape") {
       event.preventDefault();
