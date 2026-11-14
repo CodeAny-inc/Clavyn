@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { useId } from "vue";
+import { ref, useId } from "vue";
+import { useModalFocus } from "../../composables/useModalFocus";
 import { cn } from "../../lib/cn";
 import Overlay from "./Overlay.vue";
 
@@ -11,22 +12,36 @@ const props = withDefaults(
     width?: string;
     class?: string;
     role?: "dialog" | "alertdialog";
+    /** Close on a click outside the panel. Off by default: in a form, one
+     * stray click there would throw away everything typed. */
+    dismissOnOverlay?: boolean;
   }>(),
   {
     width: "480px",
     role: "dialog",
+    dismissOnOverlay: false,
   },
 );
 
 const emit = defineEmits<{ close: [] }>();
 const titleId = useId();
 const descriptionId = useId();
+const panel = ref<HTMLElement | null>(null);
+
+useModalFocus(panel, () => props.open, () => emit("close"));
+
+function onOverlayClose() {
+  if (props.dismissOnOverlay) emit("close");
+}
+
 </script>
 
 <template>
   <Teleport to="body">
-    <Overlay v-if="props.open" @close="emit('close')">
+    <Overlay v-if="props.open" @close="onOverlayClose">
       <div
+        ref="panel"
+        tabindex="-1"
         :class="cn(
           'fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2',
           'z-50 w-full max-w-[92vw] max-h-[90vh]',
