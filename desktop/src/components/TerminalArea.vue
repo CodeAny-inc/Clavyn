@@ -6,6 +6,7 @@ import { Plus, X, TerminalSquare, Columns2 } from "lucide-vue-next";
 import TerminalWorkspace from "./TerminalWorkspace.vue";
 import SessionPicker, { type SessionPlacement } from "./SessionPicker.vue";
 import { setDragImageChip } from "../lib/dragChip";
+import { isTerminalShortcut } from "../lib/shortcuts";
 
 const props = withDefaults(defineProps<{ visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ activate: [] }>();
@@ -102,7 +103,7 @@ function onKeyDown(event: KeyboardEvent) {
   // Do not steal editing shortcuts from Files, search fields, menus or forms.
   const target = event.target;
   if (target instanceof Element && (target.closest('[role="menu"]') || (target.matches("input, textarea, select") && !target.closest(".xterm")))) return;
-  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+  if (isTerminalShortcut(event)) {
     const directions = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as const;
     const direction = directions[event.key as keyof typeof directions];
     if (direction) { event.preventDefault(); tabs.navigatePane(direction); }

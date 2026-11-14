@@ -19,6 +19,7 @@ import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
+import { isTerminalShortcut } from "./lib/shortcuts";
 
 // Everything else is reachable only through navigation or a shortcut, so it is
 // split out of the entry chunk and fetched when first rendered.
@@ -60,7 +61,10 @@ function handleKeydown(e: KeyboardEvent) {
   // would open beneath the unlock prompt. The chord is still claimed, so the
   // webview's own binding for it does not run either.
   const blocked = cmd && isModalOpen();
-  if (cmd && e.key === "k") {
+  // Inside a terminal only the terminal-safe form counts (Cmd+K, or
+  // Ctrl+Shift+K off macOS): plain Ctrl+K there is the shell's kill-line.
+  const inTerminal = e.target instanceof Element && !!e.target.closest(".xterm");
+  if (cmd && e.key.toLowerCase() === "k" && (!inTerminal || isTerminalShortcut(e))) {
     e.preventDefault();
     if (!blocked) commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
