@@ -4,6 +4,7 @@ import { createPinia, setActivePinia } from "pinia";
 import IdentityManager from "./IdentityManager.vue";
 import { useVaultStore } from "../stores/vault";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
+import { answerConfirmation } from "../composables/useConfirm";
 import type { Identity } from "../types";
 
 const PRIVATE_KEY =
@@ -133,6 +134,8 @@ describe("IdentityManager", () => {
       await flushPromises();
 
       await wrapper.get('[aria-label="Delete identity"]').trigger("click");
+      await flushPromises();
+      answerConfirmation(true);
       await flushPromises();
 
       expect(wrapper.get('[role="alert"]').text()).toContain("Failed to delete identity: Error: store locked");

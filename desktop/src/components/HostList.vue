@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useHostsStore } from "../stores/hosts";
 import { useTabsStore } from "../stores/tabs";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import HostForm from "./HostForm.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -160,7 +160,12 @@ function addHost() {
 }
 
 async function deleteHost(host: Host) {
-  if (await confirmAction(`Delete host "${host.label}"?`)) {
+  if (await confirmAction({
+    title: "Delete host",
+    message: `Delete host "${host.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await hosts.deleteHost(host.id);
@@ -197,7 +202,12 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (await confirmAction(`Delete group "${name}"? Hosts in this group will be ungrouped.`)) {
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Hosts in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await hosts.deleteGroup(groupId);

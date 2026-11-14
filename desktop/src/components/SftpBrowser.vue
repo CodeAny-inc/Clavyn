@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import {
   AlertCircle,
   ArrowUp,
@@ -31,6 +30,7 @@ import {
 } from "../lib/sshIdentity";
 import { readableName } from "../lib/readableName";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 
@@ -303,10 +303,28 @@ async function confirmRename() {
   }
 }
 
+// A confirmation can stay open while the browser moves to another folder or
+// session, so an answer only applies to the location it was asked about.
+function location() {
+  return { sessionId: sftp.sessionId, path: sftp.currentPath };
+}
+function stillAt(asked: ReturnType<typeof location>, action: string) {
+  if (sftp.sessionId === asked.sessionId && sftp.currentPath === asked.path) return true;
+  sftp.error = `The folder changed while the question was open, so nothing was ${action}`;
+  return false;
+}
+
 async function deleteEntry(target: SftpEntryRef) {
   closeContextMenu();
+  const asked = location();
   const path = readableName(joinPath(target.dir, target.entry.name));
-  if (!(await confirmAction(`Delete "${path}"?`))) return;
+  const confirmed = await confirmAction({
+    title: target.entry.is_dir ? "Delete folder" : "Delete file",
+    message: `Delete "${path}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed || !stillAt(asked, "deleted")) return;
   try {
     await sftp.deleteEntry(target);
   } catch {
@@ -342,6 +360,7 @@ async function upload() {
 
   try {
     const fileName = picked.name;
+    const asked = location();
     const existing = sftp.entries.find((entry) => entry.name === fileName);
     let overwrite = false;
 
@@ -350,10 +369,13 @@ async function upload() {
         sftp.error = `A directory named "${fileName}" already exists`;
         return;
       }
-      overwrite = await confirmAction(
-        `"${fileName}" already exists on the remote host. Overwrite it?`,
-      );
-      if (!overwrite) return;
+      overwrite = await confirmAction({
+        title: "Replace remote file",
+        message: `"${fileName}" already exists on the remote host. Overwrite it?`,
+        confirmLabel: "Overwrite",
+        destructive: true,
+      });
+      if (!overwrite || !stillAt(asked, "uploaded")) return;
     }
 
     await sftp.uploadFile(fileName, picked.token, overwrite);

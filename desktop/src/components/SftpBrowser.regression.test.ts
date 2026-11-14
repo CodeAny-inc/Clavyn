@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import SftpBrowser from "./SftpBrowser.vue";
 import { useSftpStore } from "../stores/sftp";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
+import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 import type { SftpEntry } from "../api";
 import type { Host } from "../types";
 
@@ -97,15 +98,17 @@ describe("SFTP browser entry actions across navigation", () => {
   });
 
   it("deletes in the directory the menu was opened on and names the full path", async () => {
-    setInvokeHandler("plugin:dialog|message", () => "Ok");
     const wrapper = await mountConnected();
 
     await row(wrapper, "notes.txt").trigger("contextmenu");
     await menuButton(wrapper, "Delete")!.trigger("click");
     await flushPromises();
 
-    expect(calls("plugin:dialog|message").map(([, args]) => args.message))
-      .toEqual(['Delete "/home/u/notes.txt"?']);
+    expect(pendingConfirmation.value?.message).toBe('Delete "/home/u/notes.txt"?');
+    expect(calls("sftp_remove_file")).toHaveLength(0);
+    answerConfirmation(true);
+    await flushPromises();
+
     expect(calls("sftp_remove_file").map(([, args]) => args.path)).toEqual(["/home/u/notes.txt"]);
   });
 });

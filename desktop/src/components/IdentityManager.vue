@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
@@ -28,6 +27,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { confirmAction } from "../composables/useConfirm";
 import { deleteFailure, isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
@@ -134,7 +134,12 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Identities in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     listError.value = "";
     try {
       await hosts.deleteGroup(groupId);
@@ -328,7 +333,13 @@ async function saveIdentity() {
 }
 
 async function deleteIdentity(id: Identity) {
-  if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
+  const confirmed = await confirmAction({
+    title: "Delete identity",
+    message: `Delete identity "${id.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed) return;
   listError.value = "";
   try {
     await identities.deleteIdentity(id.id);
@@ -341,6 +352,7 @@ async function deleteIdentity(id: Identity) {
 
 async function browseForKeyFile() {
   browsingFile.value = true;
+  formError.value = "";
   try {
     const content = await api.pickKeyFile();
     if (content !== null) {
@@ -348,7 +360,7 @@ async function browseForKeyFile() {
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    alert(`Failed to read key file: ${e}`);
+    formError.value = `Failed to read key file: ${e}`;
   } finally {
     browsingFile.value = false;
   }

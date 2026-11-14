@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import HostList from "./HostList.vue";
 import { setInvokeHandler } from "../test/setup";
+import { answerConfirmation } from "../composables/useConfirm";
 import type { Host } from "../types";
 
 const HOST: Host = {
@@ -32,6 +33,8 @@ describe("HostList failures", () => {
 
     await wrapper.get('[aria-label="Delete host"]').trigger("click");
     await flushPromises();
+    answerConfirmation(true);
+    await flushPromises();
 
     expect(wrapper.get('[role="alert"]').text()).toContain("Failed to delete host: Error: store locked");
     expect(wrapper.text()).toContain("Web");
@@ -43,6 +46,8 @@ describe("HostList failures", () => {
     });
 
     await wrapper.get('[aria-label="Delete group"]').trigger("click");
+    await flushPromises();
+    answerConfirmation(true);
     await flushPromises();
 
     expect(wrapper.get('[role="alert"]').text()).toContain("Failed to delete group: Error: store locked");

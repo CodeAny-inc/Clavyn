@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useWorkspacesStore } from "../stores/workspaces";
 import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -164,7 +164,12 @@ async function saveForm() {
 }
 
 async function remove(id: string, name: string) {
-  if (await confirmAction(`Delete workspace "${name}"?`)) {
+  if (await confirmAction({
+    title: "Delete workspace",
+    message: `Delete workspace "${name}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await workspaces.deleteWorkspace(id);
