@@ -5,6 +5,7 @@ import { useTabsStore } from "../stores/tabs";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import HostForm from "./HostForm.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -42,6 +43,8 @@ const showForm = ref(false);
 const editingHost = ref<Host | null>(null);
 const showGroupForm = ref(false);
 const newGroupName = ref("");
+const groupError = ref("");
+const actionError = ref("");
 
 // Selection state
 const selectedHostId = ref<string | null>(null);
@@ -71,9 +74,19 @@ const showConnectDialog = ref(false);
 const connectTarget = ref<Host | null>(null);
 
 onMounted(() => {
-  void hosts.load();
+  loadHosts();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadHosts() {
+  hosts.load().catch(() => {});
+}
+
+function clearFilters() {
+  hosts.searchQuery = "";
+  hosts.selectedGroupId = null;
+}
 
 function identityReady(host: Host) {
   return sshIdentityReady(host, identities.loaded);
@@ -157,8 +170,19 @@ function addHost() {
 }
 
 async function deleteHost(host: Host) {
-  if (confirm(`Delete host "${host.label}"?`)) {
-    await hosts.deleteHost(host.id);
+  if (await confirmAction({
+    title: "Delete host",
+    message: `Delete host "${host.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
+    actionError.value = "";
+    try {
+      await hosts.deleteHost(host.id);
+    } catch (e) {
+      actionError.value = `Failed to delete host: ${e}`;
+      return;
+    }
     if (selectedHostId.value === host.id) {
       selectedHostId.value = null;
     }
@@ -169,16 +193,38 @@ function selectGroup(groupId: string | null) {
   hosts.selectedGroupId = groupId;
 }
 
+function openGroupForm() {
+  groupError.value = "";
+  showGroupForm.value = true;
+}
+
 async function createGroup() {
   if (!newGroupName.value.trim()) return;
-  await hosts.addGroup(newGroupName.value.trim());
+  groupError.value = "";
+  try {
+    await hosts.addGroup(newGroupName.value.trim());
+  } catch (e) {
+    groupError.value = `Failed to create group: ${e}`;
+    return;
+  }
   newGroupName.value = "";
   showGroupForm.value = false;
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (confirm(`Delete group "${name}"? Hosts in this group will be ungrouped.`)) {
-    await hosts.deleteGroup(groupId);
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Hosts in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
+    actionError.value = "";
+    try {
+      await hosts.deleteGroup(groupId);
+    } catch (e) {
+      actionError.value = `Failed to delete group: ${e}`;
+      return;
+    }
     if (hosts.selectedGroupId === groupId) {
       hosts.selectedGroupId = null;
     }
@@ -207,11 +253,11 @@ function authLabel(host: Host): string {
     <div class="flex h-11 items-center gap-2 border-b border-border px-4 pl-12 md:pl-4">
       <h2 class="text-[14px] font-semibold truncate">Hosts</h2>
       <div class="ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
           <span class="hidden sm:inline">New Group</span>
         </Button>
-        <Button size="sm" variant="ghost" class="sm:hidden" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="sm:hidden" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
         </Button>
         <Button size="sm" @click="addHost">
@@ -238,6 +284,7 @@ function authLabel(host: Host): string {
         {{ identities.loadError }} Direct hosts remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
+      <p v-if="actionError" class="mt-2 text-[11px] text-destructive" role="alert">{{ actionError }}</p>
     </div>
 
     <!-- Content area -->
@@ -273,7 +320,7 @@ function authLabel(host: Host): string {
         </div>
         <button
           class="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[12px] text-muted-foreground/70 hover:text-muted-foreground transition-colors duration-100"
-          @click="showGroupForm = true"
+          @click="openGroupForm"
         >
           <FolderPlus class="size-3" :stroke-width="1.75" />
           <span>Add group...</span>
@@ -281,6 +328,12 @@ function authLabel(host: Host): string {
       </div>
 
       <div class="border-t border-border/50 mx-2 my-1"></div>
+
+      <!-- A reload that failed while rows from an earlier read are still shown -->
+      <div v-if="hosts.loadError && hosts.hosts.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">The host list could not be refreshed: {{ hosts.loadError }}</span>
+        <button class="underline" :disabled="hosts.loading" @click="loadHosts">Retry</button>
+      </div>
 
       <!-- Host list -->
       <div v-if="filteredHosts.length" class="px-2 pt-1">
@@ -344,7 +397,21 @@ function authLabel(host: Host): string {
         </div>
       </div>
 
-      <!-- Empty state -->
+      <!-- Nothing to list, for one of four different reasons -->
+      <div v-else-if="hosts.loadError && !hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Hosts could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ hosts.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="hosts.loading" @click="loadHosts">Retry</Button>
+      </div>
+      <p v-else-if="!hosts.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading hosts…
+      </p>
+      <div v-else-if="hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
+        <p class="text-[13px] text-muted-foreground">
+          {{ hosts.searchQuery.trim() ? `No hosts match "${hosts.searchQuery.trim()}"` : "No hosts in this group" }}
+        </p>
+        <Button size="sm" variant="outline" @click="clearFilters">Show all hosts</Button>
+      </div>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Server class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
@@ -460,6 +527,7 @@ function authLabel(host: Host): string {
             @keydown.enter="createGroup"
           />
         </FormGroup>
+        <p v-if="groupError" class="text-[12px] text-destructive" role="alert">{{ groupError }}</p>
       </div>
       <template #footer>
         <Button variant="ghost" @click="showGroupForm = false">Cancel</Button>

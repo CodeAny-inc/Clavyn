@@ -40,11 +40,20 @@ fn every_directive_that_does_not_inherit_is_declared() {
     }
 }
 
-/// Tauri only rewrites a directive when the built assets yield hashes for
-/// it, and the built page has no inline script, so leaving `script-src`
-/// out is what lets Tauri synthesise it as `'self'` plus its bootstrap
-/// hashes. Declaring one here would be overwritten or would fight it.
+/// Script sources stay at `'self'` whatever `default-src` becomes. Tauri adds
+/// to this directive rather than replacing it: it appends a hash of every
+/// bundled script file, plus any inline-script hashes and nonces, keeps
+/// `'self'`, and creates the directive only when it is missing. The header
+/// a packaged build sends is this value followed by those hashes. No
+/// `'unsafe-eval'` or `'wasm-unsafe-eval'`: the bundle uses neither eval nor
+/// WebAssembly.
 #[test]
-fn script_src_is_left_to_the_builder() {
-    assert!(!csp().contains("script-src"));
+fn script_src_is_self_only() {
+    let csp = csp();
+    let script_src = csp
+        .split(';')
+        .map(str::trim)
+        .find(|directive| directive.starts_with("script-src "))
+        .expect("script-src is declared");
+    assert_eq!(script_src, "script-src 'self'");
 }

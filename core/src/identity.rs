@@ -9,7 +9,7 @@ use crate::host::AuthMethod;
 ///
 /// When a host has `identity_id` set, the connection logic resolves the
 /// identity at connect time to get the username, auth method, and key.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     pub id: Uuid,
     pub label: String,

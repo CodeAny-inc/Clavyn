@@ -23,6 +23,7 @@ import {
   Lock,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { confirmAction } from "../composables/useConfirm";
 import type { KeyMeta } from "../types";
 
 const keys = useKeysStore();
@@ -33,6 +34,7 @@ const showAdd = ref(false);
 const showPublic = ref<string | null>(null);
 const copiedId = ref<string | null>(null);
 const importing = ref(false);
+const formError = ref("");
 
 const addForm = ref({
   label: "",
@@ -78,34 +80,44 @@ watch(
 // the retention window.
 onUnmounted(clearAddForm);
 
+// Bumped whenever the form is cleared. A generate, import or file pick that
+// settles after its form was closed must not close, fill or flag the form the
+// user has opened since.
+let formSession = 0;
+
 async function generateKey() {
   if (!addForm.value.label.trim()) return;
+  formError.value = "";
+  const session = formSession;
   try {
     await keys.generateKey(addForm.value.label);
-    resetForm();
+    if (session === formSession) resetForm();
   } catch (e) {
     console.error("Failed to generate key:", e);
-    alert(`Failed to generate key: ${e}`);
+    if (session === formSession) formError.value = `Failed to generate key: ${e}`;
   }
 }
 
 async function importKey() {
   if (!addForm.value.label.trim() || !addForm.value.privateKey.trim()) return;
+  formError.value = "";
+  const session = formSession;
   try {
     await keys.importKey(
       addForm.value.label,
       addForm.value.privateKey,
       addForm.value.passphrase || null,
     );
-    resetForm();
+    if (session === formSession) resetForm();
   } catch (e) {
+    if (session !== formSession) return;
     console.error("Failed to import key:", e);
     // A rejected key is still a key, so the secret goes. The rest of the form
     // stays: the usual rejection is a wrong passphrase on an encrypted key, and
     // closing the dialog would also drop the label and bounce the user back to
     // the Generate tab, leaving them to rebuild a form that was not the problem.
     clearKeyMaterial();
-    alert(`Failed to import key: ${e}`);
+    formError.value = `Failed to import key: ${e}`;
   }
 }
 
@@ -117,8 +129,10 @@ function clearKeyMaterial() {
 }
 
 function clearAddForm() {
+  formSession += 1;
   addForm.value.label = "";
   addForm.value.import = false;
+  formError.value = "";
   clearKeyMaterial();
 }
 
@@ -128,7 +142,12 @@ function resetForm() {
 }
 
 async function deleteKey(key: KeyMeta) {
-  if (confirm(`Delete key "${key.label}"?`)) {
+  if (await confirmAction({
+    title: "Delete key",
+    message: `Delete key "${key.label}"? It is removed from the vault for good, and servers that only accept this key will refuse it.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     await keys.deleteKey(key.id);
   }
 }
@@ -148,14 +167,16 @@ async function copyPublicKey(key: KeyMeta) {
 
 async function browseForKeyFile() {
   importing.value = true;
+  formError.value = "";
+  const session = formSession;
   try {
     const content = await api.pickKeyFile();
-    if (content !== null) {
+    if (content !== null && session === formSession) {
       addForm.value.privateKey = content;
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    alert(`Failed to read key file: ${e}`);
+    if (session === formSession) formError.value = `Failed to read key file: ${e}`;
   } finally {
     importing.value = false;
   }
@@ -202,6 +223,14 @@ async function browseForKeyFile() {
             Keys are stored encrypted in the vault. Set one up in the Vault section to add keys.
           </p>
         </div>
+      </div>
+      <div v-else-if="vault.statusUnavailable" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" data-testid="keys-status-unknown">
+        <Lock class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
+        <div>
+          <p class="text-[14px] font-medium text-foreground">Vault status unknown</p>
+          <p class="text-[12px] text-muted-foreground mt-1">The vault could not be checked, so keys cannot be shown.</p>
+        </div>
+        <Button size="sm" variant="outline" @click="vault.checkStatus()">Retry</Button>
       </div>
       <div v-else-if="keys.keys.length" class="flex flex-col gap-1.5">
         <div
@@ -334,6 +363,8 @@ async function browseForKeyFile() {
         <p v-else class="text-[12px] text-muted-foreground">
           A new Ed25519 key pair will be generated and stored encrypted in the vault.
         </p>
+
+        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
