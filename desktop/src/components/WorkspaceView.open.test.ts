@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import WorkspaceView from "./WorkspaceView.vue";
+import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 import { collectPanes, useTabsStore } from "../stores/tabs";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Workspace } from "../types";
@@ -47,13 +48,22 @@ async function openWorkspace() {
 }
 
 describe("opening a workspace over live sessions", () => {
-  it("asks first, and cancelling leaves tabs and sessions alone", async () => {
+  it("leaves tabs and sessions alone until answered, and again once declined", async () => {
     const { tabs, tab, pane } = connectedTab();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
 
     const view = await openWorkspace();
 
-    expect(confirm).toHaveBeenCalledTimes(1);
+    // The question is on screen and nothing has been given up yet: the answer
+    // arrives later than the click, as it does in the app.
+    expect(pendingConfirmation.value?.message).toContain('Open workspace "Ops"?');
+    expect(tabs.tabs.map((t) => t.id)).toEqual([tab.id]);
+    expect(pane.connected).toBe(true);
+    expect(calls("close_session")).toHaveLength(0);
+    expect(view.emitted("switch-view")).toBeUndefined();
+
+    answerConfirmation(false);
+    await flushPromises();
+
     expect(tabs.tabs.map((t) => t.id)).toEqual([tab.id]);
     expect(pane.connected).toBe(true);
     expect(pane.closing).toBe(false);
@@ -61,24 +71,25 @@ describe("opening a workspace over live sessions", () => {
     expect(view.emitted("switch-view")).toBeUndefined();
   });
 
-  it("replaces the tabs and shows the terminal once confirmed", async () => {
-    const { tabs } = connectedTab();
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  it("replaces the tabs and shows the terminal only once confirmed", async () => {
+    const { tabs, tab } = connectedTab();
 
     const view = await openWorkspace();
+    expect(tabs.tabs.map((t) => t.id)).toEqual([tab.id]);
+    expect(calls("close_session")).toHaveLength(0);
 
-    expect(confirm).toHaveBeenCalledTimes(1);
+    answerConfirmation(true);
+    await flushPromises();
+
     expect(calls("close_session")).toEqual([["close_session", { sessionId: "live-session" }]]);
     expect(tabs.tabs.map((t) => t.id)).toEqual(["workspace-tab"]);
     expect(view.emitted("switch-view")).toEqual([["terminal"]]);
   });
 
   it("opens without asking when nothing is connected", async () => {
-    const confirm = vi.spyOn(window, "confirm");
-
     const view = await openWorkspace();
 
-    expect(confirm).not.toHaveBeenCalled();
+    expect(pendingConfirmation.value).toBeNull();
     expect(useTabsStore().tabs.map((t) => t.id)).toEqual(["workspace-tab"]);
     expect(view.emitted("switch-view")).toEqual([["terminal"]]);
   });
