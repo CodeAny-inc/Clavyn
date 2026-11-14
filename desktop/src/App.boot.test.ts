@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { flushPromises, shallowMount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import App from "./App.vue";
+import AppSidebar from "./components/AppSidebar.vue";
 import { getInvokeMock, setInvokeHandler } from "./test/setup";
 import { useHostsStore } from "./stores/hosts";
 import { useIdentitiesStore } from "./stores/identities";
 import { useKeysStore } from "./stores/keys";
+import { useTabsStore } from "./stores/tabs";
 import { useUiStore } from "./stores/ui";
 import { useUpdateStore } from "./stores/update";
 import { useVaultStore } from "./stores/vault";
@@ -177,6 +179,91 @@ describe("App boot", () => {
     document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
     await flushPromises();
     expect(ui.commandPaletteOpen).toBe(true);
+  });
+
+  describe("app shortcuts under a modal", () => {
+    // What each shortcut does to the page behind a modal, and how to see it.
+    const shortcuts = [
+      {
+        name: "Ctrl+N opens a tab",
+        key: "n",
+        acted: () => useTabsStore().tabs.length === 1,
+      },
+      {
+        name: "Ctrl+, switches to Settings",
+        key: ",",
+        acted: () => wrapper.findComponent(AppSidebar).props("activeView") === "settings",
+      },
+      {
+        name: "Ctrl+U opens the update prompt",
+        key: "u",
+        // A check result opens the prompt by itself, so the shortcut has
+        // something to do only once the user has dismissed it.
+        prepare: async () => {
+          const update = useUpdateStore();
+          update.info = {
+            available: true, version: "9.9.9", current_version: "0.0.0", date: null, body: null,
+          };
+          await flushPromises();
+          update.dismissForNow();
+        },
+        acted: () => useUpdateStore().showModal,
+      },
+    ];
+    // The two kinds of modal the app puts up: its own dialogs expose
+    // `aria-modal`, and the session picker is a native `<dialog>`.
+    const modals = {
+      "an aria-modal dialog": () => {
+        const element = document.createElement("div");
+        element.setAttribute("aria-modal", "true");
+        return element;
+      },
+      "an open native dialog": () => {
+        const element = document.createElement("dialog");
+        element.setAttribute("open", "");
+        return element;
+      },
+    };
+
+    for (const shortcut of shortcuts) {
+      for (const [kind, create] of Object.entries(modals)) {
+        it(`${shortcut.name} only once ${kind} is gone`, async () => {
+          mountApp();
+          await flushPromises();
+          await shortcut.prepare?.();
+          const press = () =>
+            document.body.dispatchEvent(new KeyboardEvent("keydown", { key: shortcut.key, ctrlKey: true, bubbles: true }));
+
+          const modal = create();
+          document.body.appendChild(modal);
+          try {
+            press();
+            await flushPromises();
+            expect(shortcut.acted()).toBe(false);
+          } finally {
+            modal.remove();
+          }
+
+          press();
+          await flushPromises();
+          expect(shortcut.acted()).toBe(true);
+        });
+      }
+    }
+
+    it("still claims the chord under a modal, so the webview's own binding does not run", async () => {
+      mountApp();
+      await flushPromises();
+      const modal = modals["an aria-modal dialog"]();
+      document.body.appendChild(modal);
+      try {
+        const event = new KeyboardEvent("keydown", { key: "n", ctrlKey: true, bubbles: true, cancelable: true });
+        document.body.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      } finally {
+        modal.remove();
+      }
+    });
   });
 
   it("keeps the update check off the awaited boot path", async () => {

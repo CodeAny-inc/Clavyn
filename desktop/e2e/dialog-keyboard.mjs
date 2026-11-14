@@ -2,10 +2,9 @@
 // dialog, Tab stays in it, Escape closes it and focus goes back to the button
 // that opened it. A click on the backdrop leaves a form and its input alone.
 // The update prompt, shown above an open form, owns Tab and Escape until it
-// closes, but not above a native session picker, which keeps its own keys, and
-// not under a modal that is drawn above it: the keys follow the layer on screen,
-// not the order the modals opened in. A pending confirmation does not answer
-// Escape while a modal above it is the one on screen.
+// closes. Escape answers the topmost modal: the prompt over a pending
+// confirmation, a native session picker over the prompt, and the prompt over a
+// modal that opened after it. App shortcuts leave an open form alone.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -30,7 +29,7 @@ const insideUpdatePrompt = page => page.evaluate(() => {
   return !!prompt?.contains(document.activeElement);
 });
 // Raises the update prompt the way a check that lands while the user is busy
-// does, without going through a shortcut or a click that a modal would stop.
+// does, since a shortcut cannot raise it over a modal.
 const raiseUpdatePrompt = page => page.evaluate(async () => {
   const { useUpdateStore } = await import("/src/stores/update.ts");
   useUpdateStore().showUpdateDialog();
@@ -115,9 +114,9 @@ try {
     await page.keyboard.press("Escape");
     await updatePrompt(page).waitFor({ state: "detached" });
 
-    // Ctrl+U raises it again above an open form.
+    // A check that lands while the form is open raises it again above the form.
     await openAddHost(page);
-    await page.keyboard.press("Control+u");
+    await raiseUpdatePrompt(page);
     await updatePrompt(page).waitFor();
     assert.equal(await form.count(), 1, "The form is still open behind the prompt");
     assert.ok(await insideUpdatePrompt(page), "Focus moves into the prompt");
@@ -140,6 +139,21 @@ try {
     await page.keyboard.press("Escape");
     await form.waitFor({ state: "detached" });
   }, { update: release });
+
+  await scenario("shortcuts-leave-an-open-form-alone", async page => {
+    await openAddHost(page);
+    await page.locator("#host-label").fill("Build box");
+    for (const chord of ["Control+,", "Control+n", "Control+k"]) {
+      await page.keyboard.press(chord);
+      assert.equal(await dialog(page).count(), 1, `${chord} leaves the form open`);
+      assert.equal(await page.locator("#host-label").inputValue(), "Build box", `${chord} keeps the typed input`);
+    }
+    // With the form gone the same chord switches the view.
+    await page.keyboard.press("Escape");
+    await dialog(page).waitFor({ state: "detached" });
+    await page.keyboard.press("Control+,");
+    await addHostButton(page).waitFor({ state: "detached" });
+  });
 
   await scenario("escape-answers-the-modal-above-a-confirmation", async page => {
     // Dismiss the prompt raised at startup so it can come back over the question.
