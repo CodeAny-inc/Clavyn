@@ -1,6 +1,8 @@
 // Dialogs and the keyboard, with fixture-only Tauri IPC: focus starts in the
 // dialog, Tab stays in it, Escape closes it and focus goes back to the button
 // that opened it. A click on the backdrop leaves a form and its input alone.
+// The update prompt, shown above an open form, owns Tab and Escape until it
+// closes.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -18,6 +20,12 @@ const results = [];
 
 const dialog = page => page.getByRole("dialog");
 const insideDialog = page => page.evaluate(() => !!document.activeElement?.closest('[role="dialog"]'));
+const release = { available: true, version: "9.9.9", current_version: "0.1.1-ui-test", date: null, body: "Fixture release notes" };
+const updatePrompt = page => page.getByRole("dialog", { name: "Update Available" });
+const insideUpdatePrompt = page => page.evaluate(() => {
+  const prompt = [...document.querySelectorAll('[role="dialog"]')].find(el => el.textContent.includes("Update Available"));
+  return !!prompt?.contains(document.activeElement);
+});
 const addHostButton = page => page.getByRole("button", { name: "Add Host", exact: true }).first();
 
 async function openAddHost(page) {
@@ -26,7 +34,9 @@ async function openAddHost(page) {
   await dialog(page).waitFor();
 }
 
-async function scenario(name, exercise) {
+// `update` is the release the fixture reports, so the startup check raises the
+// update prompt.
+async function scenario(name, exercise, { update = null } = {}) {
   const viewport = { width: 1440, height: 900 };
   const context = await browser.newContext({ viewport,
     ...(record ? { recordVideo: { dir: `${output}/raw-video`, size: viewport } } : {}) });
@@ -39,6 +49,7 @@ async function scenario(name, exercise) {
   try {
     await page.addInitScript({ path: fixture });
     await page.addInitScript({ content: "localStorage.setItem('clavyn-settings', JSON.stringify({maskAddresses:false}))" });
+    if (update) await page.addInitScript(value => { window.__terminalTest.update = value; }, update);
     await page.goto(url);
     await addHostButton(page).waitFor();
     await exercise(page);
@@ -86,6 +97,40 @@ try {
     assert.equal(await dialog(page).count(), 1, "The form is still open");
     assert.equal(await page.locator("#host-label").inputValue(), "Build box", "Typed input survives");
   });
+
+  await scenario("update-prompt-owns-keys-above-a-dialog", async page => {
+    const form = dialog(page).filter({ hasText: "Add Host" });
+    // The prompt raised at startup takes focus, and Escape dismisses it.
+    await updatePrompt(page).waitFor();
+    assert.ok(await insideUpdatePrompt(page), "Focus starts in the update prompt");
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+
+    // Ctrl+U raises it again above an open form.
+    await openAddHost(page);
+    await page.keyboard.press("Control+u");
+    await updatePrompt(page).waitFor();
+    assert.equal(await form.count(), 1, "The form is still open behind the prompt");
+    assert.ok(await insideUpdatePrompt(page), "Focus moves into the prompt");
+    for (let step = 0; step < 10; step++) {
+      await page.keyboard.press("Tab");
+      assert.ok(await insideUpdatePrompt(page), `Tab ${step + 1} keeps focus in the prompt`);
+    }
+    for (let step = 0; step < 4; step++) {
+      await page.keyboard.press("Shift+Tab");
+      assert.ok(await insideUpdatePrompt(page), `Shift+Tab ${step + 1} keeps focus in the prompt`);
+    }
+
+    // Escape closes the prompt, not the form behind it.
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+    assert.equal(await form.count(), 1, "Escape left the form open");
+    assert.ok(await insideDialog(page), "Focus is back in the form");
+    await page.keyboard.press("Tab");
+    assert.ok(await insideDialog(page), "The form traps Tab again");
+    await page.keyboard.press("Escape");
+    await form.waitFor({ state: "detached" });
+  }, { update: release });
 } finally {
   await browser.close();
   await writeFile(`${output}/dialog-keyboard-results.json`, JSON.stringify(results, null, 2));

@@ -28,6 +28,9 @@
   const state = {
     calls: [], connects: [], closes: [], writes: [], live: {}, pending: [],
     holdNext: false, failNext: false, servedHosts: null,
+    // The release `check_for_updates` reports. A scenario sets it before the
+    // page boots so the startup check raises the update prompt.
+    update: null,
     hostById(id) { return id ? (state.servedHosts ?? hosts).find(host => host.id === id) ?? null : null; },
     // Frames waiting on the asynchronous delivery route, and the switch that
     // puts them there.
@@ -91,7 +94,7 @@
       if (["is_vault_unlocked"].includes(command)) return vaultUnlocked;
       if (["biometric_available", "biometric_passphrase_stored"].includes(command)) return false;
       if (command === "get_app_info") return { name: "Clavyn", version: "0.1.1-ui-test", platform: "linux", arch: "x86_64" };
-      if (command === "check_for_updates") return { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
+      if (command === "check_for_updates") return state.update ?? { available: false, version: "0.1.1-ui-test", current_version: "0.1.1-ui-test", date: null, body: null };
       if (command === "connect_ssh" || command === "create_local_terminal") {
         const id = args.sessionId;
         const host = args.host ?? state.hostById(args.hostId);

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, useId } from "vue";
 import { useUpdateStore } from "../stores/update";
+import { useModalFocus } from "../composables/useModalFocus";
 import Button from "./ui/Button.vue";
 import {
   ArrowUpCircle,
@@ -14,6 +15,19 @@ import {
 } from "lucide-vue-next";
 
 const update = useUpdateStore();
+const titleId = useId();
+const panel = ref<HTMLElement | null>(null);
+
+// Registered with the shared focus manager so the prompt owns Tab and Escape
+// while it is on screen, even above a form or the unlock prompt that was
+// already open, and the stack hands the keys back when it closes. Escape does
+// what the close button and a backdrop click do, including while an install
+// runs: that only hides the prompt, and the install itself carries on.
+useModalFocus(
+  panel,
+  () => update.showModal && update.available,
+  () => update.dismissForNow(),
+);
 
 const progressPercent = computed(() => Math.round(update.progress));
 
@@ -44,7 +58,14 @@ function openReleases() {
         class="fixed inset-0 z-[110] flex items-center justify-center bg-black/50"
         @click.self="update.dismissForNow()"
       >
-        <div class="w-[440px] max-w-[92vw] rounded-xl border border-border bg-card shadow-dialog overflow-hidden">
+        <div
+          ref="panel"
+          tabindex="-1"
+          role="dialog"
+          aria-modal="true"
+          :aria-labelledby="titleId"
+          class="w-[440px] max-w-[92vw] rounded-xl border border-border bg-card shadow-dialog overflow-hidden"
+        >
           <!-- Header with gradient -->
           <div class="relative bg-gradient-to-br from-primary/15 via-primary/5 to-transparent px-5 pt-5 pb-4">
             <button
@@ -59,7 +80,7 @@ function openReleases() {
                 <Sparkles class="size-5 text-primary" :stroke-width="1.75" />
               </div>
               <div>
-                <div class="text-[15px] font-semibold">Update Available</div>
+                <div :id="titleId" class="text-[15px] font-semibold">Update Available</div>
                 <div class="text-[12px] text-muted-foreground mt-0.5">
                   A new version of Clavyn is ready
                 </div>
