@@ -240,7 +240,7 @@ fn remove_if_present(path: &Path) -> std::io::Result<bool> {
 }
 
 #[cfg(unix)]
-fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -252,7 +252,7 @@ fn sync_parent_directory(path: &Path) -> std::io::Result<()> {
 // on Windows. Keep the unlink behavior unchanged there rather than pretending a
 // file handle sync makes the parent directory entry durable.
 #[cfg(not(unix))]
-fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
+pub(crate) fn sync_parent_directory(_path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 

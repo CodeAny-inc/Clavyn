@@ -26,6 +26,31 @@ describe("VaultUnlockModal", () => {
     wrapper.unmount();
   });
 
+  it("is a named modal dialog, so app shortcuts leave it alone", async () => {
+    vi.spyOn(useVaultStore(), "refreshBiometricState").mockResolvedValue(undefined);
+    void useUiStore().requestVaultUnlock().catch(() => {});
+    await flushPromises();
+
+    const dialog = wrapper.get('[role="dialog"]');
+    expect(dialog.attributes("aria-modal")).toBe("true");
+    const title = wrapper.get(`#${dialog.attributes("aria-labelledby")}`);
+    expect(title.text()).toBe("Unlock Vault");
+  });
+
+  it("closes on Escape wherever focus is inside it", async () => {
+    vi.spyOn(useVaultStore(), "refreshBiometricState").mockResolvedValue(undefined);
+    const ui = useUiStore();
+    const request = ui.requestVaultUnlock().catch(() => "cancelled");
+    await flushPromises();
+
+    // Taken at the document, so it works from any control in the prompt and
+    // even when focus has fallen out of it.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await flushPromises();
+    expect(ui.showVaultUnlockModal).toBe(false);
+    await request;
+  });
+
   it("offers Touch ID for the SSH unlock flow and resolves on success", async () => {
     const vault = useVaultStore();
     const ui = useUiStore();
