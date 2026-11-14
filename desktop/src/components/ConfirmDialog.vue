@@ -51,6 +51,7 @@ onUnmounted(() => {
     :description="pendingConfirmation?.message"
     role="alertdialog"
     width="420px"
+    dismiss-on-overlay
     @close="answerConfirmation(false)"
   >
     <template #footer>
