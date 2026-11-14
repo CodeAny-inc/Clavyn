@@ -289,3 +289,43 @@ describe("IdentityManager key creation across dialog sessions", () => {
     wrapper.unmount();
   });
 });
+
+describe("IdentityManager key picker when the vault has no keys to list", () => {
+  async function openKeyPicker(vaultState: (vault: ReturnType<typeof useVaultStore>) => void) {
+    setActivePinia(createPinia());
+    setInvokeHandler("list_identities", () => []);
+    setInvokeHandler("list_hosts", () => []);
+    setInvokeHandler("list_groups", () => []);
+    setInvokeHandler("list_keys", () => []);
+    vaultState(useVaultStore());
+    const wrapper = mount(IdentityManager, { global: { stubs: { Teleport: true } } });
+    await wrapper.findAll("button").find((b) => b.text() === "Add Identity")!.trigger("click");
+    const authSelect = wrapper
+      .findAll("select")
+      .find((s) => s.findAll("option").some((o) => o.attributes("value") === "publickey"))!;
+    await authSelect.setValue("publickey");
+    return wrapper;
+  }
+
+  it("says the vault could not be checked rather than that no keys exist", async () => {
+    const wrapper = await openKeyPicker((vault) => {
+      vault.initialized = true;
+      vault.statusUnavailable = true;
+    });
+
+    expect(wrapper.text()).toContain("The vault could not be checked");
+    expect(wrapper.text()).not.toContain("No keys available");
+    wrapper.unmount();
+  });
+
+  it("still says no keys exist for a vault that was checked", async () => {
+    const wrapper = await openKeyPicker((vault) => {
+      vault.initialized = true;
+      vault.unlocked = true;
+    });
+
+    expect(wrapper.text()).toContain("No keys available");
+    expect(wrapper.text()).not.toContain("The vault could not be checked");
+    wrapper.unmount();
+  });
+});
