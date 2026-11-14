@@ -180,8 +180,9 @@ try {
 
   await scenario("the-modal-drawn-on-top-keeps-the-keys-when-a-lower-one-opens-later", async page => {
     // The update prompt is up first and the unlock prompt opens beneath it, the
-    // way it does when the vault locks itself. The prompt is drawn above the
-    // unlock prompt, so Escape is the prompt's although it opened earlier.
+    // way it does when a connection asks for the vault while a check lands. The
+    // prompt is drawn above the unlock prompt, so Escape is the prompt's
+    // although it opened earlier.
     await updatePrompt(page).waitFor();
     await page.evaluate(async () => {
       const { useUiStore } = await import("/src/stores/ui.ts");
