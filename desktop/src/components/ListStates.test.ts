@@ -6,14 +6,21 @@ import IdentityManager from "./IdentityManager.vue";
 import WorkspaceView from "./WorkspaceView.vue";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import { useHostsStore } from "../stores/hosts";
+import { useIdentitiesStore } from "../stores/identities";
 import { useWorkspacesStore } from "../stores/workspaces";
-import type { Host } from "../types";
+import type { Host, Identity } from "../types";
 
 const host: Host = {
   id: "atlas", label: "Atlas", hostname: "atlas.example.test", port: 22, username: "deploy",
   auth: { password: { credential_key: "fixture-only" } }, tags: [],
   group_id: null, key_id: null, startup_command: null, proxy_command: null,
   jump_host_id: null, identity_id: null,
+};
+
+const identity: Identity = {
+  id: "deploy-key", label: "deploy-key", username: "deploy",
+  auth: { password: { credential_key: "fixture-only" } }, tags: [],
+  key_id: null, group_id: null,
 };
 
 let wrapper: VueWrapper | undefined;
@@ -141,6 +148,45 @@ describe("identity and workspace list states", () => {
 
     expect(wrapper.text()).toContain("Identities could not be loaded");
     expect(wrapper.text()).not.toContain("No identities yet");
+  });
+
+  // The identities store clears `loaded` for the length of every read and leaves
+  // it clear after a failed one, so `loaded` alone cannot tell a first read from
+  // a reload.
+  it("keeps the filtered-empty state after a reload fails while a filter hides every identity", async () => {
+    setInvokeHandler("list_identities", () => [identity]);
+    wrapper = mount(IdentityManager, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get('input[placeholder="Search identities..."]').setValue("zzz");
+    expect(wrapper.text()).toContain('No identities match "zzz"');
+
+    setInvokeHandler("list_identities", () => {
+      throw new Error("denied");
+    });
+    await useIdentitiesStore().load();
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Loading identities");
+    expect(wrapper.text()).toContain('No identities match "zzz"');
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+
+    const showAll = wrapper.findAll("button").find((b) => b.text() === "Show all identities");
+    await showAll!.trigger("click");
+    expect(wrapper.text()).toContain("deploy-key");
+  });
+
+  it("keeps the filtered-empty state while a reload is in flight and a filter hides every identity", async () => {
+    setInvokeHandler("list_identities", () => [identity]);
+    wrapper = mount(IdentityManager, { attachTo: document.body });
+    await flushPromises();
+    await wrapper.get('input[placeholder="Search identities..."]').setValue("zzz");
+
+    setInvokeHandler("list_identities", () => new Promise(() => {}));
+    void useIdentitiesStore().load();
+    await flushPromises();
+
+    expect(wrapper.text()).not.toContain("Loading identities");
+    expect(wrapper.text()).toContain('No identities match "zzz"');
   });
 
   it("reports workspaces that could not be read", async () => {

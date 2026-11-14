@@ -508,7 +508,8 @@ function hostsUsingIdentity(identityId: string): number {
         <p class="text-[12px] text-muted-foreground">{{ identities.loadError }}</p>
         <Button size="sm" variant="outline" :disabled="identities.loading" @click="identities.load()">Retry</Button>
       </div>
-      <p v-else-if="!identities.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+      <!-- The store clears `loaded` for every reload and after a failed one, so rows already in memory prove an earlier read succeeded and this is not a first read. -->
+      <p v-else-if="!identities.loaded && !identities.identities.length" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
         Loading identities…
       </p>
       <div v-else-if="identities.identities.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
