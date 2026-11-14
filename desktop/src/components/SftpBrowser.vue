@@ -178,7 +178,11 @@ async function connect() {
     const request = sftp.connect(latest, credential, effective.username);
     credential = null;
     await request;
-    showConnectForm.value = false;
+    // A disconnect or a vault reset invalidates a pending attempt, which then
+    // resolves normally without publishing a session. Only a published session
+    // replaces the connect form; `sessionId` never changes in that case, so the
+    // watcher above cannot bring the form back.
+    if (sftp.sessionId) showConnectForm.value = false;
   } catch {
     // Store exposes the actionable error in the UI.
   } finally {

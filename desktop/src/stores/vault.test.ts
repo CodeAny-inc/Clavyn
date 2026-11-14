@@ -445,6 +445,38 @@ describe("vault store status probes", () => {
     expect(store.needsUnlock).toBe(true);
   });
 
+  it("ignores a probe that settles after the vault was reset", async () => {
+    const store = useVaultStore();
+    let answer!: (initialized: boolean) => void;
+    vi.mocked(api.vaultIsInitialized).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    vi.mocked(api.isVaultUnlocked).mockResolvedValueOnce(true);
+
+    const probe = store.checkStatus();
+    await store.reset("passphrase");
+    answer(true);
+    await probe;
+
+    expect(store.initialized).toBe(false);
+    expect(store.unlocked).toBe(false);
+    expect(store.needsSetup).toBe(true);
+  });
+
+  it("does not report a reset vault as unavailable when a probe fails late", async () => {
+    const store = useVaultStore();
+    let fail!: (reason: unknown) => void;
+    vi.mocked(api.vaultIsInitialized).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    vi.mocked(api.isVaultUnlocked).mockResolvedValueOnce(true);
+
+    const probe = store.checkStatus();
+    await store.reset("passphrase");
+    fail(new Error("status unreadable"));
+    await probe;
+
+    expect(store.statusUnavailable).toBe(false);
+    expect(store.error).toBeNull();
+    expect(store.needsSetup).toBe(true);
+  });
+
   it("offers neither setup nor unlock after a failed probe that followed a successful one", async () => {
     const store = useVaultStore();
     vi.mocked(api.vaultIsInitialized).mockResolvedValueOnce(true);
