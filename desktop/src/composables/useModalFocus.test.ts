@@ -62,7 +62,7 @@ afterEach(() => {
 });
 
 describe("useModalFocus key ownership", () => {
-  it("gives the keys to the modal opened last", async () => {
+  it("gives the keys to the modal opened last when modals share a layer", async () => {
     const first = modal("first");
     await flushPromises();
     const second = modal("second");
@@ -75,6 +75,55 @@ describe("useModalFocus key ownership", () => {
     await second.setProps({ open: false });
     press("Escape");
     expect(escapes(first)).toBe(1);
+  });
+
+  it("gives the keys to the modal in the higher layer even though it opened first", async () => {
+    const above = modal("above", { layer: 110 });
+    await flushPromises();
+    const below = modal("below", { layer: 50 });
+    await flushPromises();
+
+    press("Escape");
+    expect(escapes(above)).toBe(1);
+    expect(escapes(below)).toBe(0);
+
+    // Tab wraps inside the modal that is on top, not the one hidden under it.
+    document.getElementById("above-last")!.focus();
+    const tab = press("Tab");
+    expect(tab.defaultPrevented).toBe(true);
+    expect(focused()).toBe("above-first");
+
+    await above.setProps({ open: false });
+    press("Escape");
+    expect(escapes(below)).toBe(1);
+  });
+
+  // Every open modal listens on the document, so a handled Escape must not
+  // reach the next listener: by then the modal that answered has unregistered,
+  // and the one beneath it would be topmost and answer the same key.
+  it("does not pass an Escape it answered on to a later listener on the document", async () => {
+    modal("only");
+    await flushPromises();
+    let seenLater = 0;
+    const listener = () => { seenLater += 1; };
+    document.addEventListener("keydown", listener, true);
+    try {
+      press("Escape");
+    } finally {
+      document.removeEventListener("keydown", listener, true);
+    }
+    expect(seenLater).toBe(0);
+  });
+
+  it("lets a later modal in a higher layer take the keys over an earlier one", async () => {
+    const lower = modal("lower", { layer: 50 });
+    await flushPromises();
+    const higher = modal("higher", { layer: 110 });
+    await flushPromises();
+
+    press("Escape");
+    expect(escapes(higher)).toBe(1);
+    expect(escapes(lower)).toBe(0);
   });
 });
 

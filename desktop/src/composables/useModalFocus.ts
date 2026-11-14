@@ -5,15 +5,46 @@ import { nextTick, onBeforeUnmount, watch, type Ref } from "vue";
 //
 // Keys are taken at the document rather than on the panel. A focused control
 // that becomes disabled (a Save button while it saves) drops focus to <body>,
-// and a panel-level listener would never see the next Tab. Only the most
-// recently opened modal answers, so a confirmation over a form owns the keys
-// until it closes.
+// and a panel-level listener would never see the next Tab. Only the topmost
+// modal answers, so a confirmation over a form owns the keys until it closes.
+// Topmost is the highest layer on screen and, among modals in the same layer,
+// the one opened last.
 
 const FOCUSABLE =
   'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
   'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
-const openModals: symbol[] = [];
+interface OpenModal {
+  token: symbol;
+  panel: Ref<HTMLElement | null>;
+}
+
+const openModals: OpenModal[] = [];
+
+// The layer a panel is drawn in: the z-index of its outermost ancestor that has
+// one, which is the overlay it sits in. Read from the page's own styles so the
+// stylesheet stays the only place that orders the overlays.
+function layerOf(element: HTMLElement | null): number {
+  let layer = 0;
+  for (let node = element; node && node !== document.body; node = node.parentElement) {
+    const zIndex = Number.parseInt(getComputedStyle(node).zIndex, 10);
+    if (!Number.isNaN(zIndex)) layer = zIndex;
+  }
+  return layer;
+}
+
+function topModal(): OpenModal | undefined {
+  let top: OpenModal | undefined;
+  let topLayer = -Infinity;
+  for (const modal of openModals) {
+    const layer = layerOf(modal.panel.value);
+    if (layer >= topLayer) {
+      top = modal;
+      topLayer = layer;
+    }
+  }
+  return top;
+}
 
 export function useModalFocus(
   panel: Ref<HTMLElement | null>,
@@ -44,11 +75,14 @@ export function useModalFocus(
     // composition, and answering it here would also close the dialog and lose
     // what was typed. WebKit reports the key that ends a composition as 229.
     if (event.isComposing || event.keyCode === 229) return;
-    if (openModals[openModals.length - 1] !== token) return;
-    if (behindNativeDialog()) return;
+    if (topModal()?.token !== token || behindNativeDialog()) return;
     if (event.key === "Escape") {
       event.preventDefault();
-      event.stopPropagation();
+      // Immediate, because every open modal listens on the document. Once this
+      // one closes, the modal beneath it is topmost, and a browser runs the
+      // microtasks that unregister this one between two listeners of the same
+      // event, so the next listener would answer the same Escape too.
+      event.stopImmediatePropagation();
       onEscape();
       return;
     }
@@ -80,7 +114,7 @@ export function useModalFocus(
     if (active) return;
     active = true;
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    openModals.push(token);
+    openModals.push({ token, panel });
     document.addEventListener("keydown", onKeydown, true);
   }
 
@@ -88,7 +122,7 @@ export function useModalFocus(
     if (!active) return;
     active = false;
     document.removeEventListener("keydown", onKeydown, true);
-    const index = openModals.indexOf(token);
+    const index = openModals.findIndex((modal) => modal.token === token);
     if (index >= 0) openModals.splice(index, 1);
     const target = opener;
     opener = null;

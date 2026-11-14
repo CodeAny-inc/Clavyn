@@ -2,7 +2,9 @@
 // dialog, Tab stays in it, Escape closes it and focus goes back to the button
 // that opened it. A click on the backdrop leaves a form and its input alone.
 // The update prompt, shown above an open form, owns Tab and Escape until it
-// closes, but not above a native session picker, which keeps its own keys.
+// closes, but not above a native session picker, which keeps its own keys, and
+// not under a modal that is drawn above it: the keys follow the layer on screen,
+// not the order the modals opened in.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -136,6 +138,25 @@ try {
     assert.ok(await insideDialog(page), "The form traps Tab again");
     await page.keyboard.press("Escape");
     await form.waitFor({ state: "detached" });
+  }, { update: release });
+
+  await scenario("the-modal-drawn-on-top-keeps-the-keys-when-a-lower-one-opens-later", async page => {
+    // The update prompt is up first and the unlock prompt opens beneath it, the
+    // way it does when a connection asks for the vault while a check lands. The
+    // prompt is drawn above the unlock prompt, so Escape is the prompt's
+    // although it opened earlier.
+    await updatePrompt(page).waitFor();
+    await page.evaluate(async () => {
+      const { useUiStore } = await import("/src/stores/ui.ts");
+      window.__unlockRequest = useUiStore().requestVaultUnlock();
+    });
+    const unlock = page.getByRole("dialog", { name: "Unlock Vault" });
+    await unlock.waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+    assert.equal(await unlock.count(), 1, "Escape left the unlock prompt open");
+    await page.keyboard.press("Escape");
+    await unlock.waitFor({ state: "detached" });
   }, { update: release });
 
   await scenario("native-session-picker-keeps-its-keys-under-the-update-prompt", async page => {
