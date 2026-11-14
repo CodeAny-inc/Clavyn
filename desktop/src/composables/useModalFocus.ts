@@ -30,8 +30,22 @@ export function useModalFocus(
     );
   }
 
+  // A native modal <dialog> sits in the top layer and makes the rest of the page
+  // inert. A panel behind it cannot take focus, so handling Tab here would only
+  // swallow the key. The dialog answers Tab and Escape itself.
+  function behindNativeDialog(): boolean {
+    return Array.from(document.querySelectorAll("dialog[open]")).some(
+      (dialog) => !dialog.contains(panel.value),
+    );
+  }
+
   function onKeydown(event: KeyboardEvent) {
+    // An input method owns its keys while it composes: Escape cancels the
+    // composition, and answering it here would also close the dialog and lose
+    // what was typed. WebKit reports the key that ends a composition as 229.
+    if (event.isComposing || event.keyCode === 229) return;
     if (openModals[openModals.length - 1] !== token) return;
+    if (behindNativeDialog()) return;
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();

@@ -2,7 +2,7 @@
 // dialog, Tab stays in it, Escape closes it and focus goes back to the button
 // that opened it. A click on the backdrop leaves a form and its input alone.
 // The update prompt, shown above an open form, owns Tab and Escape until it
-// closes.
+// closes, but not above a native session picker, which keeps its own keys.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -25,6 +25,12 @@ const updatePrompt = page => page.getByRole("dialog", { name: "Update Available"
 const insideUpdatePrompt = page => page.evaluate(() => {
   const prompt = [...document.querySelectorAll('[role="dialog"]')].find(el => el.textContent.includes("Update Available"));
   return !!prompt?.contains(document.activeElement);
+});
+// Raises the update prompt the way a check that lands while the user is busy
+// does, without going through a shortcut or a click that a modal would stop.
+const raiseUpdatePrompt = page => page.evaluate(async () => {
+  const { useUpdateStore } = await import("/src/stores/update.ts");
+  useUpdateStore().showUpdateDialog();
 });
 const addHostButton = page => page.getByRole("button", { name: "Add Host", exact: true }).first();
 
@@ -130,6 +136,42 @@ try {
     assert.ok(await insideDialog(page), "The form traps Tab again");
     await page.keyboard.press("Escape");
     await form.waitFor({ state: "detached" });
+  }, { update: release });
+
+  await scenario("native-session-picker-keeps-its-keys-under-the-update-prompt", async page => {
+    await updatePrompt(page).waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+
+    await page.getByRole("button", { name: "Terminal", exact: true }).first().click();
+    await page.getByRole("button", { name: "New session" }).first().click();
+    await page.getByRole("textbox", { name: "Search sessions" }).waitFor();
+    await raiseUpdatePrompt(page);
+    assert.equal(await updatePrompt(page).count(), 1, "The prompt is up behind the picker");
+
+    // The picker is in the top layer and the page is inert, so Tab is the
+    // picker's: it has to move between its controls, not stall or leave. A
+    // native dialog wraps Tab through the document once per lap, so focus
+    // passing `<body>` is expected; landing anywhere else on the page is not.
+    const seen = new Set();
+    for (let step = 0; step < 6; step++) {
+      await page.keyboard.press("Tab");
+      const here = await page.evaluate(() => {
+        const element = document.activeElement;
+        if (element?.closest("dialog[open]")) return element.getAttribute("aria-label") ?? element.tagName;
+        return element === document.body ? "(document)" : null;
+      });
+      assert.ok(here, `Tab ${step + 1} stays in the picker`);
+      seen.add(here);
+    }
+    assert.ok(seen.size >= 3, `Tab moves between the picker's controls (saw ${[...seen].join(", ")})`);
+
+    // Escape closes the picker and leaves the prompt, which the user has not seen yet.
+    await page.keyboard.press("Escape");
+    await page.locator("dialog[open]").waitFor({ state: "hidden" });
+    assert.equal(await updatePrompt(page).count(), 1, "The prompt is still up");
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
   }, { update: release });
 } finally {
   await browser.close();
