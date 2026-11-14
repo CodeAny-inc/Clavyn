@@ -50,6 +50,11 @@ function trustButton(wrapper: VueWrapper) {
   return buttonLabelled(wrapper, "Trust new key");
 }
 
+/** Whether the page has its own OK/Cancel question on screen. */
+function askedInThePage() {
+  return pendingConfirmation.value !== null;
+}
+
 describe("KnownHostsView host key changes", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -74,7 +79,6 @@ describe("KnownHostsView host key changes", () => {
   });
 
   it("leaves the confirmation to the backend instead of asking in the page", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
@@ -83,7 +87,7 @@ describe("KnownHostsView host key changes", () => {
 
     // A page-level confirm is not a control — a scripted `invoke` skips it — so
     // the only question asked is the native one the command raises.
-    expect(confirm).not.toHaveBeenCalled();
+    expect(askedInThePage()).toBe(false);
     expect(api.replaceKnownHost).toHaveBeenCalledWith(
       "prod.example.com",
       22,
@@ -132,14 +136,13 @@ describe("KnownHostsView removed hosts", () => {
   });
 
   it("sends the host and port back in the shape the entry was listed under", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     await buttonLabelled(wrapper, "Forget permanently").trigger("click");
     await flushPromises();
 
-    expect(confirm).not.toHaveBeenCalled();
+    expect(askedInThePage()).toBe(false);
     // A bare IPv6 address: everything before the last colon is the host, so
     // "host:port" rebuilds the entry this row was listed under.
     expect(api.forgetKnownHost).toHaveBeenCalledWith("::1", 22);
@@ -251,5 +254,29 @@ describe("KnownHostsView trusted hosts", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("No trusted hosts match");
+  });
+});
+
+describe("KnownHostsView loading", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(api.listKnownHosts).mockRejectedValue("known_hosts.json is unreadable");
+    vi.mocked(api.listRemovedKnownHosts).mockResolvedValue([]);
+    vi.mocked(api.listHostKeyChanges).mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it("reports a list that could not be read instead of rejecting unhandled", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "Failed to load known hosts: known_hosts.json is unreadable",
+    );
+    expect(wrapper.text()).not.toContain("Loading...");
   });
 });

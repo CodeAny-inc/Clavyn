@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
 import type { Host, HostGroup } from "../types";
+import { useIdentitiesStore } from "./identities";
 
 export const useHostsStore = defineStore("hosts", () => {
   const hosts = ref<Host[]>([]);
@@ -105,6 +106,18 @@ export const useHostsStore = defineStore("hosts", () => {
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;
     });
+    // The backend ungroups identities in the same write. Mirror it, or the next
+    // edit of such an identity sends the deleted group id straight back.
+    useIdentitiesStore().ungroup(id);
+  }
+
+  // The backend unlinks hosts from an identity it deletes; this applies the
+  // same change locally so those hosts do not keep pointing at nothing.
+  function unlinkIdentity(identityId: string) {
+    hostsRevision += 1;
+    hosts.value.forEach((h) => {
+      if (h.identity_id === identityId) h.identity_id = null;
+    });
   }
 
   return {
@@ -119,5 +132,6 @@ export const useHostsStore = defineStore("hosts", () => {
     deleteHost,
     addGroup,
     deleteGroup,
+    unlinkIdentity,
   };
 });

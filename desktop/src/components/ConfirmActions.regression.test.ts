@@ -165,7 +165,7 @@ describe("destructive actions wait for confirmation", () => {
         const row = wrapper!.findAll("tr").find((item) => item.text().includes("README.md"))!;
         await row.trigger("contextmenu");
         await wrapper!.findAll("button").find((button) => button.text() === "Delete")!.trigger("click");
-      }, "sftp_remove_file", 'Delete "README.md"?');
+      }, "sftp_remove_file", 'Delete "/home/deploy/README.md"?');
       expect(args).toMatchObject({ path: "/home/deploy/README.md" });
     });
 

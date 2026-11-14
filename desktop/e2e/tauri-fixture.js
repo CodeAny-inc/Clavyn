@@ -76,11 +76,18 @@
       }
       if (command === "plugin:event|unlisten") { listeners.delete(args.eventId); return; }
       if (command === "startup_failure") return null;
-      // The capability file grants no dialog permissions, so the ACL refuses
-      // these before the plugin runs.
-      if (command === "plugin:dialog|confirm" || command === "plugin:dialog|message") {
-        const name = command.slice("plugin:dialog|".length);
-        throw new Error(`dialog.${name} not allowed. Permissions associated with this command: dialog:allow-${name}, dialog:default`);
+      // The dialog plugin registers no `confirm` command and no permission
+      // allows it, so the ACL refuses it before anything runs.
+      if (command === "plugin:dialog|confirm") {
+        throw new Error("dialog.confirm not allowed. Permissions associated with this command: dialog:allow-confirm, dialog:default");
+      }
+      // The native message dialog, which the capability grants, answered by the
+      // browser's own so a scenario accepts or dismisses it through
+      // Playwright's dialog events.
+      if (command === "plugin:dialog|message") {
+        if (args.buttons === "OkCancel") return nativeConfirm(args.message) ? "Ok" : "Cancel";
+        nativeAlert(args.message);
+        return "Ok";
       }
       if (["delete_host", "delete_key"].includes(command)) return;
       // Keep the exact objects served, including any edits a scenario makes to
@@ -118,6 +125,7 @@
         return;
       }
       if (command === "session_resize") return;
+      if (command === "session_output_ack") return;
       if (command === "session_write") {
         const text = new TextDecoder().decode(new Uint8Array(args.data));
         state.writes.push({ id: args.sessionId, text });
@@ -148,7 +156,10 @@
   };
   // What tauri-plugin-dialog's init script installs in every desktop webview:
   // `confirm` becomes async, so its result is a Promise and always truthy, and
-  // `alert` returns before anything is shown.
+  // `alert` returns before anything is shown. The browser's own dialogs are
+  // kept for the `message` handler above, which would otherwise call itself.
+  const nativeAlert = window.alert.bind(window);
+  const nativeConfirm = window.confirm.bind(window);
   window.alert = function (message) {
     window.__TAURI_INTERNALS__.invoke("plugin:dialog|message", { message: String(message) });
   };

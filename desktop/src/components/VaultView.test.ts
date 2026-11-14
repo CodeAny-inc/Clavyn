@@ -286,3 +286,35 @@ describe("VaultView biometric settings", () => {
     wrapper.unmount();
   });
 });
+
+describe("VaultView setup", () => {
+  it("creates the vault once when Create Vault is clicked twice", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const vault = useVaultStore();
+    vi.spyOn(vault, "checkStatus").mockResolvedValue(undefined);
+    let finish!: () => void;
+    const initialize = vi
+      .spyOn(vault, "initialize")
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+
+    const wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+    await wrapper.get("#setup-pass").setValue("correct horse");
+    await wrapper.get("#setup-confirm").setValue("correct horse");
+
+    const create = () => wrapper.findAll("button").find((b) => b.text().includes("Create Vault"))!;
+    await create().trigger("click");
+    await create().trigger("click");
+    await flushPromises();
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(create().attributes("disabled")).toBeDefined();
+
+    finish();
+    await flushPromises();
+    expect(create().attributes("disabled")).toBeUndefined();
+
+    wrapper.unmount();
+  });
+});
