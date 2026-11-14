@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import ConfirmDialog from "./ConfirmDialog.vue";
+import Dialog from "./ui/Dialog.vue";
 import { confirmAction, pendingConfirmation } from "../composables/useConfirm";
 import { useVaultStore } from "../stores/vault";
 
@@ -68,6 +69,29 @@ describe("ConfirmDialog", () => {
     window.removeEventListener("keydown", listener);
     await expect(answer).resolves.toBe(false);
     expect(reachedWindow).toBe(false);
+  });
+
+  it("leaves Escape to a modal opened above it, and answers once that one is gone", async () => {
+    const { answer } = await open();
+    let answered = false;
+    void answer.then(() => { answered = true; });
+
+    const above = mount(Dialog, { props: { open: true, title: "Opened later" }, attachTo: document.body });
+    await flushPromises();
+    const escape = () => document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+
+    // The question is hidden behind the newer modal, so Escape is not for it.
+    escape();
+    await flushPromises();
+    expect(above.emitted("close")).toHaveLength(1);
+    expect(pendingConfirmation.value).not.toBeNull();
+    expect(answered).toBe(false);
+
+    await above.setProps({ open: false });
+    await flushPromises();
+    escape();
+    await expect(answer).resolves.toBe(false);
+    above.unmount();
   });
 
   it("resolves false when the overlay is clicked", async () => {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onUnmounted, ref, watch } from "vue";
 import { useVaultStore } from "../stores/vault";
 import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 import Dialog from "./ui/Dialog.vue";
@@ -28,20 +28,10 @@ watch(pendingConfirmation, async (request) => {
   (target?.$el as HTMLElement | undefined)?.focus();
 });
 
-// Captured at the window so Escape reaches this dialog even when focus has
-// left it, and does not go on to the app's own Escape handling.
-function onKeydown(event: KeyboardEvent) {
-  if (event.key !== "Escape" || !pendingConfirmation.value) return;
-  event.preventDefault();
-  event.stopPropagation();
-  answerConfirmation(false);
-}
-
-onMounted(() => window.addEventListener("keydown", onKeydown, true));
-onUnmounted(() => {
-  window.removeEventListener("keydown", onKeydown, true);
-  answerConfirmation(false);
-});
+// Escape is the shared dialog's: it takes the key at the document, wherever
+// focus is, and only while this is the topmost modal. A handler of its own here
+// would also answer when another modal is on top and the question is hidden.
+onUnmounted(() => answerConfirmation(false));
 </script>
 
 <template>

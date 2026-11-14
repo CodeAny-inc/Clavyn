@@ -4,7 +4,8 @@
 // The update prompt, shown above an open form, owns Tab and Escape until it
 // closes, but not above a native session picker, which keeps its own keys, and
 // not under a modal that is drawn above it: the keys follow the layer on screen,
-// not the order the modals opened in.
+// not the order the modals opened in. A pending confirmation does not answer
+// Escape while a modal above it is the one on screen.
 import { chromium } from "playwright";
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -138,6 +139,29 @@ try {
     assert.ok(await insideDialog(page), "The form traps Tab again");
     await page.keyboard.press("Escape");
     await form.waitFor({ state: "detached" });
+  }, { update: release });
+
+  await scenario("escape-answers-the-modal-above-a-confirmation", async page => {
+    // Dismiss the prompt raised at startup so it can come back over the question.
+    await updatePrompt(page).waitFor();
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+
+    await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().hover();
+    await page.getByRole("button", { name: "Delete host" }).filter({ visible: true }).first().click();
+    const question = page.getByRole("alertdialog");
+    await question.waitFor();
+    await raiseUpdatePrompt(page);
+    await updatePrompt(page).waitFor();
+
+    // The question is hidden behind the prompt, so Escape is the prompt's.
+    await page.keyboard.press("Escape");
+    await updatePrompt(page).waitFor({ state: "detached" });
+    assert.equal(await question.count(), 1, "Escape left the question open");
+    await page.keyboard.press("Escape");
+    await question.waitFor({ state: "detached" });
+    const deletes = await page.evaluate(() => window.__terminalTest.calls.filter(call => call.command === "delete_host"));
+    assert.deepEqual(deletes, [], "Declining the question deleted nothing");
   }, { update: release });
 
   await scenario("the-modal-drawn-on-top-keeps-the-keys-when-a-lower-one-opens-later", async page => {
