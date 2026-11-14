@@ -43,6 +43,8 @@ const showForm = ref(false);
 const editingHost = ref<Host | null>(null);
 const showGroupForm = ref(false);
 const newGroupName = ref("");
+const groupError = ref("");
+const actionError = ref("");
 
 // Selection state
 const selectedHostId = ref<string | null>(null);
@@ -164,7 +166,13 @@ async function deleteHost(host: Host) {
     confirmLabel: "Delete",
     destructive: true,
   })) {
-    await hosts.deleteHost(host.id);
+    actionError.value = "";
+    try {
+      await hosts.deleteHost(host.id);
+    } catch (e) {
+      actionError.value = `Failed to delete host: ${e}`;
+      return;
+    }
     if (selectedHostId.value === host.id) {
       selectedHostId.value = null;
     }
@@ -175,9 +183,20 @@ function selectGroup(groupId: string | null) {
   hosts.selectedGroupId = groupId;
 }
 
+function openGroupForm() {
+  groupError.value = "";
+  showGroupForm.value = true;
+}
+
 async function createGroup() {
   if (!newGroupName.value.trim()) return;
-  await hosts.addGroup(newGroupName.value.trim());
+  groupError.value = "";
+  try {
+    await hosts.addGroup(newGroupName.value.trim());
+  } catch (e) {
+    groupError.value = `Failed to create group: ${e}`;
+    return;
+  }
   newGroupName.value = "";
   showGroupForm.value = false;
 }
@@ -189,7 +208,13 @@ async function deleteGroup(groupId: string, name: string) {
     confirmLabel: "Delete",
     destructive: true,
   })) {
-    await hosts.deleteGroup(groupId);
+    actionError.value = "";
+    try {
+      await hosts.deleteGroup(groupId);
+    } catch (e) {
+      actionError.value = `Failed to delete group: ${e}`;
+      return;
+    }
     if (hosts.selectedGroupId === groupId) {
       hosts.selectedGroupId = null;
     }
@@ -218,11 +243,11 @@ function authLabel(host: Host): string {
     <div class="flex h-11 items-center gap-2 border-b border-border px-4 pl-12 md:pl-4">
       <h2 class="text-[14px] font-semibold truncate">Hosts</h2>
       <div class="ml-auto flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="hidden sm:inline-flex" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
           <span class="hidden sm:inline">New Group</span>
         </Button>
-        <Button size="sm" variant="ghost" class="sm:hidden" @click="showGroupForm = true">
+        <Button size="sm" variant="ghost" class="sm:hidden" @click="openGroupForm">
           <FolderPlus class="size-3.5" :stroke-width="1.75" />
         </Button>
         <Button size="sm" @click="addHost">
@@ -249,6 +274,7 @@ function authLabel(host: Host): string {
         {{ identities.loadError }} Direct hosts remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
+      <p v-if="actionError" class="mt-2 text-[11px] text-destructive" role="alert">{{ actionError }}</p>
     </div>
 
     <!-- Content area -->
@@ -284,7 +310,7 @@ function authLabel(host: Host): string {
         </div>
         <button
           class="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[12px] text-muted-foreground/70 hover:text-muted-foreground transition-colors duration-100"
-          @click="showGroupForm = true"
+          @click="openGroupForm"
         >
           <FolderPlus class="size-3" :stroke-width="1.75" />
           <span>Add group...</span>
@@ -471,6 +497,7 @@ function authLabel(host: Host): string {
             @keydown.enter="createGroup"
           />
         </FormGroup>
+        <p v-if="groupError" class="text-[12px] text-destructive" role="alert">{{ groupError }}</p>
       </div>
       <template #footer>
         <Button variant="ghost" @click="showGroupForm = false">Cancel</Button>
