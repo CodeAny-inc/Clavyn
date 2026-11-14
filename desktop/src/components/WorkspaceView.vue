@@ -243,7 +243,7 @@ function layoutToPaneTree(layout: PaneLayout, autoConnect: boolean): PaneTree {
   };
 }
 
-function restoreWorkspace(ws: Workspace) {
+async function restoreWorkspace(ws: Workspace) {
   if (!ws.tabs || ws.tabs.length === 0) {
     tabs.newTab();
     emit("switch-view", "terminal");
@@ -251,9 +251,15 @@ function restoreWorkspace(ws: Workspace) {
   }
 
   // Opening replaces every tab, which ends their sessions, so a live session
-  // is only given up with the user's consent.
+  // is only given up with the user's consent. No tab is touched until the
+  // answer arrives.
   const live = tabs.tabs.some((tab) => collectPanes(tab.tree).some((pane) => pane.connected));
-  if (live && !confirm(`Open workspace "${ws.name}"? This closes every open tab and disconnects its sessions.`)) return;
+  if (live && !(await confirmAction({
+    title: "Open workspace",
+    message: `Open workspace "${ws.name}"? This closes every open tab and disconnects its sessions.`,
+    confirmLabel: "Open",
+    destructive: true,
+  }))) return;
 
   // Close all existing tabs first
   const existingIds = tabs.tabs.map((t) => t.id);
