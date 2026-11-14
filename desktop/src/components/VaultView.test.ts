@@ -4,6 +4,30 @@ import { describe, expect, it, vi } from "vitest";
 import VaultView from "./VaultView.vue";
 import { useVaultStore } from "../stores/vault";
 
+describe("VaultView status", () => {
+  it("offers a retry instead of vault creation when the status probe fails", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const vault = useVaultStore();
+    vi.spyOn(vault, "checkStatus").mockImplementation(async () => {
+      vault.statusUnavailable = true;
+      vault.error = "Error: vault status unreadable";
+    });
+
+    const wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("vault status unreadable");
+    expect(wrapper.text()).toContain("Retry");
+    expect(wrapper.text()).not.toContain("Create Vault");
+    expect(wrapper.text()).not.toContain("Your vault is unlocked");
+    expect(wrapper.text()).toContain("Vault status unknown");
+    expect(wrapper.text()).not.toContain("Vault locked");
+
+    wrapper.unmount();
+  });
+});
+
 describe("VaultView biometric settings", () => {
   it("shows a startup Keychain error when biometric state cannot be reconciled", async () => {
     const pinia = createPinia();
@@ -282,6 +306,38 @@ describe("VaultView biometric settings", () => {
 
     await openEnrollment();
     expect((wrapper.get("#bio-pass").element as HTMLInputElement).value).toBe("");
+
+    wrapper.unmount();
+  });
+});
+
+describe("VaultView setup", () => {
+  it("creates the vault once when Create Vault is clicked twice", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const vault = useVaultStore();
+    vi.spyOn(vault, "checkStatus").mockResolvedValue(undefined);
+    let finish!: () => void;
+    const initialize = vi
+      .spyOn(vault, "initialize")
+      .mockImplementation(() => new Promise<void>((resolve) => { finish = resolve; }));
+
+    const wrapper = mount(VaultView, { global: { plugins: [pinia] } });
+    await flushPromises();
+    await wrapper.get("#setup-pass").setValue("correct horse");
+    await wrapper.get("#setup-confirm").setValue("correct horse");
+
+    const create = () => wrapper.findAll("button").find((b) => b.text().includes("Create Vault"))!;
+    await create().trigger("click");
+    await create().trigger("click");
+    await flushPromises();
+
+    expect(initialize).toHaveBeenCalledTimes(1);
+    expect(create().attributes("disabled")).toBeDefined();
+
+    finish();
+    await flushPromises();
+    expect(create().attributes("disabled")).toBeUndefined();
 
     wrapper.unmount();
   });

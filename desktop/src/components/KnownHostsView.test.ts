@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import * as api from "../api";
+import { useSettingsStore } from "../stores/settings";
 import KnownHostsView from "./KnownHostsView.vue";
+import { answerConfirmation, pendingConfirmation } from "../composables/useConfirm";
 
 vi.mock("../api", () => ({
   listKnownHosts: vi.fn(),
@@ -48,6 +50,11 @@ function trustButton(wrapper: VueWrapper) {
   return buttonLabelled(wrapper, "Trust new key");
 }
 
+/** Whether the page has its own OK/Cancel question on screen. */
+function askedInThePage() {
+  return pendingConfirmation.value !== null;
+}
+
 describe("KnownHostsView host key changes", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
@@ -72,7 +79,6 @@ describe("KnownHostsView host key changes", () => {
   });
 
   it("leaves the confirmation to the backend instead of asking in the page", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
@@ -81,7 +87,7 @@ describe("KnownHostsView host key changes", () => {
 
     // A page-level confirm is not a control — a scripted `invoke` skips it — so
     // the only question asked is the native one the command raises.
-    expect(confirm).not.toHaveBeenCalled();
+    expect(askedInThePage()).toBe(false);
     expect(api.replaceKnownHost).toHaveBeenCalledWith(
       "prod.example.com",
       22,
@@ -130,14 +136,13 @@ describe("KnownHostsView removed hosts", () => {
   });
 
   it("sends the host and port back in the shape the entry was listed under", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     await buttonLabelled(wrapper, "Forget permanently").trigger("click");
     await flushPromises();
 
-    expect(confirm).not.toHaveBeenCalled();
+    expect(askedInThePage()).toBe(false);
     // A bare IPv6 address: everything before the last colon is the host, so
     // "host:port" rebuilds the entry this row was listed under.
     expect(api.forgetKnownHost).toHaveBeenCalledWith("::1", 22);
@@ -188,25 +193,54 @@ describe("KnownHostsView trusted hosts", () => {
     vi.clearAllMocks();
   });
 
-  it("keeps the brackets of an IPv6 entry so the pair rebuilds it", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
+  async function removeConfirmed(wrapper: VueWrapper) {
+    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
+    await flushPromises();
+    answerConfirmation(true);
+    await flushPromises();
+  }
+
+  it("removes nothing until the removal is confirmed", async () => {
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
     await flushPromises();
+    expect(pendingConfirmation.value?.message).toBe(`Remove known host "${trusted.host}"?`);
+    expect(api.removeKnownHost).not.toHaveBeenCalled();
+
+    answerConfirmation(false);
+    await flushPromises();
+    expect(api.removeKnownHost).not.toHaveBeenCalled();
+  });
+
+  it("masks the host in the confirmation when addresses are masked", async () => {
+    useSettingsStore().maskAddresses = true;
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
+    await flushPromises();
+    expect(pendingConfirmation.value?.message).not.toContain("2001:db8");
+    answerConfirmation(false);
+    await flushPromises();
+  });
+
+  it("keeps the brackets of an IPv6 entry so the pair rebuilds it", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    await removeConfirmed(wrapper);
 
     expect(api.removeKnownHost).toHaveBeenCalledWith("[2001:db8::1]", 2222);
   });
 
   it("reports a removal that failed instead of dropping it", async () => {
-    vi.spyOn(window, "confirm").mockReturnValue(true);
     const wrapper = mount(KnownHostsView);
     await flushPromises();
 
     vi.mocked(api.removeKnownHost).mockRejectedValueOnce("known_hosts.json is read-only");
-    await wrapper.get('button[aria-label="Remove known host"]').trigger("click");
-    await flushPromises();
+    await removeConfirmed(wrapper);
 
     expect(wrapper.text()).toContain("known_hosts.json is read-only");
   });
@@ -220,5 +254,29 @@ describe("KnownHostsView trusted hosts", () => {
     await flushPromises();
 
     expect(wrapper.text()).toContain("No trusted hosts match");
+  });
+});
+
+describe("KnownHostsView loading", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.mocked(api.listKnownHosts).mockRejectedValue("known_hosts.json is unreadable");
+    vi.mocked(api.listRemovedKnownHosts).mockResolvedValue([]);
+    vi.mocked(api.listHostKeyChanges).mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.clearAllMocks();
+  });
+
+  it("reports a list that could not be read instead of rejecting unhandled", async () => {
+    const wrapper = mount(KnownHostsView);
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain(
+      "Failed to load known hosts: known_hosts.json is unreadable",
+    );
+    expect(wrapper.text()).not.toContain("Loading...");
   });
 });

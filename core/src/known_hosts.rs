@@ -48,12 +48,11 @@ fn is_false(value: &bool) -> bool {
 
 impl KnownHosts {
     pub fn load(path: PathBuf) -> Result<Self> {
-        let entries = if path.exists() {
-            // Fail closed. Treating an unreadable file as "no known hosts" would
-            // silently downgrade every pinned host back to trust-on-first-use.
-            normalize_entries(crate::fs_util::read_state_file(&path)?)
-        } else {
-            HashMap::new()
+        // Fail closed. Treating an unreadable file as "no known hosts" would
+        // silently downgrade every pinned host back to trust-on-first-use.
+        let entries = match crate::fs_util::read_state_file(&path)? {
+            Some(entries) => normalize_entries(entries),
+            None => HashMap::new(),
         };
         Ok(Self {
             path,
@@ -110,6 +109,12 @@ impl KnownHosts {
     /// A tombstoned entry whose key is presented again is restored, so a host
     /// removed by mistake becomes visible in `list` after the next connection.
     ///
+    /// Accepting the pinned key also drops any change held for the host. A
+    /// held key is offered to the user as "the server now presents this key";
+    /// once the pinned key has answered again that premise is false, and
+    /// keeping the offer would let one click pin a key the server is not
+    /// using — typically one an on-path attacker presented briefly earlier.
+    ///
     /// `hash` is the RSA hash of the host-key algorithm negotiated for the key;
     /// see [`host_key_type`].
     pub fn verify(
@@ -130,6 +135,8 @@ impl KnownHosts {
         // same live entry, and `check_mismatch` has already established that the
         // presented key is the one that belongs there.
         if matches!(self.entries.get(&k), Some(existing) if !existing.removed) {
+            // `presented` is never persisted, so this needs no write.
+            self.presented.remove(&k);
             return Ok(true);
         }
         let entry = KnownHostEntry {
@@ -139,7 +146,8 @@ impl KnownHosts {
             removed: false,
         };
         self.commit(|known_hosts| {
-            known_hosts.entries.insert(k, entry);
+            known_hosts.entries.insert(k.clone(), entry);
+            known_hosts.presented.remove(&k);
         })?;
         Ok(true)
     }
@@ -369,7 +377,7 @@ fn key_path(host: &str, port: u16) -> String {
 
 /// Lowercase a host name and strip a trailing root dot, or canonicalize an IP
 /// literal (with or without the brackets an IPv6 literal is written in).
-fn normalize_host(host: &str) -> String {
+pub(crate) fn normalize_host(host: &str) -> String {
     // The root dot goes first so a bracketed literal spelled "[::1]." still
     // loses its brackets below.
     let host = host.trim().trim_end_matches('.');
@@ -590,6 +598,58 @@ mod tests {
     }
 
     #[test]
+    fn the_pinned_key_answering_again_withdraws_a_held_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = empty_store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
+        assert!(!hosts.verify(HOST, PORT, &presented, None).expect("mismatch"));
+        hosts.hold_presented_key(HOST, PORT, &presented, None);
+        assert_eq!(hosts.pending_changes().len(), 1);
+
+        assert!(hosts.verify(HOST, PORT, &pinned, None).expect("pinned key"));
+        assert!(hosts.pending_changes().is_empty());
+        let error = hosts
+            .trust_presented_key(HOST, PORT, &fingerprint(&presented))
+            .expect_err("a key the server stopped presenting was pinned");
+        assert!(error.to_string().contains("no unreviewed host key"));
+        assert!(!hosts.verify(HOST, PORT, &presented, None).expect("verify"));
+    }
+
+    #[test]
+    fn restoring_a_removed_host_withdraws_a_held_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hosts = empty_store(dir.path());
+        let pinned = server_key();
+        let presented = server_key();
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
+        hosts.remove(HOST, PORT).expect("remove");
+        hosts.hold_presented_key(HOST, PORT, &presented, None);
+        assert_eq!(hosts.pending_changes().len(), 1);
+
+        assert!(hosts.verify(HOST, PORT, &pinned, None).expect("restore"));
+        assert_eq!(hosts.list().len(), 1);
+        assert!(hosts.pending_changes().is_empty());
+    }
+
+    #[test]
+    fn a_restore_that_cannot_be_saved_keeps_the_held_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("known_hosts.json");
+        let mut hosts = KnownHosts::load(path.clone()).expect("load");
+        let pinned = server_key();
+        hosts.verify(HOST, PORT, &pinned, None).expect("first use");
+        hosts.remove(HOST, PORT).expect("remove");
+        hosts.hold_presented_key(HOST, PORT, &server_key(), None);
+
+        block_writes(&path);
+        assert!(hosts.verify(HOST, PORT, &pinned, None).is_err());
+        assert!(hosts.list().is_empty());
+        assert_eq!(hosts.pending_changes().len(), 1);
+    }
+
+    #[test]
     fn trusting_without_a_held_key_is_rejected() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut hosts = empty_store(dir.path());
@@ -768,6 +828,30 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("is corrupt"), "unexpected error: {error}");
+    }
+
+    // `Path::exists` reads every stat error as "absent", which would turn each
+    // pinned host back into a first contact for the session.
+    #[test]
+    #[cfg(unix)]
+    fn pins_that_cannot_be_reached_are_not_loaded_as_empty() {
+        let Some(loaded) = crate::fs_util::load_from_unsearchable_dir(
+            "known_hosts.json",
+            r#"{"prod.example.com:22":{"key_type":"ssh-ed25519","key_base64":"AAAApinned","fingerprint":"SHA256:pinned"}}"#,
+            KnownHosts::load,
+        ) else {
+            return;
+        };
+        match loaded {
+            Err(crate::CoreError::UnreadableState { path, .. }) => {
+                assert!(
+                    path.ends_with("known_hosts.json"),
+                    "unexpected path: {path}"
+                );
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("unreachable pins loaded as empty"),
+        }
     }
 
     #[test]

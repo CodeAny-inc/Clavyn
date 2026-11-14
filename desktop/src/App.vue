@@ -8,6 +8,7 @@ import { useTabsStore } from "./stores/tabs";
 import { useUiStore } from "./stores/ui";
 import { useUpdateStore } from "./stores/update";
 import { useAutoLock } from "./composables/useAutoLock";
+import { isModalOpen } from "./lib/modalOpen";
 import { Menu } from "lucide-vue-next";
 
 // Shell, landing view and unlock prompt stay in the entry chunk: the shell and
@@ -17,6 +18,7 @@ import AppSidebar from "./components/AppSidebar.vue";
 import TerminalArea from "./components/TerminalArea.vue";
 import HostList from "./components/HostList.vue";
 import VaultUnlockModal from "./components/VaultUnlockModal.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 
 // Everything else is reachable only through navigation or a shortcut, so it is
 // split out of the entry chunk and fetched when first rendered.
@@ -53,14 +55,23 @@ function handleKeydown(e: KeyboardEvent) {
     e.preventDefault(); ui.exitFullscreen(); return;
   }
   const cmd = e.metaKey || e.ctrlKey;
+  // A modal owns the keyboard, so a shortcut must not act on the page behind
+  // it: switching view would unmount an open form with its input, and a new tab
+  // would open beneath the unlock prompt. The chord is still claimed, so the
+  // webview's own binding for it does not run either.
+  const blocked = cmd && isModalOpen();
   if (cmd && e.key === "k") {
-    e.preventDefault(); commandPaletteOpen.value = !commandPaletteOpen.value;
+    e.preventDefault();
+    if (!blocked) commandPaletteOpen.value = !commandPaletteOpen.value;
   } else if (cmd && e.key === "n") {
-    e.preventDefault(); activeView.value = "terminal"; tabs.newTab();
+    e.preventDefault();
+    if (!blocked) { activeView.value = "terminal"; tabs.newTab(); }
   } else if (cmd && e.key === "u") {
-    e.preventDefault(); if (update.available) update.showUpdateDialog();
+    e.preventDefault();
+    if (!blocked && update.available) update.showUpdateDialog();
   } else if (cmd && e.key === ",") {
-    e.preventDefault(); activeView.value = "settings";
+    e.preventDefault();
+    if (!blocked) activeView.value = "settings";
   } else if (e.key === "Escape" && commandPaletteOpen.value) {
     commandPaletteOpen.value = false;
   }
@@ -70,14 +81,18 @@ onMounted(async () => {
   // None of these boot loads reads another's result: the vault probe only
   // publishes lock and biometric state, and each store owns a disjoint slice of
   // backend state. Dispatching them together costs one IPC round-trip for the
-  // whole set instead of one per store.
-  await Promise.all([
+  // whole set instead of one per store. Each settles on its own, so one
+  // failing read neither hides the others' results nor skips the update check.
+  const boot = await Promise.allSettled([
     vault.checkStatus(),
     hosts.load(),
     identities.load(),
     workspaces.load(),
     update.registerListeners(),
   ]);
+  for (const result of boot) {
+    if (result.status === "rejected") console.error("Boot load failed:", result.reason);
+  }
   // The update check is an HTTP request to the GitHub API, so it must not gate
   // the first interactive frame. The shouldNotify watcher opens the modal when
   // the result lands.
@@ -106,7 +121,7 @@ onUnmounted(() => {
       <KeyManager v-else-if="activeView === 'keys'" />
       <VaultView v-else-if="activeView === 'vault'" />
       <KnownHostsView v-else-if="activeView === 'known-hosts'" />
-      <WorkspaceView v-else-if="activeView === 'workspaces'" />
+      <WorkspaceView v-else-if="activeView === 'workspaces'" @switch-view="activeView = $event" />
       <SettingsView v-else-if="activeView === 'settings'" />
       <!-- Lazy mount once. Preserve live SFTP state, but let the browser purge transient credentials when hidden. -->
       <SftpBrowser v-if="filesOpened" v-show="activeView === 'files'" :visible="activeView === 'files'" />
@@ -115,5 +130,6 @@ onUnmounted(() => {
       @navigate="activeView = $event; commandPaletteOpen = false" />
     <UpdateModal />
     <VaultUnlockModal />
+    <ConfirmDialog />
   </div>
 </template>

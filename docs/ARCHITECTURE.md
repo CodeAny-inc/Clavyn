@@ -27,8 +27,8 @@ shell.
 ### core (`clavyn-core`)
 
 - `host` — pure data model. No secrets in serialized form.
-- `keys` — parse / generate OpenSSH keys via `russh-keys`. In-memory private
-  material is wrapped in `PrivateKeyMaterial` which `Zeroize`s on drop.
+- `keys` — parse / generate OpenSSH keys via `russh`. Private key text is
+  handed around in `Zeroizing` buffers, wiped on drop.
 - `vault` — Argon2id(passphrase, salt) -> AES-256-GCM. The only thing
   written to disk is ciphertext + salt + public metadata.
 - `known_hosts` — TOFU. `verify()` records on first sight and compares
@@ -53,10 +53,25 @@ shell.
 
 - `state` — owns `Vault`, `KnownHosts`, and the in-memory `passphrase`
   (`Zeroizing<String>`, cleared on lock).
-- `commands` — Tauri `#[command]`s: `list_hosts`, `add_host`, `list_keys`,
-  `generate_key`, `import_key`, `initialize_vault`, `connect_ssh`.
-- Frontend (`desktop/src`) — minimal HTML/JS now; upgrade to a real
-  framework (React/Svelte/Solid) once the command surface is stable.
+- `commands` and the `vault_*`, `biometric*`, `sftp_transfer` and
+  `local_files` modules — the Tauri `#[command]`s, all registered in
+  `generate_handler!` in `main.rs`.
+  `connect_ssh` and `sftp_connect` take a saved host's id, never connection
+  details. The host and identity writes compare the store before and after
+  (`core::key_reach`), and one that would let a vault key sign in as an
+  account or at an address no saved host already allows waits for a native
+  dialog (`host_change_prompt.rs`) naming every such host: its account, its
+  server and port, the key and the startup command. `core::store::Store`
+  refuses that write unless the caller passes a confirmation covering it, so a
+  writer added later fails instead of granting one by accident. A write that
+  gives a host a startup command it did not have, or changes it, is asked about
+  in the same dialog (`core::startup_command`): a stored command keeps running
+  on every later connect, after whatever wrote it is gone. Clearing one is not
+  asked about. The host form shows the command, so it is never a value the
+  user cannot see. The dialog and the host key dialogs share one slot,
+  so only one is on screen at a time, and repeated Cancels hold the dialog off
+  for longer each time.
+- Frontend (`desktop/src`) — Vue 3 with Pinia stores and xterm.js terminals.
 
 ### mobile (planned)
 
@@ -75,6 +90,7 @@ shell.
 | Memory scrape after lock       | `Zeroize` on drop for keys & passphrase           |
 | Supply-chain (deps)            | Pinned versions, minimal surface, audit russh     |
 | XSS in renderer                | Strict CSP in `tauri.conf.json`; no remote code   |
+| Renderer script aims a vault key at its own server | Connects by saved host id only; a store write that lets a key reach somewhere new needs a native confirmation |
 | Logging secrets                | No tracing of payloads/passphrases; redact keys   |
 
 ## Open design questions (to resolve before MVP)

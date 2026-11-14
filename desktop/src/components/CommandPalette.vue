@@ -60,6 +60,12 @@ const filteredCommands = computed(() => {
   return baseCommands.value.filter((c) => c.label.toLowerCase().includes(q));
 });
 
+// A new query yields a new list, so the highlight starts over at its top
+// rather than pointing past its end.
+watch(query, () => {
+  selectedIndex.value = 0;
+});
+
 watch(
   () => props.open,
   (open) => {

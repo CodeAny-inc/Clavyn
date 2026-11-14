@@ -2,6 +2,8 @@
 import { ref, computed, onMounted } from "vue";
 import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
+import { HOST_KEY_DECLINED, hasTag, untagged } from "../lib/confirmation";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
 import Button from "./ui/Button.vue";
@@ -20,6 +22,7 @@ const removedHosts = ref<KnownHostEntry[]>([]);
 const changes = ref<PendingHostKeyChange[]>([]);
 const search = ref("");
 const loading = ref(false);
+const loadError = ref("");
 const { maskAddress } = useMaskedAddress();
 
 onMounted(async () => {
@@ -28,6 +31,7 @@ onMounted(async () => {
 
 async function load() {
   loading.value = true;
+  loadError.value = "";
   try {
     const [known, removed, pending] = await Promise.all([
       api.listKnownHosts(),
@@ -37,6 +41,8 @@ async function load() {
     hosts.value = known;
     removedHosts.value = removed;
     changes.value = pending;
+  } catch (e) {
+    loadError.value = `Failed to load known hosts: ${e}`;
   } finally {
     loading.value = false;
   }
@@ -69,16 +75,13 @@ function parseHostPort(entry: string): [string, number] {
 }
 
 // Cancelling the native confirmation is an answer, not a failure, so it is not
-// reported as one. The tag is set by the backend that raises it.
-const DECLINED = "[host-key-confirmation-declined]";
-
+// reported as one.
 async function run(error: { value: string }, action: () => Promise<void>) {
   error.value = "";
   try {
     await action();
   } catch (cause) {
-    const message = String(cause);
-    if (!message.includes(DECLINED)) error.value = message;
+    if (!hasTag(cause, HOST_KEY_DECLINED)) error.value = untagged(cause);
   }
   await load();
 }
@@ -89,7 +92,13 @@ async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
   // The key is retained, not erased, so this asks in the page. Erasing it is
   // "Forget permanently", which the backend confirms natively.
-  if (!confirm(`Remove known host "${entry.host}"?`)) return;
+  const confirmed = await confirmAction({
+    title: "Remove known host",
+    message: `Remove known host "${maskAddress(entry.host)}"?`,
+    confirmLabel: "Remove",
+    destructive: true,
+  });
+  if (!confirmed) return;
   await run(removeError, () => api.removeKnownHost(host, port));
 }
 
@@ -137,6 +146,7 @@ async function trust(change: PendingHostKeyChange) {
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3">
+      <p v-if="loadError" class="mb-3 text-[12px] text-destructive" role="alert">{{ loadError }}</p>
       <!-- Key changes awaiting review. A host listed here is refusing to connect
            until the presented key is trusted or the server is fixed. Held back
            while a reload is in flight, so a stale list never sits above the
