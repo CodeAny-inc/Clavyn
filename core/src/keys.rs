@@ -90,13 +90,20 @@ pub fn parse_openssh_private(
 /// Gathered the way `decode_secret_key` gathers it, so text russh would read as
 /// an OpenSSH key is read as one here too and never reaches russh's own
 /// decryption, which puts no limit on the KDF rounds.
-fn openssh_body(text: &str) -> Option<String> {
+///
+/// The body is the whole private key in base64 whenever the key is not
+/// protected, and it is gathered from PEM input too before that is known, so it
+/// is held in a `Zeroizing` buffer on every path out, `None` included. The
+/// buffer is sized for the whole input up front: a body is only ever made of
+/// lines of `text`, so it never outgrows that, and a `String` that had to grow
+/// would leave its abandoned allocations behind unwiped.
+fn openssh_body(text: &str) -> Option<Zeroizing<String>> {
     if text.trim().starts_with("PuTTY-User-Key-File-") {
         return None;
     }
     let mut started = false;
     let mut openssh = false;
-    let mut body = String::new();
+    let mut body = Zeroizing::new(String::with_capacity(text.len()));
     for line in text.lines() {
         if started {
             if line.starts_with("-----END ") {
@@ -434,6 +441,22 @@ mod tests {
             import.as_secs_f64() < one_pass.as_secs_f64() * 1.5,
             "import took {import:?} against {one_pass:?} for one decryption"
         );
+    }
+
+    /// For an unprotected key the gathered body is the whole private key in
+    /// base64, so it has to come back in a wiping wrapper, and in a buffer big
+    /// enough that gathering it never reallocates and strands an unwiped copy.
+    #[test]
+    fn the_gathered_key_body_is_wiped_and_never_reallocated() {
+        let gather: fn(&str) -> Option<Zeroizing<String>> = openssh_body;
+        let (plain, _) = generate_ed25519().expect("generate");
+
+        let body = gather(&plain).expect("an OpenSSH key has a body");
+        assert!(!body.is_empty());
+        assert!(body.capacity() >= plain.len());
+
+        let pem = "-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n";
+        assert!(gather(pem).is_none());
     }
 
     #[test]
