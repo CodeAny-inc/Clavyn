@@ -12,22 +12,18 @@ use clavyn_core::host::Host;
 use clavyn_core::keys::{
     generate_ed25519, import_openssh_private, parse_openssh_private, KeyMeta, KeyType,
 };
-use clavyn_core::known_hosts::KnownHosts;
 use clavyn_core::vault::Vault;
 use clavyn_core::CoreError;
 use common::{copy_fixture, passphrase_protected_ed25519, PASSPHRASE};
+use common::loopback::{known_hosts, password_host, random_host_key, serve, server_config};
+use common::loopback::{PASSWORD, USER};
 use russh::keys::{decode_secret_key, parse_public_key_base64, Algorithm, PrivateKey, PublicKey};
 use russh::server::{self, Auth, ChannelOpenHandle, Msg, Response, Session};
 use russh::{Channel, ChannelId, ChannelMsg, MethodKind, MethodSet, Preferred};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
-use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
-const USER: &str = "deploy";
-const PASSWORD: &str = "correct password";
 const VAULT_PASSPHRASE: &str = "vault passphrase";
 
 #[derive(Clone)]
@@ -79,20 +75,6 @@ impl server::Handler for TestServer {
     }
 }
 
-fn random_host_key() -> PrivateKey {
-    let mut rng = getrandom::rand_core::UnwrapErr(getrandom::SysRng);
-    PrivateKey::random(&mut rng, Algorithm::Ed25519).expect("generate host key")
-}
-
-fn server_config(host_key: PrivateKey) -> server::Config {
-    server::Config {
-        keys: vec![host_key],
-        auth_rejection_time: Duration::from_millis(10),
-        auth_rejection_time_initial: Some(Duration::ZERO),
-        ..Default::default()
-    }
-}
-
 /// Serves every connection on a fresh loopback port and returns that port.
 async fn start_server(host_key: PrivateKey, handler: TestServer) -> u16 {
     serve(server_config(host_key), handler).await
@@ -114,27 +96,6 @@ async fn start_server_offering(
     serve(config, handler).await
 }
 
-async fn serve<H>(config: server::Config, handler: H) -> u16
-where
-    H: server::Handler + Clone + Send + 'static,
-{
-    let config = Arc::new(config);
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    tokio::spawn(async move {
-        while let Ok((stream, _)) = listener.accept().await {
-            let config = config.clone();
-            let handler = handler.clone();
-            tokio::spawn(async move {
-                if let Ok(running) = server::run_stream(config, stream, handler).await {
-                    let _ = running.await;
-                }
-            });
-        }
-    });
-    port
-}
-
 fn host(port: u16, auth: serde_json::Value, key_id: Option<String>) -> Host {
     serde_json::from_value(serde_json::json!({
         "id": "00000000-0000-0000-0000-000000000001",
@@ -149,20 +110,6 @@ fn host(port: u16, auth: serde_json::Value, key_id: Option<String>) -> Host {
     .expect("host")
 }
 
-fn password_host(port: u16) -> Host {
-    host(
-        port,
-        serde_json::json!({"password": {"credential_key": "unused"}}),
-        None,
-    )
-}
-
-fn known_hosts(dir: &TempDir) -> Arc<Mutex<KnownHosts>> {
-    Arc::new(Mutex::new(
-        KnownHosts::load(dir.path().join("known_hosts.json")).expect("load known hosts"),
-    ))
-}
-
 #[tokio::test]
 async fn password_auth_connects_and_pins_the_host_key() {
     let dir = tempfile::tempdir().expect("temp dir");
@@ -173,7 +120,8 @@ async fn password_auth_connects_and_pins_the_host_key() {
 
     let session = connect(&password_host(port), None, pins.clone(), None, None, Some(PASSWORD))
         .await
-        .expect("password auth");
+        .expect("password auth")
+        .handle;
 
     // The session carries data both ways.
     let mut channel = session.channel_open_session().await.expect("open channel");

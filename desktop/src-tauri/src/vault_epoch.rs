@@ -117,6 +117,52 @@ impl EpochStore for MemoryEpochStore {
     }
 }
 
+/// An in-memory store whose reads, once armed, park until the test releases
+/// them: a credential store waiting on a prompt nobody has answered.
+#[cfg(test)]
+pub struct BlockingEpochStore {
+    inner: MemoryEpochStore,
+    pub armed: std::sync::atomic::AtomicBool,
+    parked: tokio::sync::mpsc::UnboundedSender<()>,
+    release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+#[cfg(test)]
+impl BlockingEpochStore {
+    /// The store, a receiver that hears of every read that parks, and a sender
+    /// that lets one parked read go. Dropping the sender lets every read go.
+    pub fn new() -> (
+        std::sync::Arc<Self>,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+        std::sync::mpsc::Sender<()>,
+    ) {
+        let (parked, parked_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release) = std::sync::mpsc::channel();
+        let store = Self {
+            inner: MemoryEpochStore::default(),
+            armed: Default::default(),
+            parked,
+            release: std::sync::Mutex::new(release),
+        };
+        (std::sync::Arc::new(store), parked_rx, release_tx)
+    }
+}
+
+#[cfg(test)]
+impl EpochStore for BlockingEpochStore {
+    fn read(&self, binding_id: &str) -> ApiResult<Option<u64>> {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = self.parked.send(());
+            let _ = self.release.lock().unwrap().recv();
+        }
+        self.inner.read(binding_id)
+    }
+
+    fn write(&self, binding_id: &str, epoch: u64) -> ApiResult<()> {
+        self.inner.write(binding_id, epoch)
+    }
+}
+
 /// The store the app uses. Tests get an in-memory one.
 pub fn default_store() -> std::sync::Arc<dyn EpochStore> {
     #[cfg(test)]

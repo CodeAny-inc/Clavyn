@@ -35,6 +35,13 @@ async function openAtlas(page) {
   await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().dblclick();
   await atlas(page).locator('[role="status"]').filter({ hasText: /^Connected$/ }).waitFor();
 }
+// The WebGL addon is a lazily imported chunk, so a pane can report Connected
+// before its renderer is attached. The first load from a cold dev server is
+// the slow one.
+async function waitForGpuPanes(page, count) {
+  await page.waitForFunction(async expected =>
+    (await import("/src/lib/terminalRenderer.ts")).webglBackedPaneIds().length === expected, count);
+}
 
 async function scenario(name, exercise) {
   const viewport = { width: 1440, height: 900 };
@@ -76,6 +83,7 @@ async function scenario(name, exercise) {
 try {
   await scenario("gpu-visible-pane-is-accelerated", async page => {
     await openAtlas(page);
+    await waitForGpuPanes(page, 1);
     const state = await renderer(page);
     assert.equal(state.backed.length, 1, "The pane on screen is GPU-backed");
     assert.ok(state.canvases > 0, "xterm draws to a canvas");
@@ -95,7 +103,7 @@ try {
 
   await scenario("gpu-context-loss-falls-back-to-the-dom-renderer", async page => {
     await openAtlas(page);
-    assert.equal((await renderer(page)).backed.length, 1);
+    await waitForGpuPanes(page, 1);
     // A GPU reset, a driver update or the browser reclaiming contexts looks
     // exactly like this to the page.
     await page.evaluate(() => {

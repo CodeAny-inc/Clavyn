@@ -24,6 +24,7 @@ const vault = useVaultStore();
 const passphrase = ref("");
 const confirmPassphrase = ref("");
 const error = ref("");
+const setupLoading = ref(false);
 const unlockLoading = ref<"password" | "biometric" | null>(null);
 const enableBiometricMode = ref(false);
 const biometricPassphrase = ref("");
@@ -70,21 +71,26 @@ onMounted(async () => {
 });
 
 async function setup() {
+  if (setupLoading.value) return;
   error.value = "";
   if (passphrase.value !== confirmPassphrase.value) {
     error.value = "Passphrases do not match";
     return;
   }
-  if (passphrase.value.length < 8) {
+  // Counted in code points, matching the core, which counts characters.
+  if ([...passphrase.value].length < 8) {
     error.value = "Passphrase must be at least 8 characters";
     return;
   }
+  setupLoading.value = true;
   try {
     await vault.initialize(passphrase.value);
     passphrase.value = "";
     confirmPassphrase.value = "";
   } catch (e: any) {
     error.value = String(e);
+  } finally {
+    setupLoading.value = false;
   }
 }
 
@@ -213,10 +219,10 @@ const showBiometricButton = computed(
           </div>
           <div class="flex-1">
             <div class="text-[14px] font-medium">
-              {{ vault.unlocked ? "Vault unlocked" : "Vault locked" }}
+              {{ vault.statusUnavailable ? "Vault status unknown" : vault.unlocked ? "Vault unlocked" : "Vault locked" }}
             </div>
             <div class="text-[12px] text-muted-foreground">
-              {{ vault.initialized ? "Encrypted storage is active" : "No vault configured" }}
+              {{ vault.statusUnavailable ? "The vault file could not be checked" : vault.initialized ? "Encrypted storage is active" : "No vault configured" }}
             </div>
           </div>
           <Button v-if="vault.unlocked" variant="outline" size="sm" @click="lock">
@@ -242,7 +248,7 @@ const showBiometricButton = computed(
             <Input id="setup-confirm" v-model="confirmPassphrase" type="password" placeholder="Repeat passphrase" />
           </FormGroup>
           <p v-if="error" class="text-[12px] text-destructive">{{ error }}</p>
-          <Button @click="setup">
+          <Button :disabled="setupLoading" @click="setup">
             <VaultIcon class="size-3.5" :stroke-width="1.75" />
             Create Vault
           </Button>
@@ -317,6 +323,12 @@ const showBiometricButton = computed(
               Forgot passphrase? Reset vault
             </button>
           </template>
+        </div>
+
+        <!-- Status unknown: the probe failed, so neither setup nor unlock applies -->
+        <div v-else-if="vault.statusUnavailable" class="flex flex-col gap-4">
+          <p class="text-[12px] text-destructive">Could not read the vault status: {{ vault.error }}</p>
+          <Button variant="outline" @click="vault.checkStatus()">Retry</Button>
         </div>
 
         <!-- Unlocked mode -->
