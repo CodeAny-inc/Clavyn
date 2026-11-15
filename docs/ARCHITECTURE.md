@@ -27,8 +27,8 @@ shell.
 ### core (`clavyn-core`)
 
 - `host` — pure data model. No secrets in serialized form.
-- `keys` — parse / generate OpenSSH keys via `russh-keys`. In-memory private
-  material is wrapped in `PrivateKeyMaterial` which `Zeroize`s on drop.
+- `keys` — parse / generate OpenSSH keys via `russh`. Private key text is
+  handed around in `Zeroizing` buffers, wiped on drop.
 - `vault` — Argon2id(passphrase, salt) -> AES-256-GCM. The only thing
   written to disk is ciphertext + salt + public metadata.
 - `known_hosts` — TOFU. `verify()` records on first sight and compares
@@ -53,8 +53,9 @@ shell.
 
 - `state` — owns `Vault`, `KnownHosts`, and the in-memory `passphrase`
   (`Zeroizing<String>`, cleared on lock).
-- `commands` — Tauri `#[command]`s: `list_hosts`, `add_host`, `list_keys`,
-  `generate_key`, `import_key`, `initialize_vault`, `connect_ssh`.
+- `commands` and the `vault_*`, `biometric*`, `sftp_transfer` and
+  `local_files` modules — the Tauri `#[command]`s, all registered in
+  `generate_handler!` in `main.rs`.
   `connect_ssh` and `sftp_connect` take a saved host's id, never connection
   details. The host and identity writes compare the store before and after
   (`core::key_reach`), and one that would let a vault key sign in as an
@@ -70,8 +71,7 @@ shell.
   user cannot see. The dialog and the host key dialogs share one slot,
   so only one is on screen at a time, and repeated Cancels hold the dialog off
   for longer each time.
-- Frontend (`desktop/src`) — minimal HTML/JS now; upgrade to a real
-  framework (React/Svelte/Solid) once the command surface is stable.
+- Frontend (`desktop/src`) — Vue 3 with Pinia stores and xterm.js terminals.
 
 ### mobile (planned)
 

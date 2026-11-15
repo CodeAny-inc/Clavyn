@@ -1,7 +1,7 @@
 use crate::connection;
 use crate::host::Host;
 use crate::known_hosts::KnownHosts;
-use crate::output::OutputBatcher;
+use crate::output::{sleep_until, OutputBatcher, OutputCredit};
 use crate::transport::{self, CloseSignal, Transport};
 use crate::vault::Vault;
 use crate::{CoreError, Result};
@@ -36,14 +36,6 @@ pub type DataCallback = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 /// Callback invoked when a session closes.
 pub type CloseCallback = Arc<dyn Fn(&str, &str) + Send + Sync>;
-
-/// Resolves at `deadline`, or never when there is nothing to wait for.
-async fn sleep_until(deadline: Option<Instant>) {
-    match deadline {
-        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
-        None => std::future::pending().await,
-    }
-}
 
 /// Manages all active terminal sessions (SSH and local).
 pub struct SessionManager {
@@ -147,6 +139,9 @@ struct SshSession {
     /// so a resize replaces it and never waits; the session's resizer task
     /// sends it on whenever the connection takes it.
     size: watch::Sender<(u32, u32)>,
+    /// Output delivered to the UI layer and not yet acknowledged, shared with
+    /// the reader task, which stops reading the channel while it is spent.
+    credit: Arc<OutputCredit>,
     /// Held so the id stays reserved while this entry exists.
     #[allow(dead_code)]
     claim: Arc<ClaimedId>,
@@ -175,8 +170,13 @@ impl SshSession {
     /// holds only the handle and the transport, so the id is released as soon
     /// as the map entry and the reader are gone, and the reader goes once the
     /// connection does, so within [`transport::GOODBYE_GRACE`] at most.
+    ///
+    /// The output limit is lifted as well: a reader stalled on unacknowledged
+    /// output has to keep reading to reach the end of the channel, flush the
+    /// tail and announce the close.
     fn retire(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
         self.closed.raise();
+        self.credit.lift();
         let handle = self.handle.clone();
         let transport = self.transport.clone();
         async move { transport::goodbye(&handle, &transport).await }
@@ -278,6 +278,7 @@ impl SessionManager {
         // connection taking outbound messages; it always drains what arrives.
         let (mut reader, writer) = channel.split();
         let (size, mut size_rx) = watch::channel((cols, rows));
+        let credit = Arc::new(OutputCredit::new());
 
         let held = claim.commit();
         let session = Arc::new(SshSession {
@@ -287,6 +288,7 @@ impl SessionManager {
             channel_id,
             writes: Arc::new(Mutex::new(())),
             size,
+            credit: credit.clone(),
             claim: held.clone(),
         });
 
@@ -337,7 +339,12 @@ impl SessionManager {
             let mut batcher = OutputBatcher::new(Instant::now());
             let flush = |batcher: &mut OutputBatcher| {
                 if !batcher.is_empty() {
-                    data_cb(&sid, batcher.batch());
+                    let batch = batcher.batch();
+                    // Spent before the batch is handed over, so an
+                    // acknowledgement can never arrive ahead of the spend
+                    // it pays back.
+                    credit.spend(batch.len());
+                    data_cb(&sid, batch);
                     batcher.mark_flushed(Instant::now());
                 }
             };
@@ -345,8 +352,17 @@ impl SessionManager {
                 // Read the deadline before the select so no branch borrows the
                 // batcher while another branch's handler mutates it.
                 let flush_at = batcher.deadline();
+                // While the UI layer is a window behind, the channel is left
+                // unread, which backs the stall up to the peer. A batch already
+                // due is still delivered meanwhile; the end of the stream is
+                // seen once credit returns or the session is closed, which
+                // lifts the limit. Nothing in this loop waits on the connection
+                // taking outbound messages, which russh's connection loop
+                // cannot send while it is blocked handing this reader data.
+                let reading = credit.has_room();
                 tokio::select! {
-                    msg = reader.wait() => {
+                    () = credit.room(), if !reading => {}
+                    msg = reader.wait(), if reading => {
                         match msg {
                             Some(ChannelMsg::Data { data })
                             | Some(ChannelMsg::ExtendedData { data, .. }) => {
@@ -434,7 +450,9 @@ impl SessionManager {
     /// entry's share of the id goes with it rather than waiting on the
     /// goodbye. The reader task still holds a share until it has flushed and
     /// announced the close, which the goodbye guarantees within
-    /// [`transport::GOODBYE_GRACE`].
+    /// [`transport::GOODBYE_GRACE`]. Output credit is lifted first, so a reader
+    /// waiting on the UI layer goes on to the end of the stream instead of
+    /// waiting on acknowledgements that may never come.
     pub async fn close(&self, session_id: &str) -> Result<()> {
         let removed = self.sessions.lock().await.remove(session_id);
         if let Some(session) = removed {
@@ -443,6 +461,22 @@ impl SessionManager {
             goodbye.await;
         }
         Ok(())
+    }
+
+    /// Return `bytes` of output credit to a session once the UI layer has
+    /// received them, letting a reader that ran out resume. Answers whether an
+    /// SSH session took them.
+    ///
+    /// An id with no live session is not an error: acknowledgements trail the
+    /// output they cover and can arrive after the session has closed.
+    pub async fn ack(&self, session_id: &str, bytes: u64) -> bool {
+        match self.get(session_id).await {
+            Ok(session) => {
+                session.credit.refund(bytes);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// List active session ids.

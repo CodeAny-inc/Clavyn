@@ -245,10 +245,11 @@ fn plugin_permissions_are_the_ones_the_frontend_uses() {
             // The devtools hotkey Tauri injects into debug builds. Release
             // builds do not register the command, so the grant is inert there.
             "core:webview:allow-internal-toggle-devtools",
-            // A native message dialog: `confirmAction` in
-            // src/lib/confirmAction.ts, and the dialog plugin's replacement for
-            // `window.alert`. The file dialogs (`open`, `save`) stay ungranted;
-            // the backend shows those itself.
+            // A native message dialog, which the dialog plugin's replacement
+            // for `window.alert` calls. The app asks its questions in the page
+            // (src/composables/useConfirm.ts) and shows errors inline, so it
+            // makes no call of its own. The file dialogs (`open`, `save`) stay
+            // ungranted; the backend shows those itself.
             "dialog:allow-message",
             // `open` from @tauri-apps/plugin-shell, scoped in tauri.conf.json to
             // the project's GitHub page and its releases.

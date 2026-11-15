@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, nextTick } from "vue";
 import * as api from "../api";
 import { useUpdateStore } from "../stores/update";
 import { useSettingsStore } from "../stores/settings";
+import type { Appearance } from "../lib/appearance";
 import Button from "./ui/Button.vue";
 import Badge from "./ui/Badge.vue";
 import {
@@ -17,6 +18,7 @@ import {
   ExternalLink,
   Info,
   Shield,
+  Palette,
   Lock,
   Clock,
   EyeOff,
@@ -26,6 +28,24 @@ import {
 const update = useUpdateStore();
 const settings = useSettingsStore();
 const appInfo = ref<api.AppInfo | null>(null);
+
+const appearanceOptions: { value: Appearance; label: string }[] = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
+
+// A radio group is one Tab stop; the arrow keys move and select within it.
+function appearanceKey(event: KeyboardEvent) {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+  if (!step) return;
+  event.preventDefault();
+  const values = appearanceOptions.map((option) => option.value);
+  const next = values[(values.indexOf(settings.appearance) + step + values.length) % values.length];
+  settings.setAppearance(next);
+  const group = (event.currentTarget as HTMLElement).parentElement;
+  void nextTick(() => group?.querySelector<HTMLElement>('[aria-checked="true"]')?.focus());
+}
 
 const autoLockOptions = [
   { value: 0, label: "Never" },
@@ -105,6 +125,7 @@ function openReleases() {
           <div class="flex flex-wrap items-center gap-2 pt-3 border-t border-border">
             <button
               class="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted-foreground hover:bg-muted transition-colors duration-100"
+              aria-label="GitHub"
               @click="openGitHub"
             >
               <Github class="size-3.5" :stroke-width="1.75" />
@@ -113,12 +134,44 @@ function openReleases() {
             </button>
             <button
               class="inline-flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[12px] text-muted-foreground hover:bg-muted transition-colors duration-100"
+              aria-label="Releases"
               @click="openReleases"
             >
               <Download class="size-3.5" :stroke-width="1.75" />
               <span class="hidden xs:inline">Releases</span>
               <ExternalLink class="size-3" :stroke-width="1.75" />
             </button>
+          </div>
+        </section>
+
+        <section class="rounded-lg border border-border bg-card p-4 sm:p-5">
+          <h3 id="appearance-heading" class="text-[14px] font-semibold mb-4 flex items-center gap-2">
+            <Palette class="size-4 text-muted-foreground" :stroke-width="1.75" />
+            Appearance
+          </h3>
+          <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+              <div class="text-[13px] font-medium">Theme</div>
+              <div class="text-[11px] text-muted-foreground mt-0.5">
+                System follows your operating system, including when it switches on its own. Terminals keep their own dark surface either way.
+              </div>
+            </div>
+            <div class="flex gap-1 p-1 rounded-md bg-muted shrink-0" role="radiogroup" aria-labelledby="appearance-heading">
+              <button
+                v-for="option in appearanceOptions"
+                :key="option.value"
+                type="button"
+                role="radio"
+                :aria-checked="settings.appearance === option.value"
+                :tabindex="settings.appearance === option.value ? 0 : -1"
+                class="h-7 rounded px-3 text-[12px] font-medium transition-colors duration-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :class="settings.appearance === option.value ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+                @click="settings.setAppearance(option.value)"
+                @keydown="appearanceKey"
+              >
+                {{ option.label }}
+              </button>
+            </div>
           </div>
         </section>
 
@@ -139,6 +192,7 @@ function openReleases() {
               </div>
             </div>
             <select
+              aria-label="Auto-lock after inactivity"
               class="h-8 rounded-md border border-border bg-background px-2 text-[12px] text-foreground outline-none cursor-pointer hover:border-muted-foreground/50 transition-colors duration-100"
               :value="settings.autoLockMinutes"
               @change="settings.setAutoLockMinutes(Number(($event.target as HTMLSelectElement).value))"
@@ -162,14 +216,15 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Lock on suspend / extended background"
               :aria-checked="settings.lockOnSleep"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.lockOnSleep ? 'bg-primary' : 'bg-muted'"
+              :class="settings.lockOnSleep ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setLockOnSleep(!settings.lockOnSleep)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.lockOnSleep ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.lockOnSleep ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>
@@ -187,14 +242,15 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Mask host addresses"
               :aria-checked="settings.maskAddresses"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted'"
+              :class="settings.maskAddresses ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setMaskAddresses(!settings.maskAddresses)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.maskAddresses ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.maskAddresses ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>
@@ -219,14 +275,15 @@ function openReleases() {
             <button
               type="button"
               role="switch"
+              aria-label="Screen reader support"
               :aria-checked="settings.screenReaderMode"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted'"
+              :class="settings.screenReaderMode ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="settings.setScreenReaderMode(!settings.screenReaderMode)"
             >
               <span
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="settings.screenReaderMode ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="settings.screenReaderMode ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>

@@ -415,3 +415,81 @@ describe("vault store", () => {
     });
   });
 });
+
+describe("vault store status probes", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    vi.mocked(api.biometricAvailable).mockResolvedValue(false);
+    vi.mocked(api.biometricPassphraseStored).mockResolvedValue(false);
+  });
+
+  it("keeps the answer of the latest probe when an older probe fails late", async () => {
+    const store = useVaultStore();
+    let rejectFirst: ((reason: unknown) => void) | undefined;
+    vi.mocked(api.vaultIsInitialized)
+      .mockImplementationOnce(() => new Promise((_, reject) => { rejectFirst = reject; }))
+      .mockResolvedValueOnce(true);
+    vi.mocked(api.isVaultUnlocked)
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValueOnce(false);
+
+    const first = store.checkStatus();
+    await store.checkStatus();
+    rejectFirst!(new Error("late failure"));
+    await first;
+
+    expect(store.statusUnavailable).toBe(false);
+    expect(store.initialized).toBe(true);
+    expect(store.unlocked).toBe(false);
+    expect(store.needsUnlock).toBe(true);
+  });
+
+  it("ignores a probe that settles after the vault was reset", async () => {
+    const store = useVaultStore();
+    let answer!: (initialized: boolean) => void;
+    vi.mocked(api.vaultIsInitialized).mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+    vi.mocked(api.isVaultUnlocked).mockResolvedValueOnce(true);
+
+    const probe = store.checkStatus();
+    await store.reset("passphrase");
+    answer(true);
+    await probe;
+
+    expect(store.initialized).toBe(false);
+    expect(store.unlocked).toBe(false);
+    expect(store.needsSetup).toBe(true);
+  });
+
+  it("does not report a reset vault as unavailable when a probe fails late", async () => {
+    const store = useVaultStore();
+    let fail!: (reason: unknown) => void;
+    vi.mocked(api.vaultIsInitialized).mockImplementationOnce(() => new Promise((_, reject) => { fail = reject; }));
+    vi.mocked(api.isVaultUnlocked).mockResolvedValueOnce(true);
+
+    const probe = store.checkStatus();
+    await store.reset("passphrase");
+    fail(new Error("status unreadable"));
+    await probe;
+
+    expect(store.statusUnavailable).toBe(false);
+    expect(store.error).toBeNull();
+    expect(store.needsSetup).toBe(true);
+  });
+
+  it("offers neither setup nor unlock after a failed probe that followed a successful one", async () => {
+    const store = useVaultStore();
+    vi.mocked(api.vaultIsInitialized).mockResolvedValueOnce(true);
+    vi.mocked(api.isVaultUnlocked).mockResolvedValueOnce(false);
+    await store.checkStatus();
+    expect(store.needsUnlock).toBe(true);
+
+    vi.mocked(api.vaultIsInitialized).mockRejectedValueOnce(new Error("status unreadable"));
+    vi.mocked(api.isVaultUnlocked).mockRejectedValueOnce(new Error("status unreadable"));
+    await store.checkStatus();
+
+    expect(store.statusUnavailable).toBe(true);
+    expect(store.needsUnlock).toBe(false);
+    expect(store.needsSetup).toBe(false);
+  });
+});
