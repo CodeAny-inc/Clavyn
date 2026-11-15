@@ -30,6 +30,12 @@ updates:
       # type can produce a runtime-only break. Move it manually together
       # with @xterm/xterm (see src/lib/terminalRenderer.ts for the details).
       - dependency-name: "@xterm/addon-webgl"
+      # @tauri-apps/cli is pinned to 2.12.2: 2.12.3+ ships tauri-bundler
+      # 2.10.3, whose rpm 0.30 upgrade refuses a "-" in the package Version,
+      # so every X.Y.Z-alpha.N release fails its .rpm bundling
+      # (tauri-apps/tauri#16336). Drop this ignore and the pin together once
+      # a CLI release includes that fix.
+      - dependency-name: "@tauri-apps/cli"
     groups:
       desktop-minor-and-patch:
         update-types:
