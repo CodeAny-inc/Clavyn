@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import * as api from "../api";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import { HOST_KEY_DECLINED, hasTag, untagged } from "../lib/confirmation";
 import Input from "./ui/Input.vue";
 import Badge from "./ui/Badge.vue";
@@ -92,7 +92,13 @@ async function remove(entry: KnownHostEntry) {
   const [host, port] = parseHostPort(entry.host);
   // The key is retained, not erased, so this asks in the page. Erasing it is
   // "Forget permanently", which the backend confirms natively.
-  if (!(await confirmAction(`Remove known host "${entry.host}"?`))) return;
+  const confirmed = await confirmAction({
+    title: "Remove known host",
+    message: `Remove known host "${maskAddress(entry.host)}"?`,
+    confirmLabel: "Remove",
+    destructive: true,
+  });
+  if (!confirmed) return;
   await run(removeError, () => api.removeKnownHost(host, port));
 }
 
@@ -168,8 +174,8 @@ async function trust(change: PendingHostKeyChange) {
               blocked until you confirm the change with whoever runs the server.
             </p>
             <div class="mt-1.5 flex flex-col gap-0.5 text-[11px] text-muted-foreground">
-              <span class="font-mono truncate">Pinned: {{ change.pinned_fingerprint }}</span>
-              <span class="font-mono truncate">Presented: {{ change.presented_fingerprint }}</span>
+              <span class="font-mono truncate select-text">Pinned: {{ change.pinned_fingerprint }}</span>
+              <span class="font-mono truncate select-text">Presented: {{ change.presented_fingerprint }}</span>
             </div>
           </div>
           <Button variant="outline" size="sm" class="shrink-0" @click="trust(change)">
@@ -205,7 +211,7 @@ async function trust(change: PendingHostKeyChange) {
             </p>
             <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
               <Fingerprint class="size-3" :stroke-width="1.75" />
-              <span class="font-mono truncate">{{ entry.fingerprint }}</span>
+              <span class="font-mono truncate select-text">{{ entry.fingerprint }}</span>
             </div>
           </div>
           <Button variant="outline" size="sm" class="shrink-0" @click="forget(entry)">
@@ -233,11 +239,11 @@ async function trust(change: PendingHostKeyChange) {
             </div>
             <div class="flex items-center gap-1.5 mt-1 text-[11px] text-muted-foreground">
               <Fingerprint class="size-3" :stroke-width="1.75" />
-              <span class="font-mono truncate">{{ host.fingerprint }}</span>
+              <span class="font-mono truncate select-text">{{ host.fingerprint }}</span>
             </div>
           </div>
           <button
-            class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive transition-all duration-100"
+            class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground opacity-0 group-hover:opacity-100 hover:bg-destructive/20 hover:text-destructive transition-all duration-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Remove known host"
             @click="remove(host)"
           >

@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import HostForm from "./HostForm.vue";
 import { useHostsStore } from "../stores/hosts";
+import { useVaultStore } from "../stores/vault";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 
 const calls = (command: string) => getInvokeMock().mock.calls.filter(([name]) => name === command);
@@ -84,5 +85,39 @@ describe("HostForm", () => {
     expect(wrapper.get('[role="alert"]').text()).toContain("Could not save: Error: disk full");
     expect(wrapper.emitted("close")).toBeUndefined();
     expect(addButton().attributes("disabled")).toBeUndefined();
+  });
+
+  describe("key picker when the vault has no keys to list", () => {
+    // Unlocking the vault loads its keys, so the backend has to answer.
+    beforeEach(() => setInvokeHandler("list_keys", () => []));
+
+    async function chooseKeyAuth() {
+      const authSelect = wrapper
+        .findAll("select")
+        .find((s) => s.findAll("option").some((o) => o.attributes("value") === "publickey"))!;
+      await authSelect.setValue("publickey");
+    }
+
+    it("says the vault could not be checked rather than that no keys exist", async () => {
+      const vault = useVaultStore();
+      vault.initialized = true;
+      vault.statusUnavailable = true;
+
+      await chooseKeyAuth();
+
+      expect(wrapper.text()).toContain("The vault could not be checked");
+      expect(wrapper.text()).not.toContain("No keys available");
+    });
+
+    it("still says no keys exist for a vault that was checked", async () => {
+      const vault = useVaultStore();
+      vault.initialized = true;
+      vault.unlocked = true;
+
+      await chooseKeyAuth();
+
+      expect(wrapper.text()).toContain("No keys available");
+      expect(wrapper.text()).not.toContain("The vault could not be checked");
+    });
   });
 });

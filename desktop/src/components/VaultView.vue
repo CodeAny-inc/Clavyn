@@ -77,7 +77,8 @@ async function setup() {
     error.value = "Passphrases do not match";
     return;
   }
-  if (passphrase.value.length < 8) {
+  // Counted in code points, matching the core, which counts characters.
+  if ([...passphrase.value].length < 8) {
     error.value = "Passphrase must be at least 8 characters";
     return;
   }
@@ -218,10 +219,10 @@ const showBiometricButton = computed(
           </div>
           <div class="flex-1">
             <div class="text-[14px] font-medium">
-              {{ vault.unlocked ? "Vault unlocked" : "Vault locked" }}
+              {{ vault.statusUnavailable ? "Vault status unknown" : vault.unlocked ? "Vault unlocked" : "Vault locked" }}
             </div>
             <div class="text-[12px] text-muted-foreground">
-              {{ vault.initialized ? "Encrypted storage is active" : "No vault configured" }}
+              {{ vault.statusUnavailable ? "The vault file could not be checked" : vault.initialized ? "Encrypted storage is active" : "No vault configured" }}
             </div>
           </div>
           <Button v-if="vault.unlocked" variant="outline" size="sm" @click="lock">
@@ -312,16 +313,23 @@ const showBiometricButton = computed(
               Unlock
             </Button>
 
-            <!-- Forgot-passphrase escape hatch. Reset only needs the master
-                 passphrase to authorize, so it is reachable without unlocking. -->
+            <!-- Reset is reachable without unlocking, but it still needs the
+                 master passphrase to authorize, so it is not offered as a
+                 forgotten-passphrase recovery. -->
             <button
               type="button"
               class="self-start text-[12px] text-muted-foreground underline-offset-2 hover:underline hover:text-destructive transition-colors"
               @click="resetMode = true"
             >
-              Forgot passphrase? Reset vault
+              Reset vault…
             </button>
           </template>
+        </div>
+
+        <!-- Status unknown: the probe failed, so neither setup nor unlock applies -->
+        <div v-else-if="vault.statusUnavailable" class="flex flex-col gap-4">
+          <p class="text-[12px] text-destructive">Could not read the vault status: {{ vault.error }}</p>
+          <Button variant="outline" @click="vault.checkStatus()">Retry</Button>
         </div>
 
         <!-- Unlocked mode -->
@@ -333,7 +341,7 @@ const showBiometricButton = computed(
 
           <!-- Reconciliation fails closed by hiding biometric settings. Keep
                its error visible independently of those capability flags. -->
-          <p v-if="displayRuntimeError" role="alert" class="text-[12px] text-destructive">
+          <p v-if="displayRuntimeError" role="alert" class="text-[12px] text-destructive select-text">
             {{ displayRuntimeError }}
           </p>
 

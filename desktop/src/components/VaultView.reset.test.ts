@@ -173,7 +173,7 @@ describe("VaultView reset from locked screen", () => {
     wrapper = mount(VaultView, { global: { plugins: [pinia] } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Forgot passphrase? Reset vault");
+    expect(wrapper.text()).toContain("Reset vault…");
     // The destructive confirmation form is hidden until the link is used.
     expect(wrapper.find("#reset-pass").exists()).toBe(false);
   });
@@ -183,7 +183,7 @@ describe("VaultView reset from locked screen", () => {
     await flushPromises();
 
     const link = wrapper.findAll("button").find((b) =>
-      b.text().includes("Forgot passphrase"),
+      b.text().includes("Reset vault…"),
     )!;
     expect(link).toBeDefined();
 
@@ -207,7 +207,7 @@ describe("VaultView reset from locked screen", () => {
     await flushPromises();
 
     const link = wrapper.findAll("button").find((b) =>
-      b.text().includes("Forgot passphrase"),
+      b.text().includes("Reset vault…"),
     )!;
     await link.trigger("click");
     await flushPromises();
@@ -226,7 +226,7 @@ describe("VaultView reset from locked screen", () => {
     await flushPromises();
 
     const link = wrapper.findAll("button").find((b) =>
-      b.text().includes("Forgot passphrase"),
+      b.text().includes("Reset vault…"),
     )!;
     await link.trigger("click");
     await flushPromises();

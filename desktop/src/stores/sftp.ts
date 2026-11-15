@@ -279,6 +279,14 @@ export const useSftpStore = defineStore("sftp", () => {
     await refreshAfterChange(id, target.dir);
   }
 
+  // A transfer that outlives its session (disconnect, or a vault reset closing
+  // every session) fails with that session's closure. The store has moved on by
+  // then, so the failure goes to the caller only: showing it would put an error
+  // from the old session on the connect form or on its replacement.
+  function reportTransferFailure(id: string, e: unknown) {
+    if (sessionId.value === id) error.value = String(e);
+  }
+
   async function downloadFile(target: SftpEntryRef) {
     const id = requireTarget(target);
     const fullPath = joinPath(target.dir, target.entry.name);
@@ -287,7 +295,7 @@ export const useSftpStore = defineStore("sftp", () => {
     try {
       await api.sftpDownloadToLocal(id, fullPath);
     } catch (e) {
-      error.value = String(e);
+      reportTransferFailure(id, e);
       throw e;
     } finally {
       endTransfer(id);
@@ -312,7 +320,7 @@ export const useSftpStore = defineStore("sftp", () => {
         overwrite,
       );
     } catch (e) {
-      error.value = String(e);
+      reportTransferFailure(id, e);
       throw e;
     } finally {
       endTransfer(id);
@@ -320,15 +328,21 @@ export const useSftpStore = defineStore("sftp", () => {
     await refreshAfterChange(id, dir);
   }
 
-  async function disconnect() {
-    // Invalidate a native connection that has not published yet. Its continuation
-    // observes the generation change and closes the late backend session itself.
+  // Invalidates every request still in flight: a native connection that has not
+  // published yet (its continuation observes the generation change and closes
+  // the late backend session itself) and any listing, whose result is dropped.
+  function invalidatePendingWork() {
     connectGeneration += 1;
     connectPending = null;
     connectPendingKey = null;
     listGeneration += 1;
     listPending = false;
+    staleDir = null;
     loading.value = false;
+  }
+
+  async function disconnect() {
+    invalidatePendingWork();
     const id = sessionId.value;
     try {
       if (id) {
@@ -338,6 +352,15 @@ export const useSftpStore = defineStore("sftp", () => {
       clearPublishedConnection();
       error.value = null;
     }
+  }
+
+  // Drops the published session and invalidates any pending attempt without a
+  // backend call. Vault reset closes every SFTP session in the backend itself,
+  // so there is nothing left to close.
+  function forgetConnection() {
+    invalidatePendingWork();
+    clearPublishedConnection();
+    error.value = null;
   }
 
   return {
@@ -359,5 +382,6 @@ export const useSftpStore = defineStore("sftp", () => {
     downloadFile,
     uploadFile,
     disconnect,
+    forgetConnection,
   };
 });

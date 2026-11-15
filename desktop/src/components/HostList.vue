@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useHostsStore } from "../stores/hosts";
 import { useTabsStore } from "../stores/tabs";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import HostForm from "./HostForm.vue";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
@@ -74,9 +74,19 @@ const showConnectDialog = ref(false);
 const connectTarget = ref<Host | null>(null);
 
 onMounted(() => {
-  void hosts.load();
+  loadHosts();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadHosts() {
+  hosts.load().catch(() => {});
+}
+
+function clearFilters() {
+  hosts.searchQuery = "";
+  hosts.selectedGroupId = null;
+}
 
 function identityReady(host: Host) {
   return sshIdentityReady(host, identities.loaded);
@@ -160,7 +170,12 @@ function addHost() {
 }
 
 async function deleteHost(host: Host) {
-  if (await confirmAction(`Delete host "${host.label}"?`)) {
+  if (await confirmAction({
+    title: "Delete host",
+    message: `Delete host "${host.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await hosts.deleteHost(host.id);
@@ -197,7 +212,12 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (await confirmAction(`Delete group "${name}"? Hosts in this group will be ungrouped.`)) {
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Hosts in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await hosts.deleteGroup(groupId);
@@ -260,7 +280,7 @@ function authLabel(host: Host): string {
       <p v-if="identities.loading" class="mt-2 text-[11px] text-muted-foreground" role="status">
         Loading linked SSH identities… Direct hosts remain available.
       </p>
-      <div v-else-if="identities.loadError" class="mt-2 text-[11px] text-destructive" role="alert">
+      <div v-else-if="identities.loadError" class="mt-2 text-[11px] text-destructive select-text" role="alert">
         {{ identities.loadError }} Direct hosts remain available.
         <button class="ml-2 underline" @click="loadIdentities">Retry identities</button>
       </div>
@@ -291,7 +311,7 @@ function authLabel(host: Host): string {
           <span class="truncate flex-1">{{ group.name }}</span>
           <span class="text-[10px] text-muted-foreground">{{ hosts.hosts.filter(h => h.group_id === group.id).length }}</span>
           <button
-            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100"
+            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Delete group"
             @click.stop="deleteGroup(group.id, group.name)"
           >
@@ -308,6 +328,12 @@ function authLabel(host: Host): string {
       </div>
 
       <div class="border-t border-border/50 mx-2 my-1"></div>
+
+      <!-- A reload that failed while rows from an earlier read are still shown -->
+      <div v-if="hosts.loadError && hosts.hosts.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">The host list could not be refreshed: {{ hosts.loadError }}</span>
+        <button class="underline" :disabled="hosts.loading" @click="loadHosts">Retry</button>
+      </div>
 
       <!-- Host list -->
       <div v-if="filteredHosts.length" class="px-2 pt-1">
@@ -341,7 +367,7 @@ function authLabel(host: Host): string {
             Identity
           </Badge>
           <!-- Action buttons -->
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100">
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 touch:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <button
               class="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-primary/20 hover:text-primary transition-colors duration-100"
               aria-label="Connect"
@@ -367,11 +393,25 @@ function authLabel(host: Host): string {
               <Trash2 class="size-3" :stroke-width="1.75" />
             </button>
           </div>
-          <ChevronRight class="size-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block" :stroke-width="1.75" />
+          <ChevronRight class="size-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100" :stroke-width="1.75" />
         </div>
       </div>
 
-      <!-- Empty state -->
+      <!-- Nothing to list, for one of four different reasons -->
+      <div v-else-if="hosts.loadError && !hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Hosts could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ hosts.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="hosts.loading" @click="loadHosts">Retry</Button>
+      </div>
+      <p v-else-if="!hosts.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading hosts…
+      </p>
+      <div v-else-if="hosts.hosts.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
+        <p class="text-[13px] text-muted-foreground">
+          {{ hosts.searchQuery.trim() ? `No hosts match "${hosts.searchQuery.trim()}"` : "No hosts in this group" }}
+        </p>
+        <Button size="sm" variant="outline" @click="clearFilters">Show all hosts</Button>
+      </div>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Server class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>

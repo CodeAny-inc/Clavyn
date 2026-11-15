@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useWorkspacesStore } from "../stores/workspaces";
-import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
+import { useTabsStore, isPane, collectPanes, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -29,6 +29,10 @@ import {
   Search,
 } from "lucide-vue-next";
 import type { Workspace, TabLayout, PaneLayout, Host } from "../types";
+
+const emit = defineEmits<{
+  "switch-view": [view: string];
+}>();
 
 const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
@@ -84,10 +88,15 @@ const filteredHostsForPicker = computed(() => {
 });
 
 onMounted(() => {
-  void workspaces.load();
+  loadWorkspaces();
   void hosts.load();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadWorkspaces() {
+  workspaces.load().catch(() => {});
+}
 
 // --- workspace form ---
 function addWorkspace() {
@@ -164,7 +173,12 @@ async function saveForm() {
 }
 
 async function remove(id: string, name: string) {
-  if (await confirmAction(`Delete workspace "${name}"?`)) {
+  if (await confirmAction({
+    title: "Delete workspace",
+    message: `Delete workspace "${name}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     actionError.value = "";
     try {
       await workspaces.deleteWorkspace(id);
@@ -234,11 +248,23 @@ function layoutToPaneTree(layout: PaneLayout, autoConnect: boolean): PaneTree {
   };
 }
 
-function restoreWorkspace(ws: Workspace) {
+async function restoreWorkspace(ws: Workspace) {
   if (!ws.tabs || ws.tabs.length === 0) {
     tabs.newTab();
+    emit("switch-view", "terminal");
     return;
   }
+
+  // Opening replaces every tab, which ends their sessions, so a live session
+  // is only given up with the user's consent. No tab is touched until the
+  // answer arrives.
+  const live = tabs.tabs.some((tab) => collectPanes(tab.tree).some((pane) => pane.connected));
+  if (live && !(await confirmAction({
+    title: "Open workspace",
+    message: `Open workspace "${ws.name}"? This closes every open tab and disconnects its sessions.`,
+    confirmLabel: "Open",
+    destructive: true,
+  }))) return;
 
   // Close all existing tabs first
   const existingIds = tabs.tabs.map((t) => t.id);
@@ -257,6 +283,7 @@ function restoreWorkspace(ws: Workspace) {
   if (tabs.tabs.length > 0) {
     tabs.setActiveTab(tabs.tabs[0].id);
   }
+  emit("switch-view", "terminal");
 }
 
 // --- host association ---
@@ -353,6 +380,10 @@ const colorOptions = [
       <p v-if="actionError" class="mb-3 max-w-[800px] mx-auto text-[12px] text-destructive" role="alert">
         {{ actionError }}
       </p>
+      <div v-if="workspaces.loadError && workspaces.workspaces.length" class="mb-3 flex max-w-[800px] mx-auto items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">Workspaces could not be refreshed: {{ workspaces.loadError }}</span>
+        <button class="underline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</button>
+      </div>
       <div v-if="workspaces.workspaces.length" class="flex flex-col gap-3 max-w-[800px] mx-auto">
         <div
           v-for="ws in workspaces.workspaces"
@@ -469,6 +500,14 @@ const colorOptions = [
       </div>
 
       <!-- Empty state -->
+      <div v-else-if="workspaces.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Workspaces could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ workspaces.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</Button>
+      </div>
+      <p v-else-if="!workspaces.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading workspaces…
+      </p>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Folder class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
@@ -519,6 +558,8 @@ const colorOptions = [
               class="flex h-8 w-8 items-center justify-center rounded-md border transition-all duration-100"
               :class="form.color === opt.value ? 'border-foreground ring-2 ring-ring/20' : 'border-border hover:border-muted-foreground'"
               :style="opt.value ? { backgroundColor: opt.value } : {}"
+              :aria-label="`Colour ${opt.label}`"
+              :aria-pressed="form.color === opt.value"
               @click="form.color = opt.value"
             >
               <span v-if="!opt.value" class="text-[10px] text-muted-foreground">None</span>
@@ -535,13 +576,16 @@ const colorOptions = [
               </p>
             </div>
             <button
+              role="switch"
+              aria-label="Auto-connect"
+              :aria-checked="form.autoConnect"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
-              :class="form.autoConnect ? 'bg-primary' : 'bg-muted'"
+              :class="form.autoConnect ? 'bg-primary' : 'bg-muted-foreground/30'"
               @click="form.autoConnect = !form.autoConnect"
             >
               <div
-                class="h-4 w-4 rounded-full bg-white transition-transform duration-100"
-                :class="form.autoConnect ? 'translate-x-6' : 'translate-x-1'"
+                class="h-4 w-4 rounded-full transition-transform duration-100"
+                :class="form.autoConnect ? 'translate-x-6 bg-primary-foreground' : 'translate-x-1 bg-white'"
               />
             </button>
           </div>

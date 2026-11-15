@@ -269,8 +269,8 @@ async function save() {
         </FormGroup>
 
         <FormGroup>
-          <Label>Authentication method</Label>
-          <Select v-model="form.authMode">
+          <Label for="host-auth-method">Authentication method</Label>
+          <Select id="host-auth-method" v-model="form.authMode">
             <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="password">Password</option>
             <option value="publickey">SSH Key</option>
@@ -303,6 +303,9 @@ async function save() {
           </p>
           <p v-else-if="vault.needsSetup" class="text-[11px] text-muted-foreground mt-1">
             Set up the vault in the Vault section to add and choose keys.
+          </p>
+          <p v-else-if="vault.statusUnavailable" class="text-[11px] text-muted-foreground mt-1">
+            The vault could not be checked, so its keys cannot be listed. Retry from the Keys or Vault section.
           </p>
           <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
             No keys available. Add one in the Keys section.

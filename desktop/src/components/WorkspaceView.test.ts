@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { createPinia, setActivePinia } from "pinia";
 import WorkspaceView from "./WorkspaceView.vue";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
+import { answerConfirmation } from "../composables/useConfirm";
 import type { Workspace } from "../types";
 
 const calls = (command: string) => getInvokeMock().mock.calls.filter(([name]) => name === command);
@@ -115,6 +116,8 @@ describe("WorkspaceView", () => {
     });
 
     await wrapper.get('[aria-label="Delete workspace"]').trigger("click");
+    await flushPromises();
+    answerConfirmation(true);
     await flushPromises();
 
     expect(wrapper.get('[role="alert"]').text()).toContain("Failed to delete workspace: Error: store locked");

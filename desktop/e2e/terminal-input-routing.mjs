@@ -93,12 +93,18 @@ async function scenario(name, exercise) {
   }
 }
 try {
-  for (const [modifier, source, target, arrow] of [
-    ["Control", "atlas", "orion", "ArrowRight"],
-    ["Control", "orion", "atlas", "ArrowLeft"],
-    ["Meta", "atlas", "orion", "ArrowRight"],
+  // Pane navigation is Cmd+Arrow on macOS and Ctrl+Shift+Arrow elsewhere
+  // (lib/shortcuts.ts reads navigator.platform on every key).
+  for (const [platform, modifier, source, target, arrow] of [
+    ["Linux x86_64", "Control+Shift", "atlas", "orion", "ArrowRight"],
+    ["Linux x86_64", "Control+Shift", "orion", "atlas", "ArrowLeft"],
+    ["MacIntel", "Meta", "atlas", "orion", "ArrowRight"],
   ]) {
     await scenario(`input-fullscreen-${modifier}-${source}`, async page => {
+      await page.evaluate(value => {
+        Object.defineProperty(navigator, "platform", { get: () => value });
+        Object.defineProperty(navigator, "userAgentData", { get: () => ({ platform: value }) });
+      }, platform);
       const sessions = await split(page);
       await page.evaluate(() => { window.__routingNodes = Array.from(document.querySelectorAll(".terminal-pane .xterm")); });
       await pane(page, source).getByRole("button", { name: "Fullscreen", exact: true }).click();
@@ -125,7 +131,7 @@ try {
     await pane(page, "orion").locator(".xterm-screen").click({ position: { x: 100, y: 40 } });
     await focusIs(page, "orion");
     await clearWrites(page);
-    await page.keyboard.press("Control+ArrowLeft");
+    await page.keyboard.press("Control+Shift+ArrowLeft");
     await focusIs(page, "atlas", true);
     await page.keyboard.type("SEARCH_ONLY_ATLAS");
     assert.equal(await pane(page, "atlas").getByRole("textbox", { name: "Search terminal output" }).inputValue(), "SEARCH_ONLY_ATLAS");

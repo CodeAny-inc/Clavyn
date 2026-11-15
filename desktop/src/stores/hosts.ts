@@ -9,6 +9,11 @@ export const useHostsStore = defineStore("hosts", () => {
   const groups = ref<HostGroup[]>([]);
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
+  // Lets a view tell "nothing stored" apart from "not read yet" and "could
+  // not be read", which all leave `hosts` empty.
+  const loaded = ref(false);
+  const loading = ref(false);
+  const loadError = ref("");
   let pendingLoad: Promise<void> | null = null;
   // Bumped whenever a host or group has been added, changed or deleted locally.
   // A read that started before the bump carries a snapshot taken before that
@@ -65,18 +70,31 @@ export const useHostsStore = defineStore("hosts", () => {
     if (pendingLoad) return pendingLoad;
     const hostsStartedAt = hostsRevision;
     const groupsStartedAt = groupsRevision;
+    loading.value = true;
+    loadError.value = "";
     pendingLoad = Promise.all([
       api.listHosts().then((loaded) => {
         if (hostsRevision === hostsStartedAt) hosts.value = withoutCascaded(loaded);
+      }, (e) => {
+        throw `hosts: ${e}`;
       }),
       api.listGroups().then((loaded) => {
         if (groupsRevision === groupsStartedAt) {
           groups.value = loaded.filter((g) => !deletedGroupIds.has(g.id));
         }
+      }, (e) => {
+        throw `groups: ${e}`;
       }),
     ])
-      .then(() => undefined)
+      .then(() => {
+        loaded.value = true;
+      })
+      .catch((e) => {
+        loadError.value = String(e);
+        throw e;
+      })
       .finally(() => {
+        loading.value = false;
         pendingLoad = null;
         unlinkedIdentityIds.clear();
         deletedGroupIds.clear();
@@ -152,6 +170,9 @@ export const useHostsStore = defineStore("hosts", () => {
     searchQuery,
     selectedGroupId,
     filteredHosts,
+    loaded,
+    loading,
+    loadError,
     load,
     addHost,
     updateHost,

@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed, watch } from "vue";
-import { confirmAction } from "../lib/confirmAction";
 import { useIdentitiesStore } from "../stores/identities";
 import { useHostsStore } from "../stores/hosts";
 import { useKeysStore } from "../stores/keys";
@@ -28,6 +27,7 @@ import {
   FolderPlus,
 } from "lucide-vue-next";
 import * as api from "../api";
+import { confirmAction } from "../composables/useConfirm";
 import { deleteFailure, isDeclinedHostChange, saveFailure } from "../lib/hostChange";
 import type { Identity, AuthMethod } from "../types";
 
@@ -134,7 +134,12 @@ async function createGroup() {
 }
 
 async function deleteGroup(groupId: string, name: string) {
-  if (await confirmAction(`Delete group "${name}"? Identities in this group will be ungrouped.`)) {
+  if (await confirmAction({
+    title: "Delete group",
+    message: `Delete group "${name}"? Identities in this group will be ungrouped.`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
     listError.value = "";
     try {
       await hosts.deleteGroup(groupId);
@@ -328,7 +333,13 @@ async function saveIdentity() {
 }
 
 async function deleteIdentity(id: Identity) {
-  if (!(await confirmAction(`Delete identity "${id.label}"?`))) return;
+  const confirmed = await confirmAction({
+    title: "Delete identity",
+    message: `Delete identity "${id.label}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  });
+  if (!confirmed) return;
   listError.value = "";
   try {
     await identities.deleteIdentity(id.id);
@@ -341,6 +352,7 @@ async function deleteIdentity(id: Identity) {
 
 async function browseForKeyFile() {
   browsingFile.value = true;
+  formError.value = "";
   try {
     const content = await api.pickKeyFile();
     if (content !== null) {
@@ -348,7 +360,7 @@ async function browseForKeyFile() {
     }
   } catch (e) {
     console.error("Failed to read key file:", e);
-    alert(`Failed to read key file: ${e}`);
+    formError.value = `Failed to read key file: ${e}`;
   } finally {
     browsingFile.value = false;
   }
@@ -423,7 +435,7 @@ function hostsUsingIdentity(identityId: string): number {
           <span class="truncate flex-1">{{ group.name }}</span>
           <span class="text-[10px] text-muted-foreground">{{ countIdentitiesInGroup(group.id) }}</span>
           <button
-            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100"
+            class="flex h-5 w-5 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive transition-colors duration-100 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
             aria-label="Delete group"
             @click.stop="deleteGroup(group.id, group.name)"
           >
@@ -442,6 +454,10 @@ function hostsUsingIdentity(identityId: string): number {
       <div class="border-t border-border/50 mx-2 my-1"></div>
 
       <!-- Identity list -->
+      <div v-if="identities.loadError && identities.identities.length" class="mx-2 mb-1 flex items-center gap-2 rounded-md bg-destructive/10 px-2 py-1.5 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">{{ identities.loadError }}</span>
+        <button class="underline" :disabled="identities.loading" @click="identities.load()">Retry</button>
+      </div>
       <div v-if="identities.filteredIdentities.length" class="px-2 pt-1">
         <div
           v-for="id in identities.filteredIdentities"
@@ -467,7 +483,7 @@ function hostsUsingIdentity(identityId: string): number {
               </span>
             </div>
           </div>
-          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+          <div class="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100">
             <button
               class="flex h-7 w-7 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-foreground transition-colors duration-100"
               aria-label="Edit identity"
@@ -486,7 +502,22 @@ function hostsUsingIdentity(identityId: string): number {
         </div>
       </div>
 
-      <!-- Empty state -->
+      <!-- Nothing to list, for one of four different reasons -->
+      <div v-else-if="identities.loadError && !identities.identities.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Identities could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ identities.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="identities.loading" @click="identities.load()">Retry</Button>
+      </div>
+      <!-- The store clears `loaded` for every reload and after a failed one, so rows already in memory prove an earlier read succeeded and this is not a first read. -->
+      <p v-else-if="!identities.loaded && !identities.identities.length" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading identities…
+      </p>
+      <div v-else-if="identities.identities.length" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="status">
+        <p class="text-[13px] text-muted-foreground">
+          {{ identities.searchQuery.trim() ? `No identities match "${identities.searchQuery.trim()}"` : "No identities in this group" }}
+        </p>
+        <Button size="sm" variant="outline" @click="identities.searchQuery = ''; identities.selectedGroupId = null">Show all identities</Button>
+      </div>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <UserCircle class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
@@ -523,8 +554,8 @@ function hostsUsingIdentity(identityId: string): number {
         </FormGroup>
 
         <FormGroup>
-          <Label>Authentication method</Label>
-          <Select v-model="form.authMode">
+          <Label for="identity-auth-method">Authentication method</Label>
+          <Select id="identity-auth-method" v-model="form.authMode">
             <option v-if="form.authMode === 'agent'" value="agent" disabled>SSH Agent (unsupported)</option>
             <option value="publickey">SSH Key</option>
             <option value="password">Password</option>
@@ -587,6 +618,9 @@ function hostsUsingIdentity(identityId: string): number {
             </p>
             <p v-else-if="vault.needsSetup" class="text-[11px] text-muted-foreground mt-1">
               Set up the vault in the Vault section to add and choose keys.
+            </p>
+            <p v-else-if="vault.statusUnavailable" class="text-[11px] text-muted-foreground mt-1">
+              The vault could not be checked, so its keys cannot be listed. Retry from the Keys or Vault section.
             </p>
             <p v-else-if="!keys.keys.length" class="text-[11px] text-muted-foreground mt-1">
               No keys available. Use Generate or Import to create one.
