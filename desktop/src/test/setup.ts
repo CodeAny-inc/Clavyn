@@ -60,7 +60,9 @@ const defaultInvoke = vi.fn(async (cmd: string, args?: any) => {
   if (mockInvokeHandlers.has(cmd)) {
     return mockInvokeHandlers.get(cmd)!(args);
   }
-  if (cmd === "list_identities") return [];
+  // The list commands always resolve to an array, so an unconfigured read
+  // behaves like an empty store rather than handing callers `undefined`.
+  if (cmd === "list_identities" || cmd === "list_hosts" || cmd === "list_groups") return [];
   if (cmd === "connect_ssh") {
     // Like the backend, resolve the host by id from what the app has saved.
     const { useHostsStore } = await import("../stores/hosts");
