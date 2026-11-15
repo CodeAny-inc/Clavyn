@@ -17,7 +17,7 @@ tauri-plugin-dialog = "2"
 # it was signed for. Plugin versions without that option accept the config
 # without complaint and skip the check, so this floor keeps the protection
 # from silently going away.
-tauri-plugin-updater = "2.13"
+tauri-plugin-updater = "2.14"
 tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -19,19 +19,15 @@ ignore = [
   # review-by: 2026-12-31
   "RUSTSEC-2023-0071",
 
-  # zip 4.6.1: symlinks and Unix permissions (including SUID/SGID) applied
-  # outside the destination by `ZipArchive::extract`. Fixed in zip 9, but
-  # tauri-plugin-updater 2.13 and 2.14 still require zip 4, and its `zip`
-  # feature cannot be turned off: the same feature carries the tar.gz path the
-  # macOS and AppImage updates use. The plugin only extracts a zip on Windows,
-  # inside `install` after `download` has verified the minisign signature
-  # against the key in tauri.conf.json, and Clavyn's Windows updates are NSIS
-  # executables, not zips. Exploiting it takes an archive signed with the
-  # release key. Drop these once the updater moves to zip >= 9.
-  # review-by: 2026-12-31
-  "RUSTSEC-2026-0367",
-  # review-by: 2026-12-31
-  "RUSTSEC-2026-0368",
-  # review-by: 2026-12-31
-  "RUSTSEC-2026-0369",
+  # russh 0.64.1, agent server signs with confirm-constrained keys without
+  # calling `Agent::confirm`.
+  # Only `russh::keys::agent::server` is affected, and Clavyn never runs an
+  # agent server: agent authentication is refused before any connection is
+  # made and agent forwarding is refused when a server opens it. The fix is in
+  # russh 0.65, which is not a drop-in bump. On the first key exchange it calls
+  # `check_server_key` before `kex_done`, while `SshHandler` takes the RSA hash
+  # a host key is pinned under from `kex_done`, so the host key check has to be
+  # restructured before the dependency can move.
+  # review-by: 2026-12-11
+  "RUSTSEC-2026-0495",
 ]
