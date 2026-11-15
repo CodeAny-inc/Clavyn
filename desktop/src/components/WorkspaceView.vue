@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, onMounted, computed, watch } from "vue";
 import { useWorkspacesStore } from "../stores/workspaces";
-import { useTabsStore, isPane, type PaneTree } from "../stores/tabs";
+import { useTabsStore, isPane, collectPanes, type PaneTree } from "../stores/tabs";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
 import { configuredSshEndpoint, effectiveSshIdentity, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
+import { confirmAction } from "../composables/useConfirm";
 import Button from "./ui/Button.vue";
 import Input from "./ui/Input.vue";
 import Textarea from "./ui/Textarea.vue";
@@ -29,6 +30,10 @@ import {
 } from "lucide-vue-next";
 import type { Workspace, TabLayout, PaneLayout, Host } from "../types";
 
+const emit = defineEmits<{
+  "switch-view": [view: string];
+}>();
+
 const workspaces = useWorkspacesStore();
 const tabs = useTabsStore();
 const hosts = useHostsStore();
@@ -36,7 +41,17 @@ const identities = useIdentitiesStore();
 const { maskAddress } = useMaskedAddress();
 
 const showForm = ref(false);
+// Changes whenever the dialog opens or closes. A save still in flight from one
+// opening must not retarget a later one.
+let formSession = 0;
+watch(showForm, () => {
+  formSession += 1;
+}, { flush: "sync" });
 const editing = ref<Workspace | null>(null);
+const saving = ref(false);
+const formError = ref("");
+const pickerError = ref("");
+const actionError = ref("");
 
 // Form state
 const form = ref({
@@ -73,10 +88,15 @@ const filteredHostsForPicker = computed(() => {
 });
 
 onMounted(() => {
-  void workspaces.load();
+  loadWorkspaces();
   void hosts.load();
   void identities.load();
 });
+
+// A failed read is shown from the store's `loadError`, with a Retry.
+function loadWorkspaces() {
+  workspaces.load().catch(() => {});
+}
 
 // --- workspace form ---
 function addWorkspace() {
@@ -88,6 +108,7 @@ function addWorkspace() {
     autoConnect: false,
     hostIds: [],
   };
+  formError.value = "";
   showForm.value = true;
 }
 
@@ -100,11 +121,28 @@ function editWorkspace(ws: Workspace) {
     autoConnect: ws.auto_connect ?? false,
     hostIds: [...(ws.host_ids ?? [])],
   };
+  formError.value = "";
   showForm.value = true;
 }
 
+// Creating is two writes, and the first one makes a new workspace each time it
+// runs. A second click while a save is in flight would create a duplicate.
 async function save() {
-  if (!form.value.name.trim()) return;
+  if (!form.value.name.trim() || saving.value) return;
+  saving.value = true;
+  formError.value = "";
+  const session = formSession;
+  try {
+    await saveForm();
+    if (session === formSession) showForm.value = false;
+  } catch (e) {
+    if (session === formSession) formError.value = `Failed to save workspace: ${e}`;
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function saveForm() {
   const wsData: Workspace = {
     id: editing.value?.id ?? crypto.randomUUID(),
     name: form.value.name.trim(),
@@ -118,25 +156,35 @@ async function save() {
   if (editing.value) {
     await workspaces.saveWorkspace(wsData);
   } else {
-    await workspaces.createWorkspace(form.value.name.trim());
-    // If we created new, also save the extra fields
-    const created = workspaces.workspaces[workspaces.workspaces.length - 1];
-    if (created) {
-      await workspaces.saveWorkspace({
-        ...created,
-        description: form.value.description.trim() || null,
-        color: form.value.color || null,
-        host_ids: form.value.hostIds,
-        auto_connect: form.value.autoConnect,
-      });
-    }
+    const session = formSession;
+    const created = await workspaces.createWorkspace(form.value.name.trim());
+    // The workspace exists from here on. Should saving the remaining fields
+    // fail, a retry updates this one instead of creating another, as long as
+    // the dialog that made it is still open.
+    if (session === formSession) editing.value = created;
+    await workspaces.saveWorkspace({
+      ...created,
+      description: wsData.description,
+      color: wsData.color,
+      host_ids: wsData.host_ids,
+      auto_connect: wsData.auto_connect,
+    });
   }
-  showForm.value = false;
 }
 
 async function remove(id: string, name: string) {
-  if (confirm(`Delete workspace "${name}"?`)) {
-    await workspaces.deleteWorkspace(id);
+  if (await confirmAction({
+    title: "Delete workspace",
+    message: `Delete workspace "${name}"?`,
+    confirmLabel: "Delete",
+    destructive: true,
+  })) {
+    actionError.value = "";
+    try {
+      await workspaces.deleteWorkspace(id);
+    } catch (e) {
+      actionError.value = `Failed to delete workspace: ${e}`;
+    }
   }
 }
 
@@ -164,7 +212,12 @@ async function saveCurrentLayout(ws: Workspace) {
     title: tab.title,
     layout: paneTreeToLayout(tab.tree),
   }));
-  await workspaces.saveWorkspace({ ...ws, tabs: tabLayouts });
+  actionError.value = "";
+  try {
+    await workspaces.saveWorkspace({ ...ws, tabs: tabLayouts });
+  } catch (e) {
+    actionError.value = `Failed to save layout: ${e}`;
+  }
 }
 
 // --- restore a workspace layout into tabs ---
@@ -195,11 +248,23 @@ function layoutToPaneTree(layout: PaneLayout, autoConnect: boolean): PaneTree {
   };
 }
 
-function restoreWorkspace(ws: Workspace) {
+async function restoreWorkspace(ws: Workspace) {
   if (!ws.tabs || ws.tabs.length === 0) {
     tabs.newTab();
+    emit("switch-view", "terminal");
     return;
   }
+
+  // Opening replaces every tab, which ends their sessions, so a live session
+  // is only given up with the user's consent. No tab is touched until the
+  // answer arrives.
+  const live = tabs.tabs.some((tab) => collectPanes(tab.tree).some((pane) => pane.connected));
+  if (live && !(await confirmAction({
+    title: "Open workspace",
+    message: `Open workspace "${ws.name}"? This closes every open tab and disconnects its sessions.`,
+    confirmLabel: "Open",
+    destructive: true,
+  }))) return;
 
   // Close all existing tabs first
   const existingIds = tabs.tabs.map((t) => t.id);
@@ -218,12 +283,14 @@ function restoreWorkspace(ws: Workspace) {
   if (tabs.tabs.length > 0) {
     tabs.setActiveTab(tabs.tabs[0].id);
   }
+  emit("switch-view", "terminal");
 }
 
 // --- host association ---
 function openHostPicker(ws: Workspace) {
   pickerWorkspace.value = ws;
   hostSearchQuery.value = "";
+  pickerError.value = "";
   showHostPicker.value = true;
 }
 
@@ -245,7 +312,13 @@ function toggleHostInPicker(hostId: string) {
 
 async function saveHostAssociations() {
   if (!pickerWorkspace.value) return;
-  await workspaces.saveWorkspace(pickerWorkspace.value);
+  pickerError.value = "";
+  try {
+    await workspaces.saveWorkspace(pickerWorkspace.value);
+  } catch (e) {
+    pickerError.value = `Failed to save associations: ${e}`;
+    return;
+  }
   showHostPicker.value = false;
   pickerWorkspace.value = null;
 }
@@ -304,6 +377,13 @@ const colorOptions = [
 
     <!-- Content -->
     <div class="flex-1 overflow-y-auto p-3 sm:p-4">
+      <p v-if="actionError" class="mb-3 max-w-[800px] mx-auto text-[12px] text-destructive" role="alert">
+        {{ actionError }}
+      </p>
+      <div v-if="workspaces.loadError && workspaces.workspaces.length" class="mb-3 flex max-w-[800px] mx-auto items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-[12px] text-destructive" role="alert">
+        <span class="flex-1">Workspaces could not be refreshed: {{ workspaces.loadError }}</span>
+        <button class="underline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</button>
+      </div>
       <div v-if="workspaces.workspaces.length" class="flex flex-col gap-3 max-w-[800px] mx-auto">
         <div
           v-for="ws in workspaces.workspaces"
@@ -420,6 +500,14 @@ const colorOptions = [
       </div>
 
       <!-- Empty state -->
+      <div v-else-if="workspaces.loadError" class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center" role="alert">
+        <p class="text-[14px] font-medium text-foreground">Workspaces could not be loaded</p>
+        <p class="text-[12px] text-muted-foreground">{{ workspaces.loadError }}</p>
+        <Button size="sm" variant="outline" :disabled="workspaces.loading" @click="loadWorkspaces">Retry</Button>
+      </div>
+      <p v-else-if="!workspaces.loaded" class="py-16 text-center text-[12px] text-muted-foreground" role="status">
+        Loading workspaces…
+      </p>
       <div v-else class="flex flex-col items-center justify-center py-16 px-6 gap-3 text-center">
         <Folder class="size-8 text-muted-foreground/50" :stroke-width="1.5" />
         <div>
@@ -470,6 +558,8 @@ const colorOptions = [
               class="flex h-8 w-8 items-center justify-center rounded-md border transition-all duration-100"
               :class="form.color === opt.value ? 'border-foreground ring-2 ring-ring/20' : 'border-border hover:border-muted-foreground'"
               :style="opt.value ? { backgroundColor: opt.value } : {}"
+              :aria-label="`Colour ${opt.label}`"
+              :aria-pressed="form.color === opt.value"
               @click="form.color = opt.value"
             >
               <span v-if="!opt.value" class="text-[10px] text-muted-foreground">None</span>
@@ -486,6 +576,9 @@ const colorOptions = [
               </p>
             </div>
             <button
+              role="switch"
+              aria-label="Auto-connect"
+              :aria-checked="form.autoConnect"
               class="flex h-6 w-11 items-center rounded-full transition-colors duration-100 shrink-0"
               :class="form.autoConnect ? 'bg-primary' : 'bg-muted'"
               @click="form.autoConnect = !form.autoConnect"
@@ -502,11 +595,13 @@ const colorOptions = [
           {{ form.hostIds.length }} host{{ form.hostIds.length === 1 ? '' : 's' }} associated.
           Use the link icon on the workspace card to manage hosts.
         </div>
+
+        <p v-if="formError" class="text-[12px] text-destructive" role="alert">{{ formError }}</p>
       </div>
 
       <template #footer>
         <Button variant="ghost" @click="showForm = false">Cancel</Button>
-        <Button :disabled="!form.name.trim()" @click="save">
+        <Button :disabled="!form.name.trim() || saving" @click="save">
           {{ editing ? "Save changes" : "Create workspace" }}
         </Button>
       </template>
@@ -562,6 +657,7 @@ const colorOptions = [
         <p class="text-[11px] text-muted-foreground">
           {{ (pickerWorkspace.host_ids ?? []).length }} host{{ (pickerWorkspace.host_ids ?? []).length === 1 ? '' : 's' }} selected
         </p>
+        <p v-if="pickerError" class="text-[12px] text-destructive" role="alert">{{ pickerError }}</p>
       </div>
 
       <template #footer>

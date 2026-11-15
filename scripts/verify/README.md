@@ -39,9 +39,10 @@ then `screenshot` all share one session. It auto-starts on the first command
 and stays alive (a `.session.json` file tracks the port).
 
 The renderer is loaded from the Vite dev server with `desktop/e2e/tauri-fixture.js`
-injected before any app script, so the full Tauri IPC surface (SSH, SFTP,
-vault, keys, updates) is mocked and deterministic — no network, no real
-credentials.
+injected before any app script. It mocks the IPC calls the terminal, SFTP and
+vault-status flows make, deterministically — no network, no real credentials.
+Any other command throws `Unhandled test IPC`; add a stub to the fixture
+before driving a flow that needs one.
 
 Every command prints one JSON object on stdout (machine-readable). Use
 `--pretty` for indented human output. Errors include a `remedy` field telling

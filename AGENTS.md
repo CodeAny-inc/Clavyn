@@ -31,8 +31,9 @@ far cheaper than writing throwaway scripts.
 
 The CLI holds a persistent Chromium + page (the "harness") so state survives
 across commands. It loads the Vite dev server with `desktop/e2e/tauri-fixture.js`
-mocking the full Tauri IPC surface, so SSH/SFTP/vault calls are deterministic
-and never touch the network. Every command prints one JSON object; errors
+mocking the IPC calls the terminal, SFTP and vault-status flows make, so those
+are deterministic and never touch the network; any other command throws
+`Unhandled test IPC`, so add a stub there before driving a new flow. Every command prints one JSON object; errors
 include a `remedy` field.
 
 The canonical CLI + docs live in `scripts/verify/` (agent-agnostic). The
@@ -235,7 +236,7 @@ and that the sidebar, terminal, and xterm all render.
 
 ## Building distributable versions
 - Local build (current platform only): `cd desktop && npm run tauri build`
-  - macOS: produces `.dmg` + `.app` in `desktop/src-tauri/target/release/bundle/`
+  - macOS: produces `.dmg` + `.app` in `target/release/bundle/` (the workspace target directory at the repo root)
   - Linux: produces `.deb`, `.AppImage`, `.rpm`
   - Windows: produces `.msi` + `.exe` (NSIS)
 - Cross-platform releases via GitHub Actions:
@@ -289,6 +290,16 @@ The script: checks prerequisites → bumps version → runs checks → builds �
 creates DMG + tarball → signs tarball → generates latest.json → commits,
 tags, pushes → creates GitHub release with all assets.
 
+The signing key never enters the environment of the checks or the build; only
+the signer gets it. The signer is the Tauri CLI in `desktop/node_modules`, run
+by the node binary directly. Both are digested before the checks run, and
+signing is refused if either changed. Code run by the build still runs as you
+and can read a key file under `$HOME`, so keep the local key password-protected
+(`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`); the script warns when it has none. The
+release commit takes only the version files and `CHANGELOG.md`. `latest.json`
+is written next to the tarball in `target/release/bundle/macos/`, so a failed
+`gh release create` leaves every asset in place to retry with.
+
 ### Version management: `scripts/version.sh`
 ```bash
 ./scripts/version.sh              # print current version
@@ -300,7 +311,12 @@ tags, pushes → creates GitHub release with all assets.
 ./scripts/version.sh beta         # 0.1.1 -> 0.1.1-beta.1
 ./scripts/version.sh stable       # 0.1.1-alpha.9 -> 0.1.1
 ```
-Updates version in Cargo.toml, package.json, and tauri.conf.json.
+Updates the version in Cargo.toml, package.json and tauri.conf.json, then runs
+`cargo update -w` so the workspace entries in Cargo.lock follow; CI builds with
+`--locked` and rejects a lockfile that disagrees. That step needs cargo, and
+the network when the local registry cache cannot resolve offline. Anything but
+a semantic version (no leading zeros, no empty identifiers) is refused, and if
+any step fails all four files are restored.
 
 ### GitHub Actions: `.github/workflows/release.yml`
 Triggers on tag push (`v*.*.*`) or manual dispatch.
@@ -317,8 +333,9 @@ Triggers on tag push (`v*.*.*`) or manual dispatch.
   packages and uses no third-party actions: it downloads the signer binary,
   verifies it against the sha256 `signer-tool` published, signs the exact
   updater artifacts for this version (`.app.tar.gz`, AppImage, deb, rpm, NSIS
-  setup), verifies every `.sig` against `plugins.updater.pubkey` in
-  `tauri.conf.json` and uploads the signatures. The key only ever shares a
+  setup) with `--app-version`, which binds each signature to the version,
+  verifies every `.sig` and the version in its signed trusted comment against
+  `plugins.updater.pubkey` in `tauri.conf.json` and uploads the signatures. The key only ever shares a
   step with the digest-verified binary. It always runs on a GitHub-hosted
   runner.
 - Auto-detects prerelease (alpha/beta/rc in version string)

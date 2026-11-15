@@ -33,6 +33,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
     root.append(this.textarea); container.append(root);
   }
   onData() {}
+  onBinary() {}
   focus() {}
   write(_data: unknown, callback?: () => void) { callback?.(); }
   reset() {}

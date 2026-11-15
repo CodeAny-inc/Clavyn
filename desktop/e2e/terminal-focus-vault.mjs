@@ -240,8 +240,17 @@ try {
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().dblclick();
     const input = page.getByLabel("Master passphrase", { exact: true });
     await input.fill("fixture-");
-    // A global new-tab shortcut must not redirect subsequent passphrase typing.
+    // The new-tab shortcut does nothing under the prompt: a modal owns the keyboard.
     await page.keyboard.press("Control+n");
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.__terminalTest.connects.filter(item => item.host === "local").length), 0,
+      "The new-tab shortcut opens nothing beneath the unlock prompt");
+    // A local shell that something else opens beneath the prompt, such as
+    // restoring a workspace, must not redirect subsequent passphrase typing.
+    await page.evaluate(async () => {
+      const { useTabsStore } = await import("/src/stores/tabs.ts");
+      useTabsStore().newTab();
+    });
     await page.waitForFunction(() => window.__terminalTest.connects.some(item => item.host === "local"));
     await page.waitForFunction(() => Array.from(document.querySelectorAll('.terminal-pane')).some(el =>
       !el.dataset.hostId && el.dataset.connected === "true"));
