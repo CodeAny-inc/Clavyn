@@ -700,9 +700,9 @@ pub async fn connect(
     let addr = format!("{}:{}", host.hostname, host.port);
     // A changed host key keeps its own error variant: wrapping it in a generic
     // connect failure would hide the two fingerprints that make the change
-    // legible. `CoreError::Ssh` only reaches here from the handler's host key
-    // checks, which already name the address, so it is passed through
-    // unwrapped too.
+    // legible. `CoreError::Ssh` only reaches here from the address lookup, the
+    // dial and the handler's host key checks, each of which already names the
+    // address, so it is passed through unwrapped too.
     // `CONNECT_TIMEOUT` caps the whole stage, so a name with many dead
     // addresses still gives up in time even though each one gets its own bound.
     let opened = async {
