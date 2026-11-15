@@ -27,11 +27,16 @@ export const useHostsStore = defineStore("hosts", () => {
   // Deletes that cascade to other records do not bump the revisions. The
   // backend applies the cascade in the same write as the delete, so a read that
   // was already in flight when the delete completed can still carry the links
-  // it removed. While a load is pending these remember what such deletes
-  // removed, and load() applies them to the snapshot as it arrives. Dropping
+  // it removed. While any read is in flight these remember what such deletes
+  // removed, and each snapshot is reconciled with them as it arrives. Dropping
   // the snapshot instead would leave a list that had not loaded yet empty.
+  //
+  // They are cleared when the last read settles, not when the aggregate load
+  // does: Promise.all rejects as soon as one read fails, while the other can
+  // still publish its snapshot afterwards, and a delete can land in that gap.
   const unlinkedIdentityIds = new Set<string>();
   const deletedGroupIds = new Set<string>();
+  let readsInFlight = 0;
 
   const filteredHosts = computed(() => {
     let result = hosts.value;
@@ -73,17 +78,13 @@ export const useHostsStore = defineStore("hosts", () => {
     loading.value = true;
     loadError.value = "";
     pendingLoad = Promise.all([
-      api.listHosts().then((loaded) => {
+      tracked(api.listHosts(), "hosts", (loaded) => {
         if (hostsRevision === hostsStartedAt) hosts.value = withoutCascaded(loaded);
-      }, (e) => {
-        throw `hosts: ${e}`;
       }),
-      api.listGroups().then((loaded) => {
+      tracked(api.listGroups(), "groups", (loaded) => {
         if (groupsRevision === groupsStartedAt) {
           groups.value = loaded.filter((g) => !deletedGroupIds.has(g.id));
         }
-      }, (e) => {
-        throw `groups: ${e}`;
       }),
     ])
       .then(() => {
@@ -96,10 +97,26 @@ export const useHostsStore = defineStore("hosts", () => {
       .finally(() => {
         loading.value = false;
         pendingLoad = null;
-        unlinkedIdentityIds.clear();
-        deletedGroupIds.clear();
       });
     return pendingLoad;
+  }
+
+  // Applies one read's snapshot, tagging a failure with which list it was. The
+  // read counts as in flight until the snapshot has been applied or has failed,
+  // and the cascade records are dropped once none is left.
+  function tracked<T>(read: Promise<T>, label: string, apply: (loaded: T) => void): Promise<void> {
+    readsInFlight += 1;
+    return read
+      .then(apply, (e) => {
+        throw `${label}: ${e}`;
+      })
+      .finally(() => {
+        readsInFlight -= 1;
+        if (readsInFlight === 0) {
+          unlinkedIdentityIds.clear();
+          deletedGroupIds.clear();
+        }
+      });
   }
 
   // Applies, to a host snapshot that was read before them, the links that the
@@ -144,7 +161,7 @@ export const useHostsStore = defineStore("hosts", () => {
     await api.deleteGroup(id);
     // Touches both lists: the group goes, and every host that pointed at it is
     // unassigned. A load in flight is reconciled with this when it lands.
-    if (pendingLoad) deletedGroupIds.add(id);
+    if (readsInFlight > 0) deletedGroupIds.add(id);
     groups.value = groups.value.filter((g) => g.id !== id);
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;
@@ -158,7 +175,7 @@ export const useHostsStore = defineStore("hosts", () => {
   // same change locally so those hosts do not keep pointing at nothing. A load
   // in flight is reconciled with this when it lands.
   function unlinkIdentity(identityId: string) {
-    if (pendingLoad) unlinkedIdentityIds.add(identityId);
+    if (readsInFlight > 0) unlinkedIdentityIds.add(identityId);
     hosts.value.forEach((h) => {
       if (h.identity_id === identityId) h.identity_id = null;
     });
