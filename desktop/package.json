@@ -30,7 +30,7 @@
     "@vitejs/plugin-vue": "^6.0.10",
     "@vue/test-utils": "^2.5.1",
     "autoprefixer": "^10.6.2",
-    "happy-dom": "^21.0.1",
+    "happy-dom": "^21.0.4",
     "postcss": "^8.5.29",
     "tailwindcss": "^3.4.19",
     "tailwindcss-animate": "^1.0.7",
