@@ -127,7 +127,7 @@ useModalFocus(panel, () => ui.showVaultUnlockModal, cancel);
           <div>
             <h3 id="vault-unlock-title" class="text-[14px] font-semibold">Unlock Vault</h3>
             <p class="text-[12px] text-muted-foreground mt-0.5">
-              The vault must be unlocked to use SSH key authentication.
+              Unlock to use your SSH keys and saved credentials.
             </p>
           </div>
         </div>
