@@ -1,0 +1,24 @@
+# Paths that decide what CI runs, what ships in a release and what the app is
+# allowed to do. Changes to them need a code owner's review.
+/.github/                               @computerbox124 @Sadykhzadeh
+/scripts/                               @computerbox124 @Sadykhzadeh
+# Cargo reads a .cargo/config.toml in every directory it builds from and in
+# each of their parents, and rustup a rust-toolchain file the same way, so
+# these match at any depth: either can replace the linker, the compiler flags
+# or the toolchain that every build runs.
+.cargo/                                 @computerbox124 @Sadykhzadeh
+rust-toolchain                          @computerbox124 @Sadykhzadeh
+rust-toolchain.toml                     @computerbox124 @Sadykhzadeh
+/Cargo.lock                             @computerbox124 @Sadykhzadeh
+# package.json scripts are what CI's `npm test` and the release build's
+# beforeBuildCommand (`npm run build`) execute.
+/desktop/package.json                   @computerbox124 @Sadykhzadeh
+/desktop/package-lock.json              @computerbox124 @Sadykhzadeh
+/desktop/e2e/package.json               @computerbox124 @Sadykhzadeh
+/desktop/e2e/package-lock.json          @computerbox124 @Sadykhzadeh
+# Tauri merges the platform files (tauri.macos.conf.json and the rest) and
+# the JSON5 and TOML forms over tauri.conf.json, so any of them can override
+# the updater key, its endpoints or the bundle settings.
+/desktop/src-tauri/tauri*.conf.json*    @computerbox124 @Sadykhzadeh
+/desktop/src-tauri/Tauri*.toml          @computerbox124 @Sadykhzadeh
+/desktop/src-tauri/capabilities/        @computerbox124 @Sadykhzadeh

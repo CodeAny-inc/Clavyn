@@ -87,6 +87,18 @@ describe("update store", () => {
     expect(updateHelpers).toEqual(["onUpdateExtracting", "onUpdateProgress"]);
   });
 
+  it("shows the running download total as progress", async () => {
+    const store = useUpdateStore();
+    await store.registerListeners();
+    const call = vi.mocked(listen).mock.calls.find(c => c[0] === "update-progress");
+    const handler = call![1] as (event: { payload: api.UpdateProgress }) => void;
+
+    handler({ payload: { downloaded: 250, content_length: 1000 } });
+    expect(store.progress).toBe(25);
+    handler({ payload: { downloaded: 1000, content_length: 1000 } });
+    expect(store.progress).toBe(100);
+  });
+
   it("checks once while a check is already in flight", async () => {
     let release: (() => void) | null = null;
     setInvokeHandler(

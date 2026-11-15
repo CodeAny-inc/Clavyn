@@ -6,7 +6,7 @@ members = ["core", "desktop/src-tauri"]
 version = "0.1.2-alpha.6"
 edition = "2021"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/your-org/clavyn"
+repository = "https://github.com/CodeAny-inc/Clavyn"
 authors = ["Clavyn Contributors"]
 
 [workspace.dependencies]
@@ -16,7 +16,7 @@ authors = ["Clavyn Contributors"]
 # crypto backend is `ring`, already in the tree through rustls, rather than the
 # default `aws-lc-rs`, which needs CMake and NASM to build on Windows. `rsa`
 # stays on so existing RSA keys keep working.
-russh = { version = "0.63", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "0.64", default-features = false, features = ["ring", "rsa"] }
 # Enumerate the runtime pieces Clavyn and its dependencies actually use. `full`
 # additionally compiles the process, signal and io-std drivers, none of which
 # any crate in this workspace requires. `net` would be switched on regardless by
@@ -38,7 +38,11 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 zeroize = { version = "1", features = ["derive"] }
-argon2 = "0.6"
+# `parallel` computes Argon2's lanes on separate threads (rayon). The vault's
+# KDF uses four lanes, so unlock waits for roughly a quarter of the work on a
+# machine with four or more cores; the result and its cost to an attacker are
+# unchanged.
+argon2 = { version = "0.6", features = ["parallel"] }
 aes-gcm = "0.11"
 uuid = { version = "1", features = ["v4", "serde"] }
 

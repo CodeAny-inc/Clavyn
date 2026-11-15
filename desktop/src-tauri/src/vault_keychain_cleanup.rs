@@ -541,7 +541,7 @@ pub(crate) fn initialize_tracking_for_new_vault(
 #[cfg(test)]
 mod marker_tests {
     use super::{
-        begin_enrollment, clear_bound_credential, clear_for_reset, initialize_tracking_for_new_vault,
+        begin_enrollment, clear_for_reset, initialize_tracking_for_new_vault,
         marker_path, read_marker, reconcile_credential_observation, remove_marker_file,
         write_marker, CredentialObservation, EnrollmentMarker, TrackingState, MARKER_VERSION,
     };
@@ -730,7 +730,7 @@ mod marker_tests {
         // On non-macOS there is no Keychain so this guard is not applicable.
         #[cfg(target_os = "macos")]
         {
-            let result = clear_bound_credential(dir.path(), "generation-a", false).await;
+            let result = super::clear_bound_credential(dir.path(), "generation-a", false).await;
             assert!(
                 result.is_err(),
                 "disable must fail for legacy vault with no marker on macOS"

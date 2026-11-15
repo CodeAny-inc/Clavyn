@@ -1,5 +1,6 @@
 import { vi, beforeAll, afterEach } from "vitest";
 import "@testing-library/jest-dom/vitest";
+import { answerConfirmation } from "../composables/useConfirm";
 
 // Existing component tests assert full endpoint strings (identity resolution,
 // readiness, etc.). Address masking is a display-only concern tested in
@@ -25,11 +26,16 @@ if (!globalThis.crypto.randomUUID) {
 }
 
 // --- Mock window.alert/confirm/prompt ---
-// happy-dom does not implement the native dialog functions the Tauri webview
-// provides. Install no-ops so tests can spy on them — vi.spyOn requires the
-// property to already be a function.
-window.alert = () => {};
-window.confirm = () => true;
+// In the Tauri webview the dialog plugin replaces `alert` and `confirm` with
+// async IPC calls: `confirm` returns a Promise, which is always truthy, and
+// both are refused by the capability ACL. The app must not call them, so any
+// call fails the test that reached it. They stay functions so vi.spyOn works.
+window.alert = () => {
+  throw new Error("window.alert is not available in the app; show the error inline (role=\"alert\") instead.");
+};
+window.confirm = () => {
+  throw new Error("window.confirm is not available in the app; use confirmAction from composables/useConfirm instead.");
+};
 window.prompt = () => null;
 
 // --- Mock @tauri-apps/api/core invoke ---
@@ -192,6 +198,8 @@ export function emitSessionClosed(sessionId: string | null, reason = "fixture EO
 
 // --- Cleanup after each test ---
 afterEach(() => {
+  // A confirmation left open by one test must not answer for the next.
+  answerConfirmation(false);
   clearInvokeHandlers();
   mockListeners.clear();
   sessionSinks.clear();

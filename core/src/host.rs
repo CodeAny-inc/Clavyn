@@ -4,7 +4,7 @@ use uuid::Uuid;
 /// A saved SSH host. Passwords are never stored: each connection prompts for
 /// one and drops it once the connection is made. Key references point to vault
 /// key ids.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Host {
     pub id: Uuid,
     pub label: String,

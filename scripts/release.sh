@@ -22,6 +22,7 @@
 #
 set -euo pipefail
 
+CALLER_DIR="$PWD"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
@@ -30,6 +31,20 @@ REPO="CodeAny-inc/Clavyn"
 PRODUCT_NAME="Clavyn"
 _signing_key_default="$HOME/.config/clavyn/updater-private.key"
 SIGNING_KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$_signing_key_default}"
+# A relative key path means relative to where the script was started, not to
+# the repository root it changes into, so it is made absolute here.
+case "$SIGNING_KEY_PATH" in
+  /*) ;;
+  *) SIGNING_KEY_PATH="$CALLER_DIR/$SIGNING_KEY_PATH" ;;
+esac
+# The key and its password are held in unexported shell variables and the
+# exported copies are dropped, so the environments of npm, vite, cargo build
+# scripts and the bundler never carry them; only the signer command in step 6
+# receives them. That code still runs as the current user and can read a key
+# file under $HOME, which is why a key kept on disk needs a password.
+SIGNING_KEY="${TAURI_SIGNING_PRIVATE_KEY:-}"
+SIGNING_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD TAURI_SIGNING_PRIVATE_KEY_PATH
 BUNDLE_DIR="$ROOT/target/release/bundle/macos"
 PLATFORM="darwin-aarch64"
 ARCH="aarch64"
@@ -90,6 +105,24 @@ get_version() {
   "$ROOT/scripts/version.sh" get
 }
 
+if command -v shasum &>/dev/null; then
+  SHA256=(shasum -a 256)
+else
+  SHA256=(sha256sum)
+fi
+
+# One digest over the node binary and every file under
+# desktop/node_modules/@tauri-apps, which holds the CLI's JavaScript entry
+# point and the native binary it loads. Paths are part of each line, so a
+# renamed, added or removed file changes it too.
+signer_digest() {
+  {
+    "${SHA256[@]}" "$NODE_BIN"
+    find -L "$ROOT/desktop/node_modules/@tauri-apps" -type f -print0 \
+      | LC_ALL=C sort -z | xargs -0 "${SHA256[@]}"
+  } | "${SHA256[@]}"
+}
+
 # --- step 1: prerequisites ---
 
 log "Checking prerequisites..."
@@ -106,10 +139,29 @@ fi
 ok "gh authenticated"
 
 # Signing key
-if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]] && [[ ! -f "$SIGNING_KEY_PATH" ]]; then
+if [[ -z "$SIGNING_KEY" ]] && [[ ! -f "$SIGNING_KEY_PATH" ]]; then
   die "Signing key not found. Set TAURI_SIGNING_PRIVATE_KEY env var or create $SIGNING_KEY_PATH"
 fi
 ok "Signing key available"
+if [[ -z "$SIGNING_KEY" ]] && [[ -z "$SIGNING_KEY_PASSWORD" ]]; then
+  warn "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is empty, so $SIGNING_KEY_PATH has no password: code the checks and the build run can read that file and sign with it"
+fi
+
+# Signer
+# The update tarball is signed by the Tauri CLI installed in desktop/, run by
+# the node binary itself rather than through npx, a `.bin` link or a version
+# manager's shim, so nothing is fetched and nothing stands in between. The
+# checks and the build below run code from npm packages and cargo build
+# scripts as the current user, and any of it could rewrite that CLI before
+# step 6 hands it the key. It is digested here, before any of that code runs,
+# and step 6 refuses to sign if the digest has changed.
+NODE_BIN="$(node -p 'process.execPath' 2>/dev/null)" || die "node not found"
+SIGNER_JS="$ROOT/desktop/node_modules/@tauri-apps/cli/tauri.js"
+if [[ ! -f "$SIGNER_JS" ]]; then
+  die "Tauri CLI not installed in desktop/. Run: cd desktop && npm ci"
+fi
+SIGNER_DIGEST="$(signer_digest)"
+ok "Signer digested"
 
 # Git clean state (allow untracked)
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
@@ -143,8 +195,8 @@ fi
 if [[ "$SKIP_CHECKS" == "false" ]]; then
   log "Running checks..."
 
-  log "  cargo check --workspace"
-  run cargo check --workspace || die "cargo check failed"
+  log "  cargo check --workspace --locked"
+  run cargo check --workspace --locked || die "cargo check failed"
 
   log "  vue-tsc --noEmit"
   run bash -c "cd desktop && npx vue-tsc --noEmit" || die "typecheck failed"
@@ -161,10 +213,12 @@ fi
 
 log "Building Tauri app (release)..."
 
-export TAURI_SIGNING_PRIVATE_KEY="${TAURI_SIGNING_PRIVATE_KEY:-$(cat "$SIGNING_KEY_PATH")}"
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
-
-run bash -c "cd desktop && npx tauri build --bundles app" || die "Tauri build failed"
+# Updater artifacts are switched off because the bundler refuses to build them
+# without the signing key, and the key stays out of this step; the update
+# tarball is packed and signed separately below. Arguments after `--` go to
+# cargo, and `--locked` builds against the committed Cargo.lock.
+(cd desktop && run npx tauri build --bundles app \
+  --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked) || die "Tauri build failed"
 ok "Build complete"
 
 # --- step 5: create DMG + tarball ---
@@ -174,21 +228,30 @@ log "Creating distributable assets..."
 DMG="$BUNDLE_DIR/${PRODUCT_NAME}_${VERSION}_${ARCH}.dmg"
 TARBALL="$BUNDLE_DIR/${PRODUCT_NAME}_${VERSION}_${ARCH}.app.tar.gz"
 SIG_FILE="$TARBALL.sig"
+# latest.json sits beside the tarball and its signature, so a failure in step
+# 9, after the tag is already pushed, leaves every release asset in place for
+# the retry.
+LATEST_JSON="$BUNDLE_DIR/latest.json"
 
 if [[ "$DRY_RUN" == "false" ]]; then
+  # DMG staging lives in a private directory that is removed on exit, never
+  # at a predictable /tmp path another user could pre-create.
+  WORK_DIR="$(mktemp -d)"
+  trap 'rm -rf "$WORK_DIR"' EXIT
+
   # DMG
-  DMG_STAGING="/tmp/dmg-staging-$$"
-  rm -rf "$DMG_STAGING"
+  DMG_STAGING="$WORK_DIR/dmg-staging"
   mkdir -p "$DMG_STAGING"
   cp -R "$BUNDLE_DIR/${PRODUCT_NAME}.app" "$DMG_STAGING/"
   ln -s /Applications "$DMG_STAGING/Applications"
   hdiutil create -volname "$PRODUCT_NAME" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG" 2>/dev/null
   rm -rf "$DMG_STAGING"
 
-  # Tarball
-  cd "$BUNDLE_DIR"
-  tar czf "$TARBALL" "${PRODUCT_NAME}.app"
-  cd "$ROOT"
+  # Tarball, in the shape release.yml packs: a gzip tar holding only the
+  # `.app` directory. COPYFILE_DISABLE and --no-mac-metadata keep macOS tar
+  # from adding AppleDouble `._` entries for extended attributes, which the
+  # updater would unpack as stray files inside the installed bundle.
+  COPYFILE_DISABLE=1 tar --no-mac-metadata -czf "$TARBALL" -C "$BUNDLE_DIR" "${PRODUCT_NAME}.app"
 
   ok "DMG: $(basename "$DMG")"
   ok "Tarball: $(basename "$TARBALL")"
@@ -201,15 +264,26 @@ fi
 log "Signing update tarball..."
 
 if [[ "$DRY_RUN" == "false" ]]; then
-  # Use --private-key (string) + --password instead of --private-key-path.
-  # The latter triggers an interactive password prompt even when the key has
-  # no password, which fails in non-interactive environments (no tty).
-  cd desktop
-  npx @tauri-apps/cli signer sign \
-    --private-key "$TAURI_SIGNING_PRIVATE_KEY" \
-    --password "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" \
-    "$TARBALL" 2>/dev/null
-  cd "$ROOT"
+  if [[ "$(signer_digest)" != "$SIGNER_DIGEST" ]]; then
+    die "The Tauri CLI in desktop/node_modules or the node binary changed since the checks started; the signing key is not handed to it. Reinstall with: cd desktop && npm ci"
+  fi
+  # The key reaches the signer through its environment for this one command,
+  # never as an argument, where any local user could read it from `ps`. The
+  # password is always set, empty included: with none at all the signer
+  # prompts for one, which fails without a tty. `--app-version` binds the
+  # signature to this release's version. The app sets `requireSignedVersion`,
+  # so it refuses a signature without one, or one whose version differs from
+  # what latest.json announces. Only the signer's stdout is dropped, so its
+  # errors show.
+  if [[ -n "$SIGNING_KEY" ]]; then
+    TAURI_SIGNING_PRIVATE_KEY="$SIGNING_KEY" \
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD" \
+      "$NODE_BIN" "$SIGNER_JS" signer sign --app-version "$VERSION" "$TARBALL" >/dev/null
+  else
+    TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$SIGNING_KEY_PASSWORD" \
+      "$NODE_BIN" "$SIGNER_JS" signer sign --app-version "$VERSION" \
+      --private-key-path "$SIGNING_KEY_PATH" "$TARBALL" >/dev/null
+  fi
   ok "Signed: $(basename "$SIG_FILE")"
 else
   echo "  [dry-run] would sign $TARBALL"
@@ -220,25 +294,34 @@ fi
 log "Generating latest.json..."
 
 if [[ "$DRY_RUN" == "false" ]]; then
-  SIG=$(cat "$SIG_FILE")
-  NOTES="${CUSTOM_NOTES:-Release $VERSION}"
+  # Every value reaches Python through the environment and leaves through
+  # json.dump, so quotes or newlines in --notes stay data and cannot alter
+  # the manifest's structure.
+  LJ_VERSION="$VERSION" \
+  LJ_NOTES="${CUSTOM_NOTES:-Release $VERSION}" \
+  LJ_PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  LJ_PLATFORM="$PLATFORM" \
+  LJ_SIGNATURE="$(cat "$SIG_FILE")" \
+  LJ_URL="https://github.com/$REPO/releases/download/$TAG/$(basename "$TARBALL")" \
+  LJ_OUT="$LATEST_JSON" \
+  python3 -I - <<'PY'
+import json, os
 
-  python3 -c "
-import json
+env = os.environ
 data = {
-    'version': '$VERSION',
-    'notes': '''$NOTES''',
-    'pub_date': '$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-    'platforms': {
-        '$PLATFORM': {
-            'signature': '''$SIG''',
-            'url': 'https://github.com/$REPO/releases/download/$TAG/$(basename "$TARBALL")'
+    "version": env["LJ_VERSION"],
+    "notes": env["LJ_NOTES"],
+    "pub_date": env["LJ_PUB_DATE"],
+    "platforms": {
+        env["LJ_PLATFORM"]: {
+            "signature": env["LJ_SIGNATURE"],
+            "url": env["LJ_URL"],
         }
-    }
+    },
 }
-with open('/tmp/latest.json', 'w') as f:
+with open(env["LJ_OUT"], "w") as f:
     json.dump(data, f, indent=2)
-"
+PY
   ok "latest.json generated"
 else
   echo "  [dry-run] would generate latest.json"
@@ -249,8 +332,12 @@ fi
 log "Committing and tagging..."
 
 if [[ "$DRY_RUN" == "false" ]]; then
-  git add -A
-  git commit -m "Release $TAG" 2>/dev/null || warn "Nothing to commit"
+  # Only the files the version bump rewrites, plus the changelog that carries
+  # this release's entry, are committed. Anything else left in the working
+  # tree stays out of the release commit.
+  RELEASE_FILES=(Cargo.toml Cargo.lock CHANGELOG.md desktop/package.json desktop/src-tauri/tauri.conf.json)
+  git add -- "${RELEASE_FILES[@]}"
+  git commit -m "Release $TAG" -- "${RELEASE_FILES[@]}" 2>/dev/null || warn "Nothing to commit"
   git tag "$TAG"
   git push origin main
   git push origin "$TAG"
@@ -271,7 +358,9 @@ fi
 if [[ "$DRY_RUN" == "false" ]]; then
   NOTES="${CUSTOM_NOTES:-Release $VERSION}"
 
-  gh release create "$TAG" \
+  # The tag is already on origin here, so a failure names the assets and the
+  # commands that finish the release from them.
+  if ! gh release create "$TAG" \
     --repo "$REPO" \
     --title "$PRODUCT_NAME $TAG" \
     --notes "$NOTES" \
@@ -279,8 +368,16 @@ if [[ "$DRY_RUN" == "false" ]]; then
     "$DMG" \
     "$TARBALL" \
     "$SIG_FILE" \
-    "/tmp/latest.json" \
-    2>/dev/null
+    "$LATEST_JSON"; then
+    err "Creating the GitHub release failed, but $TAG is already pushed. Its assets:"
+    err "  $DMG"
+    err "  $TARBALL"
+    err "  $SIG_FILE"
+    err "  $LATEST_JSON"
+    err "Finish with 'gh release create $TAG --repo $REPO <assets>', or with"
+    err "'gh release upload $TAG --repo $REPO --clobber <assets>' if the release exists."
+    exit 1
+  fi
 
   ok "Release created: https://github.com/$REPO/releases/tag/$TAG"
 else

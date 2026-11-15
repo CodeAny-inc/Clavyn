@@ -7,7 +7,7 @@ defineEmits<{ open: [] }>();
 </script>
 
 <template>
-  <div role="alert" class="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-[12px]" data-testid="vault-rollback">
+  <div role="alert" class="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-[12px] select-text" data-testid="vault-rollback">
     <div class="flex items-start gap-2">
       <AlertTriangle class="size-3.5 shrink-0 mt-0.5 text-destructive" :stroke-width="1.75" />
       <p>{{ message }}</p>

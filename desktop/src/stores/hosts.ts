@@ -2,12 +2,18 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import * as api from "../api";
 import type { Host, HostGroup } from "../types";
+import { useIdentitiesStore } from "./identities";
 
 export const useHostsStore = defineStore("hosts", () => {
   const hosts = ref<Host[]>([]);
   const groups = ref<HostGroup[]>([]);
   const searchQuery = ref("");
   const selectedGroupId = ref<string | null>(null);
+  // Lets a view tell "nothing stored" apart from "not read yet" and "could
+  // not be read", which all leave `hosts` empty.
+  const loaded = ref(false);
+  const loading = ref(false);
+  const loadError = ref("");
   let pendingLoad: Promise<void> | null = null;
   // Bumped whenever a mutation has been applied locally. A read that started
   // before the bump carries a snapshot taken before that change, so it is
@@ -52,16 +58,29 @@ export const useHostsStore = defineStore("hosts", () => {
     if (pendingLoad) return pendingLoad;
     const hostsStartedAt = hostsRevision;
     const groupsStartedAt = groupsRevision;
+    loading.value = true;
+    loadError.value = "";
     pendingLoad = Promise.all([
       api.listHosts().then((loaded) => {
         if (hostsRevision === hostsStartedAt) hosts.value = loaded;
+      }, (e) => {
+        throw `hosts: ${e}`;
       }),
       api.listGroups().then((loaded) => {
         if (groupsRevision === groupsStartedAt) groups.value = loaded;
+      }, (e) => {
+        throw `groups: ${e}`;
       }),
     ])
-      .then(() => undefined)
+      .then(() => {
+        loaded.value = true;
+      })
+      .catch((e) => {
+        loadError.value = String(e);
+        throw e;
+      })
       .finally(() => {
+        loading.value = false;
         pendingLoad = null;
       });
     return pendingLoad;
@@ -105,6 +124,18 @@ export const useHostsStore = defineStore("hosts", () => {
     hosts.value.forEach((h) => {
       if (h.group_id === id) h.group_id = null;
     });
+    // The backend ungroups identities in the same write. Mirror it, or the next
+    // edit of such an identity sends the deleted group id straight back.
+    useIdentitiesStore().ungroup(id);
+  }
+
+  // The backend unlinks hosts from an identity it deletes; this applies the
+  // same change locally so those hosts do not keep pointing at nothing.
+  function unlinkIdentity(identityId: string) {
+    hostsRevision += 1;
+    hosts.value.forEach((h) => {
+      if (h.identity_id === identityId) h.identity_id = null;
+    });
   }
 
   return {
@@ -113,11 +144,15 @@ export const useHostsStore = defineStore("hosts", () => {
     searchQuery,
     selectedGroupId,
     filteredHosts,
+    loaded,
+    loading,
+    loadError,
     load,
     addHost,
     updateHost,
     deleteHost,
     addGroup,
     deleteGroup,
+    unlinkIdentity,
   };
 });

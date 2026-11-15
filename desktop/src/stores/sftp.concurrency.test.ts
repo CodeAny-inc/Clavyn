@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import { useSftpStore } from "./sftp";
+import type { SftpEntry } from "../api";
 import type { Host } from "../types";
 
 const host: Host = {
@@ -106,5 +107,92 @@ describe("SFTP connection ownership", () => {
     expect(sftp.connectedHost?.id).toBe(host.id);
     expect(calls("sftp_close").map(([, args]) => args.sessionId)).toContain(staleId);
     expect(calls("sftp_close").map(([, args]) => args.sessionId)).not.toContain(freshId);
+  });
+});
+
+describe("SFTP directory listings", () => {
+  const entry = (name: string): SftpEntry => ({
+    name,
+    long_name: name,
+    is_dir: true,
+    is_file: false,
+    is_symlink: false,
+    size: 0,
+    modified: null,
+    permissions: null,
+  });
+
+  // Each listing waits until the test answers it, so the order in which
+  // listings answer is the test's to choose.
+  async function connectedWithHeldListings() {
+    const pending = new Map<string, { resolve: (value: SftpEntry[]) => void; reject: (e: Error) => void }>();
+    setInvokeHandler("sftp_connect", () => undefined);
+    const sftp = useSftpStore();
+    await sftp.connect(host, "SECRET", "deploy");
+    setInvokeHandler("sftp_list_dir", ({ path }: { path: string }) =>
+      new Promise<SftpEntry[]>((resolve, reject) => { pending.set(path, { resolve, reject }); }));
+    return { sftp, pending };
+  }
+
+  it("keeps the newer directory when an older listing answers last", async () => {
+    const { sftp, pending } = await connectedWithHeldListings();
+    const older = sftp.listDir("/var/log");
+    const newer = sftp.listDir("/etc");
+    await vi.waitFor(() => expect(pending.size).toBe(2));
+
+    pending.get("/etc")!.resolve([entry("nginx")]);
+    await newer;
+    pending.get("/var/log")!.resolve([entry("journal")]);
+    await older;
+
+    expect(sftp.currentPath).toBe("/etc");
+    expect(sftp.entries.map(e => e.name)).toEqual(["nginx"]);
+    expect(sftp.loading).toBe(false);
+  });
+
+  it("stays loading until the latest listing answers", async () => {
+    const { sftp, pending } = await connectedWithHeldListings();
+    const older = sftp.listDir("/var/log");
+    const newer = sftp.listDir("/etc");
+    await vi.waitFor(() => expect(pending.size).toBe(2));
+
+    pending.get("/var/log")!.resolve([entry("journal")]);
+    await older;
+    expect(sftp.loading).toBe(true);
+    expect(sftp.currentPath).toBe("/home/deploy");
+
+    pending.get("/etc")!.resolve([entry("nginx")]);
+    await newer;
+    expect(sftp.loading).toBe(false);
+    expect(sftp.currentPath).toBe("/etc");
+  });
+
+  it("ignores the failure of a listing the user has moved on from", async () => {
+    const { sftp, pending } = await connectedWithHeldListings();
+    const older = sftp.listDir("/root");
+    const newer = sftp.listDir("/etc");
+    await vi.waitFor(() => expect(pending.size).toBe(2));
+
+    pending.get("/etc")!.resolve([entry("nginx")]);
+    await newer;
+    pending.get("/root")!.reject(new Error("permission denied"));
+    await expect(older).resolves.toBeUndefined();
+
+    expect(sftp.error).toBeNull();
+    expect(sftp.currentPath).toBe("/etc");
+  });
+
+  it("publishes nothing from a listing that answers after a disconnect", async () => {
+    const { sftp, pending } = await connectedWithHeldListings();
+    const listing = sftp.listDir("/etc");
+    await vi.waitFor(() => expect(pending.size).toBe(1));
+
+    await sftp.disconnect();
+    pending.get("/etc")!.resolve([entry("nginx")]);
+    await listing;
+
+    expect(sftp.sessionId).toBeNull();
+    expect(sftp.entries).toEqual([]);
+    expect(sftp.currentPath).toBe("/");
   });
 });

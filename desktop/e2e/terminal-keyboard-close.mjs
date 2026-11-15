@@ -179,7 +179,7 @@ try {
     assert.equal(state.writes.map(write => write.text).join(""), "FULLSCREEN_OWNER_PROBE\r");
     // Explicit pane navigation must still exit fullscreen and make Atlas usable.
     await clearWrites(page);
-    await page.keyboard.press("Control+ArrowLeft");
+    await page.keyboard.press("Control+Shift+ArrowLeft");
     await focusIs(page, "atlas");
     assert.equal((await inspect(page)).fullscreen, null);
     assert.equal(await pane(page, "atlas").evaluate(el => el.inert), false);

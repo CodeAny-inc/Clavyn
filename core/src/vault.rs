@@ -23,6 +23,9 @@ const VAULT_FORMAT_VERSION: u32 = 1;
 
 const NONCE_LEN: usize = 12;
 
+/// Shortest passphrase a new vault accepts, counted in Unicode scalar values.
+const MIN_PASSPHRASE_CHARS: usize = 8;
+
 /// Domain separator so the associated data of a vault can never collide with
 /// authenticated bytes produced anywhere else.
 const AAD_DOMAIN: &[u8] = b"clavyn.vault.header";
@@ -134,13 +137,43 @@ impl Drop for SecretText {
     }
 }
 
+/// Where a payload is serialized before it is sealed.
+///
+/// `serde_json::to_vec` grows a plain `Vec` by reallocation, and every buffer
+/// it outgrows is freed with the private keys it already held still in it, so
+/// one save would scatter copies of every key across freed memory. Growing
+/// here copies into a fresh `Zeroizing` buffer and lets the outgrown one wipe
+/// itself, spare capacity included, before it is freed.
+struct WipingBuffer(Zeroizing<Vec<u8>>);
+
+impl WipingBuffer {
+    fn new() -> Self {
+        Self(Zeroizing::new(Vec::with_capacity(4096)))
+    }
+}
+
+impl std::io::Write for WipingBuffer {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let needed = self.0.len() + data.len();
+        if needed > self.0.capacity() {
+            let mut grown = Zeroizing::new(Vec::with_capacity(needed.max(self.0.capacity() * 2)));
+            grown.extend_from_slice(&self.0);
+            self.0 = grown;
+        }
+        self.0.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Vault {
     pub fn open(path: PathBuf) -> Result<Self> {
-        let file = if path.exists() {
-            crate::fs_util::read_state_file(&path)?
-        } else {
-            VaultFile::uninitialized()
-        };
+        // Fail closed. An unreadable vault reported as "not initialized" leads
+        // straight to creating a new one over it, and every stored key with it.
+        let file = crate::fs_util::read_state_file(&path)?.unwrap_or_else(VaultFile::uninitialized);
         Ok(Self {
             path,
             file,
@@ -206,14 +239,48 @@ impl Vault {
 
     /// Create the vault from a fresh random salt and return the derived master
     /// key, so an unlock that follows initialization does not pay the KDF twice.
+    ///
+    /// The passphrase must be at least eight characters. The UI checks the same
+    /// rule, but this is the check every caller goes through.
+    ///
+    /// Refuses whenever anything sits at the vault path, a dangling symlink
+    /// included, or whether that can be determined is unknown: a vault there
+    /// holds keys that exist nowhere else. Replacing a vault goes through
+    /// [`Vault::reset`] first, which deletes the file.
+    ///
+    /// Runs the same checks as [`Vault::check_can_initialize`], then publishes
+    /// the file so that it is never written over an existing name.
     pub async fn initialize(&mut self, passphrase: &str) -> Result<VaultKey> {
-        self.ensure_writable()?;
+        self.check_can_initialize(passphrase)?;
         let mut salt = [0u8; 16];
         random_bytes(&mut salt)?;
         let key = derive_key_off_thread(passphrase, salt.to_vec()).await?;
         let payload = VaultPayload { keys: Vec::new() };
-        self.seal_and_persist(&key, base64(salt), 1, Vec::new(), &payload)?;
+        let candidate = seal_file(&key, base64(salt), 1, Vec::new(), &payload)?;
+        create_file(&self.path, &candidate)?;
+        self.file = candidate;
         Ok(key)
+    }
+
+    /// Run the checks [`Vault::initialize`] starts with, without deriving a key
+    /// or touching the disk, so a caller can refuse a creation before it clears
+    /// anything that belongs to the vault that is already there.
+    ///
+    /// The path is examined with `symlink_metadata`, which sees a dangling
+    /// symlink as present. `exists` and `try_exists` follow the link and would
+    /// read it as absent.
+    pub fn check_can_initialize(&self, passphrase: &str) -> Result<()> {
+        self.ensure_writable()?;
+        if passphrase.chars().count() < MIN_PASSPHRASE_CHARS {
+            return Err(CoreError::InvalidInput(format!(
+                "vault passphrase must be at least {MIN_PASSPHRASE_CHARS} characters"
+            )));
+        }
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(_) => Err(already_exists(&self.path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(crate::fs_util::unreadable_state(&self.path, e)),
+        }
     }
 
     /// Verify a passphrase and hand back the master key it derives, so a caller
@@ -425,25 +492,7 @@ impl Vault {
         payload: &VaultPayload,
     ) -> Result<()> {
         self.ensure_writable()?;
-
-        let plaintext = Zeroizing::new(serde_json::to_vec(payload)?);
-        // The header is built first and the tag computed from that exact value,
-        // so what is authenticated and what is written cannot drift apart. The
-        // two fields left empty here are filled in below; neither belongs in the
-        // associated data.
-        let mut candidate = VaultFile {
-            version: VAULT_FORMAT_VERSION,
-            salt,
-            nonce: String::new(),
-            epoch,
-            keys_meta,
-            ciphertext: String::new(),
-        };
-        let aad = associated_data(&candidate)?;
-        let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
-        candidate.nonce = base64(nonce);
-        candidate.ciphertext = base64(ciphertext);
-
+        let candidate = seal_file(key, salt, epoch, keys_meta, payload)?;
         persist(&self.path, &candidate)?;
         self.file = candidate;
         Ok(())
@@ -470,7 +519,36 @@ impl Vault {
     }
 }
 
-fn persist(path: &Path, file: &VaultFile) -> Result<()> {
+fn seal_file(
+    key: &VaultKey,
+    salt: String,
+    epoch: u64,
+    keys_meta: Vec<KeyMeta>,
+    payload: &VaultPayload,
+) -> Result<VaultFile> {
+    let mut plaintext = WipingBuffer::new();
+    serde_json::to_writer(&mut plaintext, payload)?;
+    let plaintext = plaintext.0;
+    // The header is built first and the tag computed from that exact value,
+    // so what is authenticated and what is written cannot drift apart. The
+    // two fields left empty here are filled in below; neither belongs in the
+    // associated data.
+    let mut candidate = VaultFile {
+        version: VAULT_FORMAT_VERSION,
+        salt,
+        nonce: String::new(),
+        epoch,
+        keys_meta,
+        ciphertext: String::new(),
+    };
+    let aad = associated_data(&candidate)?;
+    let (nonce, ciphertext) = seal(key, &aad, &plaintext)?;
+    candidate.nonce = base64(nonce);
+    candidate.ciphertext = base64(ciphertext);
+    Ok(candidate)
+}
+
+fn encode_file(path: &Path, file: &VaultFile) -> Result<String> {
     let data = serde_json::to_string_pretty(file)?;
     // Never write a vault this same build could not open again: `open` fails
     // closed, so an unreadable vault file would stop the app from starting.
@@ -478,7 +556,31 @@ fn persist(path: &Path, file: &VaultFile) -> Result<()> {
         path: path.display().to_string(),
         reason: e.to_string(),
     })?;
+    Ok(data)
+}
+
+fn persist(path: &Path, file: &VaultFile) -> Result<()> {
+    let data = encode_file(path, file)?;
     crate::fs_util::write_private(path, &data)
+}
+
+/// Publish a brand-new vault file. Fails with the same error as the
+/// up-front check when something has appeared at the path since then.
+fn create_file(path: &Path, file: &VaultFile) -> Result<()> {
+    let data = encode_file(path, file)?;
+    crate::fs_util::create_private_bytes(path, data.as_bytes()).map_err(|e| match e {
+        CoreError::Io(ref io) if io.kind() == std::io::ErrorKind::AlreadyExists => {
+            already_exists(path)
+        }
+        other => other,
+    })
+}
+
+fn already_exists(path: &Path) -> CoreError {
+    CoreError::Vault(format!(
+        "{} already exists; reset the vault before creating a new one",
+        path.display()
+    ))
 }
 
 async fn derive_key_off_thread(passphrase: &str, salt: Vec<u8>) -> Result<VaultKey> {
@@ -650,10 +752,140 @@ fn migrated_keys_meta(legacy: &[KeyMeta], payload: &VaultPayload) -> Result<Vec<
 }
 
 #[cfg(test)]
+mod wiping_buffer_tests {
+    use super::{SecretText, VaultPayload, WipingBuffer};
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::io::Write;
+
+    thread_local! {
+        /// `Some(count)` while [`reallocations_during`] runs on this thread.
+        static REALLOCATIONS: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    /// Forwards everything to `System` and counts `realloc` calls made on a
+    /// thread inside [`reallocations_during`].
+    ///
+    /// It is the allocator of this crate's whole test binary, but a thread that
+    /// is not counting only pays one thread-local read per `realloc`, so no
+    /// other test sees a difference.
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            let _ = REALLOCATIONS.try_with(|count| count.set(count.get().map(|n| n + 1)));
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+    }
+
+    #[global_allocator]
+    static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    fn reallocations_during(run: impl FnOnce()) -> usize {
+        REALLOCATIONS.with(|count| count.set(Some(0)));
+        run();
+        REALLOCATIONS
+            .with(|count| count.replace(None))
+            .expect("counting stays on until it is read")
+    }
+
+    /// A payload several times larger than a fresh buffer, whose keys carry
+    /// every class of byte JSON has to escape, and whose lines all differ so a
+    /// misplaced run of bytes cannot go unnoticed.
+    fn a_large_payload() -> VaultPayload {
+        let keys = (0..12usize)
+            .map(|n| {
+                let mut key = String::from("-----BEGIN OPENSSH PRIVATE KEY-----\n");
+                for line in 0..40usize {
+                    key.extend(
+                        (0..70usize).map(|col| char::from(b'A' + ((n * 7 + line * 3 + col) % 26) as u8)),
+                    );
+                    key.push('\n');
+                }
+                key.push_str("\"quote\" back\\slash\ttab \u{7}bell \u{e9}\n");
+                key.push_str("-----END OPENSSH PRIVATE KEY-----\n");
+                (format!("key-{n}"), SecretText(key))
+            })
+            .collect();
+        VaultPayload { keys }
+    }
+
+    /// The bytes repeat with period 251, which no write length below shares, so
+    /// any byte that lands at the wrong offset changes the comparison. The
+    /// lengths cross the first capacity exactly, and the last write alone needs
+    /// more than double the capacity before it, so both ways of sizing the
+    /// replacement allocation run.
+    #[test]
+    fn it_holds_exactly_what_was_written_across_growth() {
+        let mut buffer = WipingBuffer::new();
+        let initial = buffer.0.capacity();
+        let mut next = 0u8;
+        let mut expected = Vec::new();
+        for len in [1usize, initial - 1, 1, 2, 5000, 3, 9000, 100_000] {
+            let chunk: Vec<u8> = (0..len)
+                .map(|_| {
+                    next = (next + 1) % 251;
+                    next
+                })
+                .collect();
+            buffer.write_all(&chunk).expect("write");
+            expected.extend_from_slice(&chunk);
+        }
+        assert!(buffer.0.capacity() > initial, "the buffer never had to grow");
+        assert_eq!(buffer.0.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn a_payload_serializes_to_the_same_bytes_as_to_vec() {
+        let payload = a_large_payload();
+        let mut buffer = WipingBuffer::new();
+        let initial = buffer.0.capacity();
+        serde_json::to_writer(&mut buffer, &payload).expect("serialize");
+        assert!(buffer.0.capacity() > initial, "the payload never made the buffer grow");
+        assert_eq!(buffer.0.as_slice(), serde_json::to_vec(&payload).expect("to_vec").as_slice());
+    }
+
+    /// The wipe holds only while every growth moves into a fresh `Zeroizing`
+    /// allocation. A `Vec` that grows itself goes through `realloc`, which can
+    /// free the old block with its contents intact, so serializing a payload
+    /// must not reach `realloc` at all.
+    #[test]
+    fn growing_never_frees_a_buffer_through_realloc() {
+        let control = reallocations_during(|| {
+            let mut plain = Vec::<u8>::with_capacity(1);
+            plain.extend_from_slice(&[0; 64]);
+            std::hint::black_box(plain);
+        });
+        assert!(control > 0, "the allocator does not see a plain Vec grow");
+
+        let payload = a_large_payload();
+        let mut buffer = WipingBuffer::new();
+        let initial = buffer.0.capacity();
+        let reallocations = reallocations_during(|| {
+            serde_json::to_writer(&mut buffer, &payload).expect("serialize");
+        });
+        assert!(buffer.0.capacity() > initial, "the payload never made the buffer grow");
+        assert_eq!(reallocations, 0, "an outgrown buffer was freed through realloc");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
         base64, derive_key, open_unbound, random_bytes, seal, unbase64, SecretText, Vault, VaultKey,
-        VaultPayload, NONCE_LEN, VAULT_FORMAT_VERSION,
+        VaultPayload, WipingBuffer, NONCE_LEN, VAULT_FORMAT_VERSION,
     };
     use crate::keys::KeyMeta;
     use std::path::Path;
@@ -820,6 +1052,35 @@ mod tests {
         assert_eq!(meta.len(), 2);
         assert_eq!(meta[0].public_key_base64, first_meta.public_key_base64);
         assert_eq!(meta[1].fingerprint, second_meta.fingerprint);
+    }
+
+    /// Keys are added until the payload no longer fits the serialization
+    /// buffer's first allocation, so the last save has to grow it, and every
+    /// key must still come back intact from the file that save wrote.
+    #[tokio::test]
+    async fn keys_survive_a_save_that_outgrows_the_serialization_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let (mut vault, key) = initialized(path.clone(), "correct horse battery staple").await;
+
+        let first_capacity = WipingBuffer::new().0.capacity();
+        let mut added = Vec::new();
+        while vault.decrypt(&key).expect("decrypt").len() <= first_capacity {
+            let (meta, private) = a_key();
+            let id = meta.id.to_string();
+            vault.add_key(&key, meta, &private).expect("add");
+            added.push((id, private));
+        }
+        drop(vault);
+
+        let reopened = Vault::open(path).expect("reopen");
+        assert_eq!(reopened.keys_meta().len(), added.len());
+        for (id, private) in &added {
+            assert_eq!(
+                reopened.get_key_with(&key, id).expect("stored key").as_slice(),
+                private.as_bytes()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1555,10 +1816,13 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_parent_creation_leaves_initialization_retryable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let parent = dir.path().join("blocked-parent");
-        std::fs::write(&parent, b"not a directory").expect("block parent");
+        // A dangling symlink: the vault path below it reads as absent, but the
+        // directory cannot be created over the link, even by root.
+        std::os::unix::fs::symlink(dir.path().join("missing"), &parent).expect("block parent");
         let path = parent.join("vault.json");
         let mut vault = Vault::open(path.clone()).expect("open vault");
 
@@ -1584,20 +1848,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
     async fn failed_file_write_leaves_initialization_retryable() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("vault.json");
+        let parent = dir.path().join("vault-dir");
+        std::fs::create_dir(&parent).expect("create parent");
+        let path = parent.join("vault.json");
         let mut vault = Vault::open(path.clone()).expect("open vault");
-        // Parent creation succeeds, but writing to a directory fails reliably
-        // even when tests run with permission to write anywhere in the tempdir.
-        std::fs::create_dir(&path).expect("block vault file");
+        // The vault path is free and its directory exists, but nothing can be
+        // created in that directory, so the failure is in the write itself.
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).expect("chmod");
+        // Root ignores the mode, so there is no failing write to observe.
+        let enforced = std::fs::write(parent.join("probe"), b"").is_err();
+        let first = vault.initialize("first attempt passphrase").await;
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).expect("repair");
+        if !enforced {
+            return;
+        }
 
-        assert!(vault.initialize("first attempt passphrase").await.is_err());
+        assert!(first.is_err());
         assert!(!vault.is_initialized());
         assert!(vault.binding_id().is_none());
         assert!(vault.keys_meta().is_empty());
 
-        std::fs::remove_dir(&path).expect("repair vault path");
         vault
             .initialize("retry passphrase")
             .await
@@ -1663,5 +1937,170 @@ mod tests {
             Err(other) => panic!("expected UnreadableState, got {other}"),
             Ok(_) => panic!("an unreadable vault opened"),
         }
+    }
+
+    /// `Path::exists` reads every stat error as "absent". A vault reported as
+    /// not initialized gets a Create Vault screen, and creating one renames a
+    /// fresh file over the one holding every key.
+    #[test]
+    #[cfg(unix)]
+    fn a_vault_that_cannot_be_reached_is_not_reported_as_absent() {
+        let Some(opened) = crate::fs_util::load_from_unsearchable_dir(
+            "vault.json",
+            r#"{"version":1,"salt":"","nonce":"","keys_meta":[],"ciphertext":"c2VhbGVk"}"#,
+            Vault::open,
+        ) else {
+            return;
+        };
+        match opened {
+            Err(crate::CoreError::UnreadableState { path, .. }) => {
+                assert!(path.ends_with("vault.json"), "unexpected path: {path}");
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("an unreachable vault opened as uninitialized"),
+        }
+    }
+
+    /// A handle that saw no vault must not replace one that has appeared since,
+    /// whatever sits at the path.
+    #[tokio::test]
+    async fn initialize_refuses_to_replace_an_existing_vault_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut stale = Vault::open(path.clone()).expect("open before the vault exists");
+        let (_, _) = initialized(path.clone(), "correct horse battery staple").await;
+        let on_disk = std::fs::read(&path).expect("read vault");
+
+        assert!(stale.initialize("another passphrase").await.is_err());
+        assert!(!stale.is_initialized());
+        assert_eq!(std::fs::read(&path).expect("read back"), on_disk);
+        Vault::open(path.clone())
+            .expect("reopen")
+            .verify_passphrase("correct horse battery staple")
+            .await
+            .expect("the original vault still opens");
+
+        let occupied = dir.path().join("occupied.json");
+        let mut vault = Vault::open(occupied.clone()).expect("open");
+        std::fs::create_dir(&occupied).expect("occupy the vault path");
+        assert!(vault
+            .initialize("correct horse battery staple")
+            .await
+            .is_err());
+        assert!(occupied.is_dir());
+    }
+
+    /// When whether a vault exists cannot be determined, initialization treats
+    /// it as one that does.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn initialize_refuses_when_the_vault_path_cannot_be_checked() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open");
+        std::fs::write(&path, b"existing vault").expect("seed");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("chmod");
+        // Root ignores the mode, so the path can always be checked.
+        let enforced = std::fs::metadata(&path).is_err();
+        let result = vault.initialize("correct horse battery staple").await;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("restore");
+        if !enforced {
+            return;
+        }
+
+        match result {
+            Err(crate::CoreError::UnreadableState { path: reported, .. }) => {
+                assert_eq!(reported, path.display().to_string());
+            }
+            Err(other) => panic!("expected UnreadableState, got {other}"),
+            Ok(_) => panic!("initialized over a vault path that could not be checked"),
+        }
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing vault");
+    }
+
+    #[tokio::test]
+    async fn initialize_refuses_a_passphrase_shorter_than_eight_characters() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let mut vault = Vault::open(path.clone()).expect("open");
+
+        for short in ["", "1234567", "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"] {
+            match vault.initialize(short).await {
+                Err(crate::CoreError::InvalidInput(_)) => {}
+                Err(other) => panic!("expected InvalidInput for {short:?}, got {other}"),
+                Ok(_) => panic!("initialized with {short:?}"),
+            }
+            assert!(!vault.is_initialized());
+            assert!(!path.exists());
+        }
+
+        // Counted in characters, not bytes: eight two-byte characters pass.
+        let passphrase = "\u{e9}".repeat(8);
+        vault
+            .initialize(&passphrase)
+            .await
+            .expect("eight characters");
+        assert!(vault.verify_passphrase(&passphrase).await.is_ok());
+    }
+
+    /// A dangling symlink at the vault path reads as absent to `try_exists`,
+    /// so initialization must look at the link itself and leave it alone.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn initialize_refuses_a_dangling_symlink_at_the_vault_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let target = dir.path().join("vault-on-removable-disk.json");
+        // Opened before the link appears, as a handle from startup would be.
+        let mut vault = Vault::open(path.clone()).expect("open");
+        std::os::unix::fs::symlink(&target, &path).expect("link to a missing target");
+
+        assert!(vault
+            .initialize("correct horse battery staple")
+            .await
+            .is_err());
+        assert!(!vault.is_initialized());
+        assert!(!target.exists(), "the link target was created");
+        let meta = std::fs::symlink_metadata(&path).expect("the link is still there");
+        assert!(meta.file_type().is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_vault_path_linking_to_a_missing_file_does_not_open_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        std::os::unix::fs::symlink(dir.path().join("gone.json"), &path).expect("symlink");
+
+        assert!(matches!(
+            Vault::open(path),
+            Err(crate::CoreError::UnreadableState { .. })
+        ));
+    }
+
+    #[test]
+    fn check_can_initialize_refuses_without_touching_the_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let vault = Vault::open(path.clone()).expect("open");
+
+        assert!(matches!(
+            vault.check_can_initialize("short"),
+            Err(crate::CoreError::InvalidInput(_))
+        ));
+        vault
+            .check_can_initialize("correct horse battery staple")
+            .expect("free path and long passphrase");
+        assert!(!path.exists(), "the check created the vault file");
+
+        std::fs::write(&path, b"existing vault").expect("seed");
+        assert!(matches!(
+            vault.check_can_initialize("correct horse battery staple"),
+            Err(crate::CoreError::Vault(_))
+        ));
+        assert_eq!(std::fs::read(&path).expect("read back"), b"existing vault");
     }
 }
