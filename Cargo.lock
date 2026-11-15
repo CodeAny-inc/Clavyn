@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "clavyn-core"
-version = "0.1.2-alpha.6"
+version = "0.1.2-alpha.7"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -665,7 +665,7 @@ dependencies = [
 
 [[package]]
 name = "clavyn-desktop"
-version = "0.1.2-alpha.6"
+version = "0.1.2-alpha.7"
 dependencies = [
  "clavyn-core",
  "core-foundation 0.10.1",

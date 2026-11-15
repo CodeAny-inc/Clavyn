@@ -4,6 +4,159 @@ All notable changes to Clavyn are documented in this file. The format is
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2-alpha.7] - 2026-11-15
+
+### Added
+
+- **Appearance setting with a real dark mode.** Settings → Appearance →
+  Theme offers System (the default), Light and Dark, and "System" follows
+  `prefers-color-scheme` live. The dark palette had shipped in the
+  stylesheet from the start but nothing ever applied the class, so the app
+  rendered light whatever the OS was set to; dark-theme switches and red
+  text are corrected with it. (#187)
+- **The command palette reaches hosts, Files and the vault lock.** Searching
+  a host name offers "Connect to <label>", which opens a terminal exactly as
+  double-clicking the host does; Files and Lock vault are commands too, and
+  the results render as a real `listbox` a screen reader can navigate. (#188)
+- **Keyboard-interactive SSH sign-in.** Password hosts first probe which
+  methods the server accepts, as OpenSSH does, then use `password` when
+  offered and `keyboard-interactive` otherwise — answered the way PAM
+  prompts a password — so servers that only offer keyboard-interactive now
+  connect. Rejected authentication names the method that failed, and each
+  resolved address is dialed with its own timeout. (#177)
+
+### Changed
+
+- **Vault unlock is about 3.5x faster.** Argon2id's four lanes now compute
+  in parallel (unlock 194 ms → 56 ms). Parameters and the cost to an
+  attacker are unchanged; only the wait is. (#185)
+- Terminal panes render as one warm surface with inset output and a tuned
+  palette; the active pane mark is subtle instead of a blue ring, and the
+  empty Terminal view is readable in every theme with a centered New
+  session button. (#183, #184)
+- Ctrl+F, Ctrl+K and Ctrl+arrows pass through to the shell on Linux and
+  Windows instead of triggering pane/find/palette shortcuts; macOS is
+  unchanged. (#180)
+- Host, identity and workspace lists tell a failed or in-flight load apart
+  from genuinely empty — a failed first read no longer masquerades as "No
+  hosts yet", and it gets a retry. (#179)
+- Row actions show on keyboard focus and touch screens instead of only on
+  hover, unlabeled controls have accessible names, and host key
+  fingerprints are selectable text. (#182)
+
+### Fixed
+
+- **Destructive actions actually ask.** `window.confirm` never blocks in the
+  packaged app — the dialog plugin replaces it with an always-truthy async
+  stub and the capability refused the native dialog — so deleting a vault
+  key, host, identity, known host, workspace or remote file took a single
+  click, and an SFTP transfer overwrote an existing file silently.
+  Destructive confirmations now render in the page. (#172)
+- **Terminal output can no longer grow memory without bound.** A producer
+  faster than the webview — a fast server or a local `cat` — grew the IPC
+  queue until the app ran out of memory. Every session now has a 2 MiB
+  window of unacknowledged output that holds the producer back. (#159)
+- A download never leaves a partial file under its name: writes stage
+  through `.<name>.<uuid>.part`, fsync, and rename into place, so a failed
+  or cancelled download leaves the original file alone; uploads widen
+  their writes. (#142)
+- Session maps are no longer held locked across network I/O, so a peer
+  that stops reading stalls only its own session instead of every SSH and
+  SFTP operation. (#140)
+- Closing a local shell tab ends and reaps the process (SIGHUP on Unix,
+  TerminateProcess on Windows, `wait()` off the caller's thread), and the
+  unused os and process plugins are dropped. (#154)
+- SFTP entry actions act on the directory the entry was picked from —
+  navigating mid-action no longer deletes, renames or downloads from the
+  wrong folder — and actions captured from a since-closed session are
+  refused. (#163)
+- Host, identity, workspace and vault forms are guarded against double
+  submits and surface their failures; retrying an identity save links the
+  key it already imported instead of creating another. (#165)
+- Auto-lock counts terminal typing and scrolling as activity even when
+  xterm stops the keys, error text masks configured hostnames, and UI
+  state stays honest after failures. (#167)
+- A held host key change is withdrawn once the pinned key answers again,
+  so one click can no longer pin a key the server has stopped using. (#138)
+- An identity or group delete landing during the first load no longer
+  leaves the host list empty. (#195)
+- Terminal geometry shares one bounds-checked creation path, and dead
+  components and stale docs are removed. (#161)
+- Key import caps bcrypt rounds before deriving and decrypts once instead
+  of twice, and keychain calls no longer run inside the vault lock. (#170)
+- The verification harness probes the dev server and waits for the GPU
+  renderer correctly in full-suite e2e runs. (#171)
+
+### Security
+
+- **The webview can no longer choose where vault keys sign in.**
+  `connect_ssh` and `sftp_connect` take a saved host id the backend
+  resolves instead of a `Host` object supplied by the page, and a store
+  write that would let a vault key reach a new server now asks first —
+  the first-seen host key is still never pinned without confirmation.
+  (#99, #120, #122)
+- **Every app command sits behind the capability ACL**, plugin grants are
+  trimmed to what the UI uses, and the window cannot be navigated off the
+  app's own pages. (#123)
+- **SSH and SFTP refuse a session id that is already in use**, closing the
+  path that let a new session split or steal a live one's input and
+  output. (#100, #120)
+- **Host key pins normalize equivalent spellings of a host**, so a new
+  spelling of a pinned host is not treated as a first use. (#101, #120)
+- **The app fails closed on state it cannot check.** An unreadable state
+  file lands on the recovery screen instead of looking absent, a vault
+  file rolled back to an older copy is recognized through a high-water
+  mark kept outside the file, and a vault is never created over an
+  existing one. (#102, #106, #120, #174)
+- **Key metadata is listed only while the vault is unlocked** — a locked
+  vault no longer serves attacker-rewritten header entries to the UI.
+  (#105, #120)
+- **Decrypted key material is wiped on every path.** Vault saves serialize
+  private keys into a zeroizing buffer that wipes on growth and drop,
+  `get_key` and key generation return zeroizing types, and imported keys
+  are stored without their passphrase. (#107, #152)
+- **Server-initiated SSH channels are refused** — agent forwarding, X11,
+  forwarded and direct tcpip/streamlocal, and types russh has no hook
+  for — and a host's startup command runs in the shell only behind a
+  native confirmation. (#148)
+- **Terminal input is hardened against hostile content:** pastes are
+  sanitized before xterm sees them, an OSC 8 link shows its target in a
+  chip while hovered, and input reordering cannot inject bytes. (#150)
+- **A server-chosen file name can no longer disguise itself** in the save
+  dialog or the Files list: bidirectional controls, line/paragraph
+  separators and path tricks are stripped. (#155)
+- **Update signatures are bound to the version they were signed for**
+  (`requireSignedVersion`), so a signature from an older release cannot
+  pair with a newer manifest, and manifests are only taken from this
+  repository's releases. (#144)
+- **The updater key signs in isolation.** The `sign` job checks out no
+  code, installs nothing, runs a signer binary whose digest a separate job
+  produced, and verifies every `.sig` against the declared updater pubkey
+  before upload; release builds use `--locked`, every CI job is
+  time-bounded, and every release publishes `SHA256SUMS`. (#108, #109,
+  #146)
+- Windows state lives in the non-roaming app data directory with
+  owner-only ACLs, and the biometric enrollment marker writes through the
+  same hardened private writer as every other state file. (#103, #104,
+  #120)
+- **russh 0.65.1** fixes RUSTSEC-2026-0495 (a path Clavyn never runs, but
+  the audit suppression is now removed rather than carried), and the host
+  key is checked at the point where its algorithm is known. (#194)
+
+### Dependencies
+
+- Rust: russh 0.63 → 0.65.1, thiserror 2, aes-gcm 0.11, argon2 0.6 with
+  the parallel feature, rand 0.10, plus the cargo minor-and-patch groups
+  and a `cargo audit` back to green — the three `zip` extraction
+  advisories the updater pins the tree to are suppressed with a review
+  date. (#98, #121, #128, #185, #186, #193, #194, #197)
+- Frontend: @xterm/xterm 6, pinia 4, vitest 5, vue-tsc 3, @tauri-apps/api
+  2.12.4, tailwind moved to devDependencies (clearing the npm audit),
+  happy-dom 21. (#98, #121, #128, #135, #191)
+- CI: setup-node 7.1.0, upload-artifact 7.0.2, download-artifact 8.0.2,
+  rust-toolchain and rust-cache bumps, Playwright 1.65 for e2e.
+  (#129, #130, #131, #132, #133, #190)
+
 ## [0.1.2-alpha.6] - 2026-09-16
 
 ### Added
@@ -234,6 +387,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Completed the OpenTermius → Clavyn rename and documented the unsigned-build
   warning workaround (`xattr -cr`). (38c6d3d)
 
+[0.1.2-alpha.7]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.7
 [0.1.2-alpha.6]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.6
 [0.1.2-alpha.5]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.5
 [0.1.2-alpha.4]: https://github.com/CodeAny-inc/Clavyn/releases/tag/v0.1.2-alpha.4
