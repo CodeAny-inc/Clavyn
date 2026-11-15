@@ -1,5 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, watch } from "vue";
+import { APPEARANCES, applyAppearance, onSystemAppearanceChange, type Appearance } from "../lib/appearance";
 
 const STORAGE_KEY = "clavyn-settings";
 
@@ -21,6 +22,8 @@ export interface AppSettings {
    * per terminal, so it defaults to off.
    */
   screenReaderMode: boolean;
+  /** Light, dark, or whatever the operating system is set to. */
+  appearance: Appearance;
 }
 
 const DEFAULTS: AppSettings = {
@@ -28,19 +31,26 @@ const DEFAULTS: AppSettings = {
   lockOnSleep: true,
   maskAddresses: true,
   screenReaderMode: false,
+  appearance: "system",
 };
 
 function loadSettings(): AppSettings {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
-      const parsed = JSON.parse(raw);
-      return { ...DEFAULTS, ...parsed };
+      const parsed = { ...DEFAULTS, ...JSON.parse(raw) };
+      if (!APPEARANCES.includes(parsed.appearance)) parsed.appearance = DEFAULTS.appearance;
+      return parsed;
     }
   } catch {
     // ignore
   }
   return { ...DEFAULTS };
+}
+
+/** The saved appearance, readable before the app (and Pinia) exist. */
+export function storedAppearance(): Appearance {
+  return loadSettings().appearance;
 }
 
 function saveSettings(settings: AppSettings) {
@@ -56,18 +66,28 @@ export const useSettingsStore = defineStore("settings", () => {
   const lockOnSleep = ref(loadSettings().lockOnSleep);
   const maskAddresses = ref(loadSettings().maskAddresses);
   const screenReaderMode = ref(loadSettings().screenReaderMode);
+  const appearance = ref<Appearance>(loadSettings().appearance);
 
   watch(
-    [autoLockMinutes, lockOnSleep, maskAddresses, screenReaderMode],
+    [autoLockMinutes, lockOnSleep, maskAddresses, screenReaderMode, appearance],
     () => {
       saveSettings({
         autoLockMinutes: autoLockMinutes.value,
         lockOnSleep: lockOnSleep.value,
         maskAddresses: maskAddresses.value,
         screenReaderMode: screenReaderMode.value,
+        appearance: appearance.value,
       });
     },
   );
+
+  watch(appearance, applyAppearance, { immediate: true });
+  // Following the system means following it while the app is open, too.
+  // main.ts installs the same listener for screens that never create this
+  // store; applying twice is harmless.
+  onSystemAppearanceChange(() => {
+    if (appearance.value === "system") applyAppearance("system");
+  });
 
   function setAutoLockMinutes(minutes: number) {
     autoLockMinutes.value = minutes;
@@ -85,14 +105,20 @@ export const useSettingsStore = defineStore("settings", () => {
     screenReaderMode.value = enabled;
   }
 
+  function setAppearance(value: Appearance) {
+    appearance.value = value;
+  }
+
   return {
     autoLockMinutes,
     lockOnSleep,
     maskAddresses,
     screenReaderMode,
+    appearance,
     setAutoLockMinutes,
     setLockOnSleep,
     setMaskAddresses,
     setScreenReaderMode,
+    setAppearance,
   };
 });
