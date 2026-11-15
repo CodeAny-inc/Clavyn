@@ -31,27 +31,31 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request supersedes the run in progress for it. Any
+# other run gets a group of its own, so a push to main never cancels or
+# replaces the smoke test of the commit before it.
 concurrency:
-  group: windows-nsis-smoke-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: windows-nsis-smoke-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   windows-nsis-smoke:
     name: Windows NSIS smoke test
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: desktop/package-lock.json
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # The Cargo workspace root is the repository root (members: core,
           # desktop/src-tauri), so cargo writes to <root>/target. Pointing this
@@ -74,7 +78,9 @@ jobs:
           # bash passes the single-quoted JSON through verbatim. Under PowerShell,
           # how embedded quotes reach npx depends on which npx shim it resolves
           # (.cmd or .ps1), so no one escaping works everywhere.
-          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          # Everything after `--` goes to cargo; `--locked` builds against the
+          # committed Cargo.lock and fails if it is out of date.
+          npx tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
       - name: Verify NSIS installer was produced
         shell: pwsh
         run: |

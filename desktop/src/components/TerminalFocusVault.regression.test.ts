@@ -28,6 +28,7 @@ vi.mock("@xterm/xterm", () => ({ Terminal: class {
     root.append(this.textarea); container.append(root);
   }
   onData(handler: (data: string) => void) { this.input = handler; }
+  onBinary() { return { dispose() {} }; }
   focus() { this.textarea.focus(); }
   write(_data: unknown, callback?: () => void) { callback?.(); }
   reset() {}
@@ -56,7 +57,7 @@ function delay(command = "connect_ssh") {
 async function palette() {
   useUiStore().commandPaletteOpen = true;
   await nextTick(); await nextTick();
-  const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[placeholder="Search commands..."]')!);
+  const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[role="combobox"]')!);
   await input.setValue("Go to ");
   expect(document.activeElement).toBe(input.element);
   return input;

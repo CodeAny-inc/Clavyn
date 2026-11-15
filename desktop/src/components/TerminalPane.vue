@@ -15,12 +15,15 @@ import ActionMenu, { type MenuAction } from "./ui/ActionMenu.vue";
 import SshPasswordPrompt from "./SshPasswordPrompt.vue";
 import { useFocusIntent } from "../composables/useFocusIntent";
 import { acquireWebglRenderer, releaseWebglRenderer } from "../lib/terminalRenderer";
+import { sanitizePaste } from "../lib/terminalPaste";
+import { createSerialSender } from "../lib/serialSender";
 import { configuredSshEndpoint, effectiveSshIdentity, formatSshEndpoint, passwordAuth, sshConfigurationKey, sshIdentityReady } from "../lib/sshIdentity";
 import { useMaskedAddress } from "../composables/useMaskedAddress";
 import * as api from "../api";
 import { SplitSquareHorizontal, SplitSquareVertical, X, GripVertical, Maximize2, Minimize2,
   RotateCw, Search, ChevronUp, ChevronDown, CaseSensitive, Regex, WholeWord, Loader2, ArrowUpRight } from "lucide-vue-next";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { isTerminalShortcut, terminalShortcutLabel } from "../lib/shortcuts";
 
 const props = withDefaults(defineProps<{ pane: Pane; tabId: string; visible?: boolean }>(), { visible: true });
 const emit = defineEmits<{ "split-h": []; "split-v": []; close: [] }>();
@@ -30,7 +33,7 @@ const identities = useIdentitiesStore();
 const vault = useVaultStore();
 const ui = useUiStore();
 const settings = useSettingsStore();
-const { maskAddress } = useMaskedAddress();
+const { maskAddress, maskHostsIn } = useMaskedAddress();
 const { capture: captureFocusIntent, blocked: terminalFocusBlocked } = useFocusIntent();
 const containerRef = ref<HTMLElement | null>(null);
 const paneRef = ref<HTMLElement | null>(null);
@@ -73,7 +76,9 @@ const STREAM_END_GRACE_MS = 5000;
 let streamEndTimer: ReturnType<typeof setTimeout> | null = null;
 let outputTruncated = false;
 // Buffer remote output, never user input, until this attempt can answer queries.
-let pendingOutput: Uint8Array[] | null = null;
+// Each chunk keeps its share of the session's output window until it has been
+// written, so the buffer is bounded by that window too.
+let pendingOutput: HeldOutput[] | null = null;
 // Output still arriving after the close notification, held so the trailing
 // bytes are written before the closed banner rather than after it.
 let tailOutput: Uint8Array[] | null = null;
@@ -117,9 +122,126 @@ function fit() {
   try {
     if (containerRef.value?.clientWidth && containerRef.value.clientHeight) {
       fitAddon.fit();
-      if (currentSessionId && props.pane.connected) void api.sessionResize(currentSessionId, term.cols, term.rows).catch(() => {});
+      if (currentSessionId && props.pane.connected) sendSize(currentSessionId, { cols: term.cols, rows: term.rows });
     }
   } catch { /* ResizeObserver can run during teardown. */ }
+}
+function sessionLive(sessionId: string | null): sessionId is string {
+  return !disposed && !props.pane.closing && !sessionEnded && !!sessionId && currentSessionId === sessionId
+    && props.pane.connected && !connecting.value;
+}
+// Every resize reaches the remote as a window-change and the shell redraws, so
+// only a size the session is not known to have is sent. The known size is the
+// one the session was created with, then each size the backend accepted. The
+// backend takes a size without waiting on the peer, and an SSH session's
+// resizer task delivers the newest one when the connection allows, so an
+// accepted size is the backend's to deliver. Resizes go out one at a time,
+// because two in flight could be handled in either order and leave the remote
+// at the older size, and while one is in flight only the newest size is kept.
+// A failed resize forgets the known size and is retried a few times with
+// backoff, since nothing else refits a pane whose geometry has stopped
+// changing.
+type TerminalSize = { cols: number; rows: number };
+const RESIZE_RETRY_MS = 250;
+const RESIZE_RETRY_LIMIT = 3;
+let knownSize: ({ sessionId: string } & TerminalSize) | null = null;
+let resizeRetries = 0;
+let resizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function sessionHasSize(sessionId: string, size: TerminalSize) {
+  return knownSize?.sessionId === sessionId && knownSize.cols === size.cols && knownSize.rows === size.rows;
+}
+function sessionCreatedAt(sessionId: string, size: TerminalSize) {
+  knownSize = { sessionId, ...size };
+  resizeRetries = 0;
+}
+function retryResize() {
+  if (resizeRetryTimer !== null || resizeRetries >= RESIZE_RETRY_LIMIT) return;
+  resizeRetries += 1;
+  resizeRetryTimer = setTimeout(() => {
+    resizeRetryTimer = null;
+    fit();
+  }, RESIZE_RETRY_MS * 2 ** (resizeRetries - 1));
+}
+const resizes = createSerialSender<TerminalSize>({
+  send: (sessionId, size) => api.sessionResize(sessionId, size.cols, size.rows).then(() => {
+    if (currentSessionId === sessionId) knownSize = { sessionId, ...size };
+  }, cause => {
+    if (knownSize?.sessionId === sessionId) knownSize = null;
+    throw cause;
+  }),
+  merge: (_held, size) => size,
+  settled: (sessionId, held, failure) => {
+    if (!sessionLive(sessionId)) return null;
+    if (!failure) resizeRetries = 0;
+    // After a failure the known size is gone, so a held size is always sent.
+    if (held) return sessionHasSize(sessionId, held) ? null : held;
+    if (failure) retryResize();
+    return null;
+  },
+});
+function sendSize(sessionId: string, size: TerminalSize) {
+  if (!resizes.busy(sessionId) && sessionHasSize(sessionId, size)) return;
+  resizes.push(sessionId, size);
+}
+// One write per pane is in flight at a time; input arriving meanwhile is held
+// and sent as a single write once it settles.
+const writes = createSerialSender<number[]>({
+  send: (sessionId, bytes) => api.sessionWrite(sessionId, bytes),
+  merge: (held, bytes) => {
+    for (const byte of bytes) held.push(byte);
+    return held;
+  },
+  settled: (sessionId, held, failure) => {
+    if (!failure) return held && sessionLive(sessionId) ? held : null;
+    // An old write may settle after EOF or after xterm has a new session.
+    // Preserve that owner's transcript/status; only report a live owner's error.
+    if (sessionLive(sessionId)) writeError(`Write failed: ${String(failure.cause)}`);
+    // Input held behind the failed write was typed before the failure could
+    // be seen. Sending it would hand the remote the rest of a line with a gap
+    // in it, which can turn a command into a different one.
+    return null;
+  },
+});
+function sendInput(bytes: number[]) {
+  const sessionId = currentSessionId;
+  if (sessionLive(sessionId)) writes.push(sessionId, bytes);
+}
+// OSC 8 hyperlinks come from the remote, and the text a link is drawn on need
+// not resemble where it points, so hovering one shows its real target and
+// Cmd/Ctrl-click copies it. Nothing opens it: without a handler xterm confirms
+// and then calls window.open(), which opens an in-app window the shell does
+// not manage, and the shell-open permission only covers the project's own
+// URLs. The target is shown and copied in the URL parser's serialization,
+// which punycodes the host and percent-encodes invisible or direction-changing
+// characters, so it reads as what it resolves to.
+const linkTarget = ref<string | null>(null);
+const linkNotice = ref<string | null>(null);
+const LINK_NOTICE_MS = 1500;
+let linkNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+function linkHref(uri: string): string | null {
+  try {
+    return new URL(uri).href;
+  } catch {
+    return null;
+  }
+}
+function showLinkNotice(message: string) {
+  if (linkNoticeTimer !== null) clearTimeout(linkNoticeTimer);
+  linkNotice.value = message;
+  linkNoticeTimer = setTimeout(() => {
+    linkNoticeTimer = null;
+    linkNotice.value = null;
+  }, LINK_NOTICE_MS);
+}
+async function copyLink(uri: string) {
+  const href = linkHref(uri);
+  if (!href) return;
+  try {
+    await navigator.clipboard.writeText(href);
+    if (!disposed) showLinkNotice("Link copied");
+  } catch {
+    if (!disposed) showLinkNotice("Could not copy the link");
+  }
 }
 function controlHasFocus() {
   const focused = document.activeElement;
@@ -157,6 +279,25 @@ function focusPane() { activatePane(true); }
 function reconnect() {
   activatePane(true);
   void connectWhenReady();
+}
+interface HeldOutput {
+  data: Uint8Array;
+  release: () => void;
+}
+// Writes session output and settles once xterm has parsed it. The output's
+// acknowledgement waits for that, so a session never has more than its window
+// queued in xterm, whose write buffer throws past its own limit.
+function writeOutput(data: Uint8Array): Promise<void> {
+  return new Promise(resolve => {
+    if (term) term.write(data, resolve);
+    else resolve();
+  });
+}
+// Hand buffered output back to the session's window without writing it, for
+// output that will never reach the emulator; returns the bytes.
+function releaseOutput(held: HeldOutput[] | null): Uint8Array[] {
+  for (const chunk of held ?? []) chunk.release();
+  return (held ?? []).map(chunk => chunk.data);
 }
 function writeError(message: string) {
   error.value = message;
@@ -219,7 +360,7 @@ async function ensureListeners(): Promise<boolean> {
           // Disable writes before parsing them: queries must not reply to a dead
           // session. Take ownership of anything this attempt has buffered so a
           // connection still settling cannot discard it.
-          tailOutput = [...(pendingOutput ?? [])];
+          tailOutput = releaseOutput(pendingOutput);
           pendingOutput = null;
           closeReason = event.reason;
           finishClose();
@@ -251,6 +392,9 @@ async function connectSession() {
   connecting.value = true;
   error.value = "";
   tabs.setPaneDisconnected(props.pane.id);
+  // The hostname this attempt connects to. Recorded now so that an error from
+  // this attempt is masked even if the saved host is renamed before it fails.
+  const attemptHostname = hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname;
   const previous = currentSessionId;
   const sessionId = crypto.randomUUID();
   currentSessionId = sessionId;
@@ -260,16 +404,23 @@ async function connectSession() {
   tailOutput = null;
   outputTruncated = false;
   clearStreamEndFallback();
+  releaseOutput(pendingOutput);
   pendingOutput = [];
   // The sink belongs to this attempt, so a superseded attempt's output can
   // never reach the emulator even before its session is torn down. Bytes keep
   // being accepted until the sink itself reports the end of the stream: the
   // close notification does not travel with them and can arrive first.
-  const outputSink = api.sessionOutput(data => {
+  // Output the pane writes is acknowledged once xterm has parsed it, output
+  // it buffers once that buffer is written, and output it drops at once.
+  const outputSink = api.sessionOutput(sessionId, data => {
     if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
     if (sessionEnded) tailOutput?.push(data);
-    else if (pendingOutput) pendingOutput.push(data);
-    else if (props.pane.connected) term?.write(data);
+    else if (pendingOutput) {
+      const buffer = pendingOutput;
+      return new Promise<void>(release => {
+        buffer.push({ data, release });
+      });
+    } else if (props.pane.connected) return writeOutput(data);
   }, () => {
     if (disposed || props.pane.closing || streamEnded || currentSessionId !== sessionId) return;
     streamEnded = true;
@@ -286,10 +437,12 @@ async function connectSession() {
       await new Promise<void>(resolve => terminal.write("", resolve));
       if (disposed) return;
       searchAddon?.clearDecorations();
+      linkTarget.value = null;
       terminal.reset();
     }
     fit();
     if (props.pane.terminalType === "local") {
+      sessionCreatedAt(sessionId, { cols: terminal.cols, rows: terminal.rows });
       await api.createLocalTerminal(sessionId, terminal.cols, terminal.rows, outputSink);
     } else {
       // Direct hosts do not depend on the identity list. Linked hosts still fail
@@ -333,6 +486,7 @@ async function connectSession() {
             if (!latest || !sshIdentityReady(latest, identities.loaded) || sshConfigurationKey(latest, identities.identities) !== key)
               throw new Error("Connection settings changed. Reconnect to review the updated account.");
           }
+          sessionCreatedAt(sessionId, { cols: terminal.cols, rows: terminal.rows });
           const request = api.connectSsh(sessionId, host.id, password, terminal.cols, terminal.rows, outputSink, effective.username);
           // The IPC request owns its serialized argument; retain no reusable credential.
           password = null;
@@ -366,12 +520,14 @@ async function connectSession() {
       connecting.value = false;
       const output = pendingOutput;
       pendingOutput = null;
-      for (const chunk of output ?? []) terminal.write(chunk);
+      for (const chunk of output ?? []) terminal.write(chunk.data, chunk.release);
     }
     fit();
   } catch (cause) {
-    if (!disposed) writeError(`Connection failed: ${String(cause)}`);
+    // Backend errors can name the host; keep it masked like the header.
+    if (!disposed) writeError(maskHostsIn(`Connection failed: ${String(cause)}`, [attemptHostname, hosts.hosts.find(h => h.id === props.pane.hostId)?.hostname]));
   } finally {
+    releaseOutput(pendingOutput);
     pendingOutput = null;
     connecting.value = false;
   }
@@ -381,12 +537,28 @@ onMounted(async () => {
   if (!containerRef.value) return;
   term = new Terminal({ fontSize: 13,
     fontFamily: "'SFMono-Regular', 'SF Mono', 'Cascadia Code', 'Roboto Mono', ui-monospace, monospace",
-    theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#10151e", foreground: "#e6e9ef", cursor: "#4f9cf9", selectionBackground: "#264f78" },
+    lineHeight: 1.2,
+    theme: { background: getComputedStyle(document.documentElement).getPropertyValue("--terminal-background").trim() || "#161513",
+      foreground: "#ebe7de", cursor: "#e2c88e", cursorAccent: "#161513", selectionBackground: "#4b473f",
+      // Sixteen colours tuned to the warm surface: every one meant for text
+      // clears 4.5:1 against the background (black is a fill, as in any
+      // terminal), and none is a full-saturation primary.
+      black: "#3a3733", red: "#e0786b", green: "#9cc58a", yellow: "#dcc07a",
+      blue: "#86a9d4", magenta: "#c79ad4", cyan: "#7fc2bd", white: "#d9d4c8",
+      brightBlack: "#857f74", brightRed: "#f0968c", brightGreen: "#b7d9a5", brightYellow: "#ecd59a",
+      brightBlue: "#a7c2e4", brightMagenta: "#dab5e3", brightCyan: "#a2d7d2", brightWhite: "#f5f2eb" },
     cursorBlink: true, scrollback: 10000, allowProposedApi: true,
     // Builds xterm's accessibility layer: its own row elements and a live
     // region, read from the buffer rather than from whatever is drawing, so it
     // works the same on the GPU renderer as on the DOM one.
-    screenReaderMode: settings.screenReaderMode });
+    screenReaderMode: settings.screenReaderMode,
+    linkHandler: {
+      hover: (_event, uri) => { linkTarget.value = linkHref(uri); },
+      leave: () => { linkTarget.value = null; },
+      activate: (event, uri) => {
+        if (event.metaKey || event.ctrlKey) void copyLink(uri);
+      },
+    } });
   fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.attachCustomKeyEventHandler(event => {
@@ -395,30 +567,40 @@ onMounted(async () => {
     // fullscreen so the event bubbles up and exits fullscreen without being
     // sent to the remote shell.
     if (event.key === "Escape" && isFullscreen.value) return false;
-    const command = event.metaKey || event.ctrlKey;
-    if (command && event.key.toLowerCase() === "f") {
+    // Only the terminal-safe modifier is taken; plain Ctrl+F, Ctrl+K and
+    // Ctrl+arrows stay with the shell on Linux and Windows.
+    const command = isTerminalShortcut(event);
+    const key = event.key.toLowerCase();
+    if (command && key === "f") {
       if (event.type === "keydown") { event.preventDefault(); openSearch(); }
       return false;
     }
+    // Not sent to the shell, so it reaches the window and opens the palette.
+    if (command && key === "k") return false;
     const directions = { ArrowLeft: "left", ArrowRight: "right", ArrowUp: "up", ArrowDown: "down" } as const;
     const direction = directions[event.key as keyof typeof directions];
-    if (command && !event.shiftKey && !event.altKey && direction) {
+    if (command && direction) {
       if (event.type === "keydown") { event.preventDefault(); tabs.navigatePane(direction); }
       return false;
     }
     return true;
   });
+  // xterm's own paste listeners sit on its textarea and root element, both
+  // inside the container, so a capture listener here sees the event first and
+  // hands xterm the sanitized text to bracket and send.
+  containerRef.value.addEventListener("paste", event => {
+    if (!term) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const text = event.clipboardData?.getData("text/plain");
+    if (text) term.paste(sanitizePaste(text));
+  }, { capture: true });
   term.open(containerRef.value);
-  term.onData(data => {
-    const sessionId = currentSessionId;
-    if (!disposed && !props.pane.closing && !sessionEnded && sessionId && props.pane.connected && !connecting.value)
-      void api.sessionWrite(sessionId, Array.from(new TextEncoder().encode(data))).catch(cause => {
-        // An old write may settle after EOF or after xterm has a new session.
-        // Preserve that owner's transcript/status; only report a live owner's error.
-        if (!disposed && !props.pane.closing && !sessionEnded && currentSessionId === sessionId && props.pane.connected && !connecting.value)
-          writeError(`Write failed: ${String(cause)}`);
-      });
-  });
+  term.onData(data => sendInput(Array.from(new TextEncoder().encode(data))));
+  // Binary strings carry one byte per character. X10-encoded mouse reports
+  // arrive this way because a coordinate byte above 127 has to reach the
+  // remote as that byte, not as its UTF-8 encoding.
+  term.onBinary(data => sendInput(Array.from(data, char => char.charCodeAt(0) & 0xff)));
   observer = new ResizeObserver(() => fit());
   observer.observe(containerRef.value);
   fit();
@@ -443,9 +625,14 @@ watch(() => settings.screenReaderMode, enabled => {
 });
 onBeforeUnmount(() => {
   disposed = true;
+  releaseOutput(pendingOutput);
   pendingOutput = null;
   tailOutput = null;
   clearStreamEndFallback();
+  if (resizeRetryTimer !== null) clearTimeout(resizeRetryTimer);
+  resizeRetryTimer = null;
+  if (linkNoticeTimer !== null) clearTimeout(linkNoticeTimer);
+  linkNoticeTimer = null;
   passwordPrompt.value?.cancel();
   listeners.forEach(unlisten => unlisten());
   observer?.disconnect();
@@ -515,7 +702,7 @@ async function doSearch(previous = false) {
   const addon = await ensureSearchAddon();
   if (!addon) return;
   const options = { caseSensitive: searchCaseSensitive.value, regex: searchRegex.value, wholeWord: searchWholeWord.value,
-    decorations: { matchOverviewRuler: "#4f9cf9", activeMatchColorOverviewRuler: "#f59e0b", matchBackground: "#264f78", activeMatchBackground: "#f59e0b80" } };
+    decorations: { matchOverviewRuler: "#948f84", activeMatchColorOverviewRuler: "#e2c88e", matchBackground: "#4b473f", activeMatchBackground: "#e2c88e80" } };
   try {
     if (previous) addon.findPrevious(searchQuery.value, options);
     else addon.findNext(searchQuery.value, options);
@@ -564,7 +751,7 @@ function drop(event: DragEvent) {
 const actions = computed<MenuAction[]>(() => [
   { id: "split-h", label: "Split right…", icon: SplitSquareHorizontal },
   { id: "split-v", label: "Split below…", icon: SplitSquareVertical },
-  { id: "search", label: "Find in terminal", icon: Search, shortcut: "⌘ / Ctrl F", separator: true },
+  { id: "search", label: "Find in terminal", icon: Search, shortcut: terminalShortcutLabel("F"), separator: true },
   { id: "fullscreen", label: isFullscreen.value ? "Restore pane" : "Maximize pane", icon: isFullscreen.value ? Minimize2 : Maximize2 },
   ...otherTabs.value.map((tab, index) => ({ id: `move:${tab.id}`, label: `Move to ${tab.title}`, icon: ArrowUpRight, separator: index === 0 })),
   ...(!props.pane.connected ? [{ id: "reconnect", label: "Reconnect", icon: RotateCw, disabled: busy.value, separator: true }] : []),
@@ -585,37 +772,39 @@ function selectAction(id: string) {
 <template>
   <Teleport to="body" :disabled="!isFullscreen">
   <div ref="paneRef" class="terminal-pane flex h-full w-full min-w-0 flex-col" :inert="inputObscured"
-    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? 'ring-1 ring-inset ring-ring/50' : '', isDragging ? 'pane-dragging' : '', isDragOver ? 'pane-drop-target' : '']"
+    :class="[isFullscreen ? 'fixed inset-0 z-[90]' : 'relative', isActive ? '' : 'pane-inactive', isDragging ? 'pane-dragging' : '', isDragOver ? 'pane-drop-target' : '']"
     :data-session-id="pane.sessionId" :data-connected="pane.connected" :data-host-id="pane.hostId" :data-active="isActive"
     @click="focusPane" @dragover="dragOver" @drop="drop"
     @dragleave="!paneRef?.contains($event.relatedTarget as Node) && tabs.clearDragOver()">
     <header class="pane-header" :class="{ 'pane-header-active': isActive }" data-testid="pane-header">
       <div class="flex min-w-0 flex-1 cursor-grab items-center gap-2 active:cursor-grabbing" draggable="true"
         :aria-label="`Drag pane ${pane.title}`" @dragstart="startDrag" @dragend="tabs.endDrag()">
-        <GripVertical class="size-3 shrink-0 text-muted-foreground" />
-        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin text-muted-foreground" aria-label="Connecting" />
-        <span v-else class="size-1.5 shrink-0 rounded-full" :class="pane.connected ? 'bg-emerald-500' : 'bg-muted-foreground'" :title="status" />
+        <GripVertical class="size-3 shrink-0 opacity-60" />
+        <Loader2 v-if="busy" class="size-3 shrink-0 animate-spin" aria-label="Connecting" />
+        <span v-else class="pane-status-dot" :class="{ 'pane-status-dot-live': pane.connected }" :title="status" />
         <span class="truncate text-[12px]" :title="`${pane.title} · ${displayAddress} · ${status}`">{{ displayAddress }}</span>
         <span class="sr-only" role="status">{{ status }}</span>
       </div>
-      <div class="flex shrink-0 items-center gap-0.5 text-muted-foreground" @click.stop
+      <div class="flex shrink-0 items-center gap-0.5" @click.stop
         @pointerdown.capture="activatePane()" @focusin="activatePane()">
-        <button class="pane-button" aria-label="Search in terminal" title="Search (Cmd/Ctrl+F)" @click="openSearch"><Search class="size-3.5" /></button>
+        <button class="pane-button" aria-label="Search in terminal" :title="`Search (${terminalShortcutLabel('F')})`" @click="openSearch"><Search class="size-3.5" /></button>
         <button class="pane-button" :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'" :title="isFullscreen ? 'Restore pane (Escape)' : 'Maximize pane'" @click="toggleFullscreen"><Minimize2 v-if="isFullscreen" class="size-3.5" /><Maximize2 v-else class="size-3.5" /></button>
         <ActionMenu :label="`Actions for ${pane.title}`" :items="actions" :enabled="!inputObscured" @select="selectAction" />
       </div>
     </header>
-    <div v-if="error" class="flex shrink-0 items-center gap-2 border-b border-border bg-background px-3 py-2 text-xs" role="alert">
-      <span class="min-w-0 flex-1 text-muted-foreground">{{ error }}</span>
-      <button v-if="!pane.connected" class="shrink-0 text-primary disabled:opacity-50" :disabled="busy" @click.stop="reconnect">Reconnect</button>
+    <div v-if="error" class="pane-notice select-text" role="alert">
+      <span class="min-w-0 flex-1">{{ error }}</span>
+      <button v-if="!pane.connected" class="pane-notice-action" :disabled="busy" @click.stop="reconnect">Reconnect</button>
     </div>
     <!-- Tab/Shift+Tab can enter xterm without a click. Publish ownership before
          any subsequent key is routed; do not gate background protocol replies. -->
     <div ref="containerRef" class="min-h-0 flex-1 overflow-hidden" @focusin="activatePane()" />
+    <div v-if="linkNotice || linkTarget" class="pointer-events-none absolute bottom-2 left-2 z-30 max-w-[calc(100%-16px)] truncate rounded-md border border-border bg-background px-2 py-1 text-[11px] text-muted-foreground shadow-lg"
+      role="status" data-testid="terminal-link-target">{{ linkNotice ?? `${linkTarget} · ⌘/Ctrl-click to copy` }}</div>
     <SshPasswordPrompt ref="passwordPrompt" :active="isActive" @activate="activatePane()" @finished="queueFocus()" />
-    <div v-if="showSearch" class="absolute right-2 top-10 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md border border-border bg-background p-1 shadow-lg" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
-      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none" @input="doSearch()" />
-      <span v-if="searchSummary" class="px-1 text-[11px] tabular-nums whitespace-nowrap select-none" :class="searchResultCount === 0 ? 'text-destructive' : 'text-muted-foreground'" aria-live="polite">{{ searchSummary }}</span>
+    <div v-if="showSearch" class="pane-search" @click.stop @keydown.stop="searchKey" @focusin="activatePane()">
+      <input ref="searchInputRef" v-model="searchQuery" aria-label="Search terminal output" placeholder="Search..." class="pane-search-input" @input="doSearch()" />
+      <span v-if="searchSummary" class="px-1 text-[11px] tabular-nums whitespace-nowrap select-none" :class="searchResultCount === 0 ? 'text-red-300' : 'opacity-70'" aria-live="polite">{{ searchSummary }}</span>
       <button class="pane-button" :aria-pressed="searchCaseSensitive" aria-label="Case sensitive" @click="searchCaseSensitive = !searchCaseSensitive; doSearch()"><CaseSensitive class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchWholeWord" aria-label="Whole word" @click="searchWholeWord = !searchWholeWord; doSearch()"><WholeWord class="size-3.5" /></button>
       <button class="pane-button" :aria-pressed="searchRegex" aria-label="Regular expression" @click="searchRegex = !searchRegex; doSearch()"><Regex class="size-3.5" /></button>
@@ -637,11 +826,28 @@ function selectAction(id: string) {
 <style scoped>
 .terminal-pane { background: var(--terminal-background); transition: box-shadow 180ms ease-out, opacity 160ms ease-out; }
 .pane-dragging { opacity: 0.5; }
-.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--workspace-accent) 70%, transparent); }
-.pane-header { @apply flex h-9 shrink-0 items-center gap-2 border-b px-2 text-muted-foreground; background: var(--terminal-toolbar); border-color: var(--terminal-border); }
-.pane-header-active { background: var(--terminal-toolbar-active); color: hsl(var(--foreground)); box-shadow: inset 2px 0 var(--workspace-accent); }
-.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current hover:bg-muted disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring; }
-.pane-button[aria-pressed="true"] { @apply bg-primary/20 text-primary; }
+/* Drop previews sit on the terminal surface, which is dark in both themes, so
+   they use the terminal's ink rather than the app's theme-dependent accent. */
+.pane-drop-target { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--terminal-ink) 70%, transparent); }
+/* The header sits on the terminal's own surface; the active pane is told
+   apart by tone (a lifted header, full-strength ink) and the others by dimming
+   their output, not by a coloured rule. */
+.pane-header { @apply flex h-9 shrink-0 items-center gap-2 px-2; background: var(--terminal-chrome); color: var(--terminal-ink-muted); box-shadow: inset 0 -1px var(--terminal-seam); transition: background-color 140ms ease-out, color 140ms ease-out; }
+.pane-header-active { background: var(--terminal-chrome-active); color: var(--terminal-ink); }
+.pane-inactive :deep(.xterm-screen) { opacity: 0.66; transition: opacity 160ms ease-out; }
+/* Output is inset from the pane's edges; FitAddon subtracts this padding when
+   it sizes the grid. */
+.terminal-pane :deep(.xterm) { padding: 8px 8px 6px 14px; }
+.pane-status-dot { @apply size-1.5 shrink-0 rounded-full; background: var(--terminal-ink-muted); opacity: 0.6; }
+.pane-status-dot-live { background: #8fbf8f; opacity: 1; }
+.pane-button { @apply flex size-8 items-center justify-center rounded-md text-current disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#948f84]; transition: background-color 120ms ease-out, color 120ms ease-out; }
+.pane-button:hover { background: color-mix(in srgb, var(--terminal-ink) 9%, transparent); color: var(--terminal-ink); }
+.pane-button[aria-pressed="true"] { background: color-mix(in srgb, var(--terminal-ink) 16%, transparent); color: var(--terminal-ink); }
+.pane-notice { @apply flex shrink-0 items-center gap-2 px-3.5 py-2 text-xs; background: var(--terminal-chrome); color: var(--terminal-ink); box-shadow: inset 0 -1px var(--terminal-seam); }
+.pane-notice-action { @apply shrink-0 rounded px-1.5 py-0.5 font-medium underline-offset-2 hover:underline disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#948f84]; color: #e2c88e; }
+.pane-search { @apply absolute right-2 top-11 z-40 flex max-w-[calc(100%-16px)] flex-wrap items-center gap-1 rounded-md p-1; background: var(--terminal-chrome-active); color: var(--terminal-ink); box-shadow: inset 0 0 0 1px var(--terminal-seam), 0 6px 14px -8px rgb(0 0 0 / 0.7); }
+.pane-search-input { @apply h-7 w-36 min-w-0 bg-transparent px-2 text-xs outline-none; color: var(--terminal-ink); }
+.pane-search-input::placeholder { color: var(--terminal-ink-muted); }
 /* Directional drop zones: four edges split the pane, the center swaps it.
    The overlay never captures pointer events so dragover/drop reach the pane.
    Each zone's tint wipes in from the edge the pane will land on and its label
@@ -651,17 +857,17 @@ function selectAction(id: string) {
 @keyframes drop-overlay-in { from { opacity: 0; } }
 .drop-zone { @apply absolute flex items-center justify-center opacity-0; transition: opacity 140ms ease-out; }
 .drop-zone::before { content: ""; @apply absolute inset-0; transition: clip-path 160ms cubic-bezier(0.23, 1, 0.32, 1); }
-.drop-zone span { @apply rounded-full bg-primary/90 px-2.5 py-1 text-[11px] font-medium text-primary-foreground opacity-0 shadow-lg backdrop-blur-sm; transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
+.drop-zone span { @apply rounded-full px-2.5 py-1 text-[11px] font-medium opacity-0; background: var(--terminal-ink); color: var(--terminal-background); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 140ms ease-out; }
 .drop-zone-active { @apply opacity-100; }
 .drop-zone-top { @apply left-0 right-0 top-0 h-1/3; }
 .drop-zone-bottom { @apply left-0 right-0 bottom-0 h-1/3; }
 .drop-zone-left { @apply left-0 top-0 bottom-0 w-1/3; }
 .drop-zone-right { @apply right-0 top-0 bottom-0 w-1/3; }
 .drop-zone-center { @apply inset-1/3; }
-/* Zone previews share the workspace accent used by the active-pane underline
-   and the reorder caret, so every drag affordance reads as one system. */
-.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--workspace-accent) 20%, transparent); }
-.drop-zone-center::before { background: color-mix(in srgb, var(--workspace-accent) 28%, transparent); border-radius: 8px; }
+/* Zone previews and their labels use the terminal's ink, the one tone that
+   reads on the pane's surface in either app theme. */
+.drop-zone-top::before, .drop-zone-bottom::before, .drop-zone-left::before, .drop-zone-right::before { background: color-mix(in srgb, var(--terminal-ink) 16%, transparent); }
+.drop-zone-center::before { background: color-mix(in srgb, var(--terminal-ink) 22%, transparent); border-radius: 8px; }
 .drop-zone-top::before { clip-path: inset(0 0 100% 0); }
 .drop-zone-bottom::before { clip-path: inset(100% 0 0 0); }
 .drop-zone-left::before { clip-path: inset(0 100% 0 0); }

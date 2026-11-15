@@ -36,6 +36,10 @@ pub enum CoreError {
     #[error("session not found: {0}")]
     SessionNotFound(String),
 
+    /// An update named a stored item that does not exist. Nothing was written.
+    #[error("{0} not found")]
+    NotFound(String),
+
     #[error("{path} is corrupt and was not loaded: {reason}")]
     CorruptState { path: String, reason: String },
 
@@ -54,6 +58,20 @@ pub enum CoreError {
     /// stays intact.
     #[error("{path} was not written: the serialized state cannot be loaded again ({reason})")]
     UnwritableState { path: String, reason: String },
+
+    /// A store write would let a vault key sign in where no saved host lets it
+    /// sign in yet, and that is not among what the user confirmed. Nothing was
+    /// written.
+    #[error(
+        "this change lets a vault key sign in where no saved host lets it sign in yet, and that \
+         was not confirmed"
+    )]
+    UnconfirmedKeyReach,
+
+    /// A store write would give a host a startup command it did not have, and
+    /// that is not among what the user confirmed. Nothing was written.
+    #[error("this change sets a startup command that was not confirmed")]
+    UnconfirmedStartupCommand,
 
     #[error("invalid input: {0}")]
     InvalidInput(String),

@@ -329,7 +329,7 @@ async fn test_vault_wrong_passphrase_fails() {
 async fn test_vault_remove_key() {
     let dir = temp_dir();
     let mut vault = Vault::open(dir.path().join("vault.json")).expect("open vault");
-    let master = vault.initialize("pass").await.expect("init vault");
+    let master = vault.initialize("passphrase").await.expect("init vault");
 
     let (private_pem, _) = generate_ed25519().expect("generate key");
     let (meta, _) = parse_openssh_private(&private_pem, None).expect("parse key");
@@ -342,7 +342,7 @@ async fn test_vault_remove_key() {
     assert!(vault.keys_meta().is_empty());
 
     // Key should no longer be retrievable
-    let result = vault.get_key("pass", &key_id).await;
+    let result = vault.get_key("passphrase", &key_id).await;
     assert!(result.is_err());
 }
 
