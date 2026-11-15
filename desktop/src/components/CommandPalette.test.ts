@@ -18,7 +18,7 @@ describe("CommandPalette keyboard selection", () => {
     wrapper = mount(CommandPalette, { props: { open: false }, attachTo: document.body });
     await wrapper.setProps({ open: true });
     await nextTick();
-    const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[placeholder="Search commands..."]')!);
+    const input = new DOMWrapper(document.querySelector<HTMLInputElement>('input[role="combobox"]')!);
 
     for (let i = 0; i < 6; i++) await input.trigger("keydown", { key: "ArrowDown" });
     await input.setValue("host");
