@@ -37,7 +37,9 @@ const vault = useVaultStore();
 const { maskAddress } = useMaskedAddress();
 const listId = useId();
 const query = ref("");
-const selectedIndex = ref(0);
+// Set when locking the vault fails. The palette stays open so the failure is
+// visible and "Lock Vault" can be run again.
+const lockError = ref<string | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
 
 interface Command {
@@ -98,9 +100,25 @@ const filteredCommands = computed(() => {
   return baseCommands.value.filter((c) => `${c.label} ${c.keywords ?? ""}`.toLowerCase().includes(q));
 });
 
+// The highlight is remembered by command id and its position is derived from
+// it. The results change without the query changing (hosts finish loading, the
+// vault auto-locks and drops "Lock Vault"), and a stored position would then
+// land on a neighbouring command or past the end of the list. When the
+// highlighted command leaves the results the highlight falls back to the first.
+const selectedId = ref<string | null>(null);
+const selectedIndex = computed(() => {
+  const index = filteredCommands.value.findIndex((c) => c.id === selectedId.value);
+  return index === -1 ? 0 : index;
+});
+
+function select(index: number) {
+  selectedId.value = filteredCommands.value[index]?.id ?? null;
+}
+
 // A new query is a new list, so the highlight starts over at its top.
 watch(query, () => {
-  selectedIndex.value = 0;
+  selectedId.value = null;
+  lockError.value = null;
 });
 
 const optionId = (index: number) => `${listId}-option-${index}`;
@@ -110,19 +128,30 @@ watch(
   (open) => {
     if (open) {
       query.value = "";
-      selectedIndex.value = 0;
+      selectedId.value = null;
+      lockError.value = null;
       nextTick(() => inputRef.value?.focus());
     }
   },
 );
+
+async function lockVault() {
+  lockError.value = null;
+  try {
+    await vault.lock();
+    emit("close");
+  } catch (e) {
+    console.error("[command-palette] failed to lock vault", e);
+    lockError.value = "Could not lock the vault. Try again.";
+  }
+}
 
 function execute(cmd: Command) {
   if (cmd.host) {
     tabs.newTab(cmd.host);
     emit("navigate", "terminal");
   } else if (cmd.id === "lock-vault") {
-    void vault.lock();
-    emit("close");
+    void lockVault();
   } else if (cmd.id === "new-terminal") {
     tabs.newTab();
     emit("navigate", "terminal");
@@ -139,10 +168,10 @@ function execute(cmd: Command) {
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    selectedIndex.value = Math.min(selectedIndex.value + 1, filteredCommands.value.length - 1);
+    select(Math.min(selectedIndex.value + 1, filteredCommands.value.length - 1));
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    selectedIndex.value = Math.max(selectedIndex.value - 1, 0);
+    select(Math.max(selectedIndex.value - 1, 0));
   } else if (e.key === "Enter") {
     e.preventDefault();
     const cmd = filteredCommands.value[selectedIndex.value];
@@ -184,6 +213,10 @@ function handleKeydown(e: KeyboardEvent) {
             <kbd class="text-[10px] text-muted-foreground rounded border border-border px-1 py-0.5">Esc</kbd>
           </div>
 
+          <div v-if="lockError" role="alert" class="px-4 py-2 border-b border-border text-[12px] text-destructive">
+            {{ lockError }}
+          </div>
+
           <!-- Results -->
           <div :id="listId" role="listbox" aria-label="Commands" class="max-h-[360px] overflow-y-auto p-1.5">
             <div
@@ -197,7 +230,7 @@ function handleKeydown(e: KeyboardEvent) {
                 i === selectedIndex ? 'bg-muted' : 'hover:bg-muted/50',
               )"
               @click="execute(cmd)"
-              @mouseenter="selectedIndex = i"
+              @mouseenter="selectedId = cmd.id"
             >
               <component
                 :is="cmd.icon"

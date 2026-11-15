@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import CommandPalette from "./CommandPalette.vue";
@@ -38,6 +38,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   wrapper?.unmount();
   wrapper = undefined;
   document.body.innerHTML = "";
@@ -78,5 +79,85 @@ describe("command palette coverage", () => {
     expect(list.getAttribute("role")).toBe("listbox");
     const active = document.getElementById(input.getAttribute("aria-activedescendant")!)!;
     expect(active.getAttribute("aria-selected")).toBe("true");
+  });
+});
+
+describe("command palette highlight when the results change", () => {
+  const borealis: Host = { ...host, id: "borealis", label: "Borealis Staging", hostname: "borealis.example.test", tags: [] };
+
+  const optionWithText = (text: string) =>
+    [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent?.includes(text))!;
+  const highlighted = () => document.querySelector<HTMLElement>('[role="option"][aria-selected="true"]')?.textContent ?? "";
+
+  it("keeps the highlighted host when a result above it disappears", async () => {
+    useHostsStore().hosts = [host, borealis];
+    useVaultStore().unlocked = true;
+    const input = await open();
+    optionWithText("Connect to Atlas Production").dispatchEvent(new MouseEvent("mouseenter"));
+    await flushPromises();
+    expect(highlighted()).toContain("Atlas Production");
+
+    // The vault auto-locking drops "Lock Vault", which sits above every host.
+    useVaultStore().unlocked = false;
+    await flushPromises();
+    expect(highlighted()).toContain("Atlas Production");
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flushPromises();
+    expect(useTabsStore().tabs.map((t) => t.title)).toEqual(["Atlas Production"]);
+  });
+
+  it("never points the input at an option that is no longer listed", async () => {
+    useHostsStore().hosts = [host, borealis];
+    const input = await open();
+    optionWithText("Connect to Borealis Staging").dispatchEvent(new MouseEvent("mouseenter"));
+    await flushPromises();
+
+    useHostsStore().hosts = [host];
+    await flushPromises();
+    const active = document.getElementById(input.getAttribute("aria-activedescendant")!);
+    expect(active?.getAttribute("aria-selected")).toBe("true");
+    expect(highlighted()).toContain("Go to Hosts");
+  });
+
+  it("leaves no active descendant when nothing matches", async () => {
+    const input = await open();
+    await search(input, "zzz-no-such-command");
+    expect(input.hasAttribute("aria-activedescendant")).toBe(false);
+  });
+});
+
+describe("command palette vault lock", () => {
+  async function runLockVault() {
+    useVaultStore().unlocked = true;
+    const input = await open();
+    await search(input, "lock vault");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flushPromises();
+  }
+
+  it("closes once the vault is locked", async () => {
+    const lock = vi.spyOn(useVaultStore(), "lock").mockResolvedValue(undefined);
+    await runLockVault();
+    expect(lock).toHaveBeenCalledTimes(1);
+    expect(wrapper!.emitted("close")).toHaveLength(1);
+  });
+
+  it("stays open and says so when locking fails, so it can be retried", async () => {
+    const lock = vi.spyOn(useVaultStore(), "lock").mockRejectedValue(new Error("backend unavailable"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    await runLockVault();
+
+    expect(wrapper!.emitted("close")).toBeUndefined();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain("Could not lock the vault");
+    expect(useVaultStore().unlocked).toBe(true);
+    expect(options().some((o) => o.includes("Lock Vault"))).toBe(true);
+
+    lock.mockResolvedValue(undefined);
+    document.querySelector<HTMLInputElement>('input[role="combobox"]')!
+      .dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+    await flushPromises();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(wrapper!.emitted("close")).toHaveLength(1);
   });
 });
