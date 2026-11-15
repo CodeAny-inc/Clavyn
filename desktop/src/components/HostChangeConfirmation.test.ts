@@ -5,6 +5,7 @@ import HostForm from "./HostForm.vue";
 import IdentityManager from "./IdentityManager.vue";
 import { useHostsStore } from "../stores/hosts";
 import { useIdentitiesStore } from "../stores/identities";
+import { answerConfirmation } from "../composables/useConfirm";
 import { getInvokeMock, setInvokeHandler } from "../test/setup";
 import type { Host, Identity } from "../types";
 
@@ -242,25 +243,30 @@ describe("IdentityManager when a save is not confirmed", () => {
     expect(calls("add_identity")[1][1].identity.key_id).toBe("generated-key");
   });
 
-  it("stays quiet when deleting is cancelled in the native dialog, and reports other failures", async () => {
+  it("stays quiet when deleting is cancelled in the native dialog, and reports other failures inline", async () => {
     const identity = keyIdentity();
     setInvokeHandler("list_identities", () => [identity]);
     let failure: unknown = DECLINED;
     setInvokeHandler("delete_identity", () => Promise.reject(failure));
-    setInvokeHandler("plugin:dialog|message", () => "Ok");
     const alert = vi.spyOn(window, "alert");
 
     wrapper = mount(IdentityManager, { attachTo: document.body });
     await flushPromises();
     await wrapper.get('[aria-label="Delete identity"]').trigger("click");
     await flushPromises();
+    answerConfirmation(true);
+    await flushPromises();
     expect(calls("delete_identity")).toHaveLength(1);
     expect(alert).not.toHaveBeenCalled();
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     expect(useIdentitiesStore().identities).toHaveLength(1);
 
     failure = "store.json was not written";
     await wrapper.get('[aria-label="Delete identity"]').trigger("click");
     await flushPromises();
-    expect(alert).toHaveBeenCalledWith("Failed to delete identity: store.json was not written");
+    answerConfirmation(true);
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toBe("Failed to delete identity: store.json was not written");
+    expect(alert).not.toHaveBeenCalled();
   });
 });

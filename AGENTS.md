@@ -31,8 +31,9 @@ far cheaper than writing throwaway scripts.
 
 The CLI holds a persistent Chromium + page (the "harness") so state survives
 across commands. It loads the Vite dev server with `desktop/e2e/tauri-fixture.js`
-mocking the full Tauri IPC surface, so SSH/SFTP/vault calls are deterministic
-and never touch the network. Every command prints one JSON object; errors
+mocking the IPC calls the terminal, SFTP and vault-status flows make, so those
+are deterministic and never touch the network; any other command throws
+`Unhandled test IPC`, so add a stub there before driving a new flow. Every command prints one JSON object; errors
 include a `remedy` field.
 
 The canonical CLI + docs live in `scripts/verify/` (agent-agnostic). The
@@ -235,7 +236,7 @@ and that the sidebar, terminal, and xterm all render.
 
 ## Building distributable versions
 - Local build (current platform only): `cd desktop && npm run tauri build`
-  - macOS: produces `.dmg` + `.app` in `desktop/src-tauri/target/release/bundle/`
+  - macOS: produces `.dmg` + `.app` in `target/release/bundle/` (the workspace target directory at the repo root)
   - Linux: produces `.deb`, `.AppImage`, `.rpm`
   - Windows: produces `.msi` + `.exe` (NSIS)
 - Cross-platform releases via GitHub Actions:

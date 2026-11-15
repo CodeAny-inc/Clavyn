@@ -4,12 +4,19 @@ import { Server, Terminal, KeyRound, FolderOpen, HardDrive, ShieldCheck, Vault, 
 import { computed } from "vue";
 import { useUpdateStore } from "../stores/update";
 import { useUiStore } from "../stores/ui";
+import { isMacPlatform } from "../lib/shortcuts";
 
 defineProps<{ activeView: string; vaultUnlocked: boolean; tabCount: number }>();
 const emit = defineEmits<{ navigate: [string]; "open-command-palette": [] }>();
 const update = useUpdateStore();
 const ui = useUiStore();
 const compact = computed(() => ui.sidebarCollapsed && !ui.mobileSidebarOpen);
+// Ctrl+K is the shell's kill-line inside a terminal off macOS, where the
+// palette answers Ctrl+Shift+K instead.
+const paletteKey = isMacPlatform() ? "⌘ K" : "Ctrl K";
+const paletteHint = isMacPlatform()
+  ? "Search commands (⌘K)"
+  : "Search commands (Ctrl+K, or Ctrl+Shift+K in a terminal)";
 const sections = [
   [
     { id: "hosts", label: "Hosts", icon: Server },
@@ -40,9 +47,9 @@ function navigate(view: string) { emit("navigate", view); ui.closeMobileSidebar(
       <button class="ml-auto flex size-8 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent md:hidden" aria-label="Close navigation" @click="ui.closeMobileSidebar()"><X class="size-4" :stroke-width="1.75" /></button>
     </div>
     <div class="px-3 pb-3 pt-5">
-      <button class="sidebar-search" aria-label="Search commands" title="Search commands (Cmd/Ctrl+K)" @click="emit('open-command-palette')">
+      <button class="sidebar-search" aria-label="Search commands" :title="paletteHint" @click="emit('open-command-palette')">
         <Search class="size-4 shrink-0" :stroke-width="1.75" />
-        <template v-if="!compact"><span class="flex-1 text-left">Search</span><kbd class="text-[10px] opacity-70">⌘ K</kbd></template>
+        <template v-if="!compact"><span class="flex-1 text-left">Search</span><kbd class="text-[10px] opacity-70">{{ paletteKey }}</kbd></template>
       </button>
     </div>
     <nav class="min-h-0 flex-1 overflow-y-auto px-3" aria-label="Main navigation">

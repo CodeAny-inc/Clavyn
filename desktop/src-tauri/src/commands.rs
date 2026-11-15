@@ -1,16 +1,15 @@
 use crate::host_change_prompt;
 use crate::host_key_prompt;
-use crate::state::{end_of_output, AppState, LocalTerminal, LocalTerminals, OutputSink};
+use crate::state::{end_of_output, AppState, EpochMark, LocalTerminal, LocalTerminals, OutputSink};
 use clavyn_core::host::{AuthMethod, Host, HostGroup};
 use clavyn_core::identity::Identity;
 use clavyn_core::keys::{generate_ed25519, import_openssh_private, parse_openssh_private, KeyMeta};
 use clavyn_core::known_hosts::{HostKeyChange, KnownHosts};
-use clavyn_core::output::OutputBatcher;
+use clavyn_core::output::OutputCredit;
 use clavyn_core::sftp::SftpEntry;
 use clavyn_core::store::StoreData;
 use clavyn_core::workspace::Workspace;
 use std::sync::Arc;
-use std::time::Instant;
 use tauri::ipc::InvokeResponseBody;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
@@ -199,7 +198,9 @@ pub async fn generate_key(state: State<'_, Arc<AppState>>, label: String) -> Api
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &private).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(meta)
 }
 
@@ -214,15 +215,25 @@ pub async fn import_key(
     // every exit from this command.
     let openssh_private = zeroize::Zeroizing::new(openssh_private);
     let key_passphrase = key_passphrase.map(zeroize::Zeroizing::new);
-    let key_passphrase = key_passphrase.as_ref().map(|p| p.as_str());
     // The vault is what protects stored keys, and connecting reads a stored key
     // without a passphrase, so a key's own passphrase is removed before storing.
-    let (mut meta, stored) =
-        import_openssh_private(&openssh_private, key_passphrase).map_err(err)?;
+    // Removing it runs the key's KDF, which can take seconds of CPU, so it runs
+    // on the blocking pool and before the vault mutex is taken.
+    let (mut meta, stored) = tokio::task::spawn_blocking(move || {
+        import_openssh_private(
+            &openssh_private,
+            key_passphrase.as_deref().map(String::as_str),
+        )
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
     meta.label = label;
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.add_key(&key, meta.clone(), &stored).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(meta)
 }
 
@@ -230,7 +241,9 @@ pub async fn import_key(
 pub async fn delete_key(state: State<'_, Arc<AppState>>, key_id: Uuid) -> ApiResult<()> {
     let (key, mut vault) = state.unlocked_vault().await?;
     vault.remove_key(&key, &key_id.to_string()).map_err(err)?;
-    state.record_vault_epoch(&vault).await;
+    let mark = EpochMark::of(&vault);
+    drop(vault);
+    state.record_vault_epoch(mark).await;
     Ok(())
 }
 
@@ -602,8 +615,8 @@ pub async fn connect_ssh(
     let password = password.map(zeroize::Zeroizing::new);
     // Bounded like `session_resize`, before anything else, so a zero-width or
     // absurd terminal size is refused rather than requested from the server.
-    let cols = u32::from(pty_dimension("cols", cols.unwrap_or(80))?);
-    let rows = u32::from(pty_dimension("rows", rows.unwrap_or(24))?);
+    let (cols, rows) = pty_geometry(cols, rows)?;
+    let (cols, rows) = (u32::from(cols), u32::from(rows));
     let passphrase = state.vault_session.passphrase().await;
     let (host, identity) = saved_host(&state, host_id).await?;
     let info = ssh_connection_info(&host, identity.as_ref(), expected_username.as_deref())?;
@@ -674,6 +687,39 @@ pub async fn connect_ssh(
 /// resource claim on the machine.
 const MAX_LOCAL_TERMINALS: usize = 16;
 
+/// PTY reads a local terminal's reader thread can have handed over and not yet
+/// had batched. Bounded so that a terminal whose output window is spent holds
+/// at most this many reads, and the thread blocks rather than reading on.
+const PTY_READS_IN_FLIGHT: usize = 16;
+
+/// Read a local terminal's PTY until it ends, handing each read to `chunks`.
+///
+/// Blocks while `chunks` is full, and that is what holds the shell back while
+/// its output window is spent: the PTY is left unread, its buffer fills, and
+/// the shell's writes block. Returns once the PTY ends or the receiving task
+/// is gone.
+fn forward_pty_output(
+    mut reader: Box<dyn std::io::Read + Send>,
+    chunks: tokio::sync::mpsc::Sender<Vec<u8>>,
+) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if chunks.blocking_send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+            Err(_) => break,
+        }
+    }
+}
+
 /// Decide whether a new local terminal may take `session_id`.
 ///
 /// `session_write`, `session_resize` and the `session-data` event stream all
@@ -728,8 +774,7 @@ pub async fn create_local_terminal(
 ) -> ApiResult<()> {
     use portable_pty::*;
 
-    let rows = pty_dimension("rows", rows.unwrap_or(24))?;
-    let cols = pty_dimension("cols", cols.unwrap_or(80))?;
+    let (cols, rows) = pty_geometry(cols, rows)?;
 
     let (dead, admission) = {
         let mut locals = state.local_terminals.lock().await;
@@ -795,7 +840,7 @@ pub async fn create_local_terminal(
 
     let child = release_on_err!(pair.slave.spawn_command(cmd), "spawn");
 
-    let mut reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
+    let reader = release_on_err!(pair.master.try_clone_reader(), "clone reader");
 
     let writer = Arc::new(std::sync::Mutex::new(release_on_err!(
         pair.master.take_writer(),
@@ -815,11 +860,13 @@ pub async fn create_local_terminal(
     // the newer request's slot. SSH cannot have taken the id meanwhile:
     // `connect_ssh` refuses any id the local map holds, reservations included.
     let owns_session_id = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let credit = Arc::new(OutputCredit::new());
     let terminal = LocalTerminal {
         writer,
         master,
         child: crate::state::LocalShell::new(child),
         owns_session_id: owns_session_id.clone(),
+        credit: credit.clone(),
     };
     let refused = {
         let mut locals = state.local_terminals.lock().await;
@@ -839,65 +886,27 @@ pub async fn create_local_terminal(
         return Err(error);
     }
 
-    // The PTY read is blocking, so coalescing happens on a second thread that
-    // can wait on a deadline as well as on the next chunk.
-    let (chunks, incoming) = std::sync::mpsc::channel::<Vec<u8>>();
+    // The PTY read is blocking, so it runs on a thread of its own and hands
+    // what it reads to a task that batches it. The channel between the two is
+    // bounded: while the pane is a window of output behind, the task stops
+    // taking reads, the thread blocks once the channel is full and stops
+    // reading the PTY, and the shell's own writes block in turn.
+    let (chunks, incoming) = tokio::sync::mpsc::channel::<Vec<u8>>(PTY_READS_IN_FLIGHT);
 
     let app_handle = app.clone();
     let sid = session_id;
     let owns = owns_session_id.clone();
 
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = [0u8; 8192];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if chunks.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    continue;
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    std::thread::spawn(move || forward_pty_output(reader, chunks));
 
-    std::thread::spawn(move || {
-        use std::sync::mpsc::RecvTimeoutError;
-        let mut batcher = OutputBatcher::new(Instant::now());
-        let deliver = |batcher: &mut OutputBatcher| {
-            if !batcher.is_empty() {
-                let _ = on_output.send(InvokeResponseBody::Raw(batcher.batch().to_vec()));
-                batcher.mark_flushed(Instant::now());
-            }
-        };
-        loop {
-            let received = match batcher.deadline() {
-                Some(at) => incoming.recv_timeout(at.saturating_duration_since(Instant::now())),
-                None => incoming.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match received {
-                Ok(chunk) => {
-                    if batcher.push(&chunk, Instant::now()) {
-                        deliver(&mut batcher);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => deliver(&mut batcher),
-                Err(RecvTimeoutError::Disconnected) => {
-                    // Trailing output belongs to this session: hand it over,
-                    // then end the stream on the same sink so the frontend
-                    // learns that nothing follows it.
-                    deliver(&mut batcher);
-                    let _ = on_output.send(end_of_output());
-                    break;
-                }
-            }
-        }
+    tauri::async_runtime::spawn(async move {
+        clavyn_core::output::pump(incoming, &credit, |batch| {
+            let _ = on_output.send(InvokeResponseBody::Raw(batch.to_vec()));
+        })
+        .await;
+        // The trailing output has been handed over; end the stream on the same
+        // sink so the frontend learns that nothing follows it.
+        let _ = on_output.send(end_of_output());
         // Announcing this shell's exit on an id that now belongs to a
         // replacement would disconnect the replacement.
         if owns.load(std::sync::atomic::Ordering::Acquire) {
@@ -972,6 +981,16 @@ fn pty_dimension(name: &str, value: u32) -> ApiResult<u16> {
     }
 }
 
+/// The geometry a new terminal opens with: 80x24 for a dimension the caller
+/// leaves out, and the same bounds as a resize for one it supplies, so the
+/// first size a session gets is checked exactly like every later one.
+fn pty_geometry(cols: Option<u32>, rows: Option<u32>) -> ApiResult<(u16, u16)> {
+    Ok((
+        pty_dimension("cols", cols.unwrap_or(80))?,
+        pty_dimension("rows", rows.unwrap_or(24))?,
+    ))
+}
+
 #[tauri::command]
 pub async fn session_resize(
     state: State<'_, Arc<AppState>>,
@@ -1006,6 +1025,29 @@ pub async fn session_resize(
         return Ok(());
     }
     Err("session not found".into())
+}
+
+/// Acknowledge `bytes` of a session's output as consumed by the webview.
+///
+/// Every session stops taking output once a window of it is unacknowledged: an
+/// SSH session stops reading its connection and a local terminal its PTY. A
+/// webview that falls behind therefore slows the producer down instead of
+/// letting undelivered output pile up in the IPC layer. An id with no live
+/// session is accepted and ignored: acknowledgements trail the output they
+/// cover and can arrive after the session has closed.
+#[tauri::command]
+pub async fn session_output_ack(
+    state: State<'_, Arc<AppState>>,
+    session_id: String,
+    bytes: u64,
+) -> ApiResult<()> {
+    if state.sessions.ack(&session_id, bytes).await {
+        return Ok(());
+    }
+    if let Some(term) = state.local_terminals.lock().await.get_live(&session_id) {
+        term.credit.refund(bytes);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1554,6 +1596,110 @@ mod local_terminal_reaping_tests {
 }
 
 #[cfg(test)]
+mod local_output_flow_control_tests {
+    use super::*;
+    use clavyn_core::output::{pump, MAX_BATCH, OUTPUT_WINDOW};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
+
+    /// Counts what is read through it.
+    struct Counted {
+        inner: Box<dyn std::io::Read + Send>,
+        read: Arc<AtomicU64>,
+    }
+
+    impl std::io::Read for Counted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.read.fetch_add(n as u64, Ordering::SeqCst);
+            Ok(n)
+        }
+    }
+
+    /// Waits until `counter` holds still for a while and returns its value.
+    async fn settled(counter: &AtomicU64, what: &str) -> u64 {
+        let settle = async {
+            let mut last = counter.load(Ordering::SeqCst);
+            loop {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                let now = counter.load(Ordering::SeqCst);
+                if now == last && now > 0 {
+                    return now;
+                }
+                last = now;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(20), settle)
+            .await
+            .unwrap_or_else(|_| panic!("{what} kept growing with nothing acknowledged"))
+    }
+
+    /// A shell that writes without pause is held back by its unacknowledged
+    /// output: the PTY stops being read, rather than read into memory without
+    /// limit, until the webview catches up.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_local_shell_is_held_back_while_its_output_is_unacknowledged() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("a pty");
+        let mut child = pair
+            .slave
+            .spawn_command(CommandBuilder::new("yes"))
+            .expect("yes can be spawned");
+        drop(pair.slave);
+
+        let read = Arc::new(AtomicU64::new(0));
+        let reader = Counted {
+            inner: pair.master.try_clone_reader().expect("a reader"),
+            read: read.clone(),
+        };
+        let (chunks, incoming) = tokio::sync::mpsc::channel(PTY_READS_IN_FLIGHT);
+        std::thread::spawn(move || forward_pty_output(Box::new(reader), chunks));
+        let credit = Arc::new(OutputCredit::new());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let pumping = tokio::spawn({
+            let credit = credit.clone();
+            let delivered = delivered.clone();
+            async move {
+                pump(incoming, &credit, |batch| {
+                    delivered.fetch_add(batch.len() as u64, Ordering::SeqCst);
+                })
+                .await
+            }
+        });
+
+        let read_size = 8192;
+        let first = settled(&delivered, "delivered output").await;
+        assert!(first >= OUTPUT_WINDOW, "stalled at {first} bytes, short of the window");
+        assert!(first <= OUTPUT_WINDOW + (MAX_BATCH + read_size) as u64);
+        let held_at = settled(&read, "output read from the pty").await;
+        let in_flight = (MAX_BATCH + read_size * (PTY_READS_IN_FLIGHT + 1)) as u64;
+        assert!(held_at <= first + in_flight, "{held_at} bytes read for {first} delivered");
+
+        credit.refund(first);
+        let second = settled(&delivered, "delivered output").await;
+        assert!(second > first, "acknowledged output did not resume the terminal");
+
+        // A terminal leaving the map lifts the limit, and the output task then
+        // ends with the PTY.
+        credit.lift();
+        let _ = child.kill();
+        let _ = child.wait();
+        tokio::time::timeout(Duration::from_secs(10), pumping)
+            .await
+            .expect("the output task outlived the shell")
+            .expect("pump");
+    }
+}
+
+#[cfg(test)]
 mod ssh_connection_info_tests {
     use super::*;
 
@@ -1609,7 +1755,7 @@ mod ssh_connection_info_tests {
 
 #[cfg(test)]
 mod pty_dimension_tests {
-    use super::pty_dimension;
+    use super::{pty_dimension, pty_geometry};
 
     #[test]
     fn accepts_ordinary_terminal_geometry() {
@@ -1632,20 +1778,17 @@ mod pty_dimension_tests {
         assert!(pty_dimension("rows", 10_001).is_err());
     }
 
-    // `create_local_terminal` defaults a missing dimension to 80x24 and then
-    // runs the supplied one through the same helper, so the geometry a PTY is
-    // opened with is bounded the same way a later resize is. Before this the
-    // creation path used a plain `as` cast, and 65536 opened a 0-column PTY.
+    // `create_local_terminal` and `connect_ssh` open terminals through
+    // `pty_geometry`, so a missing dimension defaults to 80x24 and a supplied
+    // one is bounded the same way a later resize is. A plain `as` cast there
+    // would turn 65536 into a 0-column PTY.
     #[test]
     fn creation_defaults_and_supplied_values_share_the_resize_bounds() {
-        assert_eq!(pty_dimension("rows", Some(24_u32).unwrap_or(24)).unwrap(), 24);
-        assert_eq!(pty_dimension("cols", Some(80_u32).unwrap_or(80)).unwrap(), 80);
-        assert_eq!(pty_dimension("cols", None::<u32>.unwrap_or(80)).unwrap(), 80);
+        assert_eq!(pty_geometry(None, None).unwrap(), (80, 24));
+        assert_eq!(pty_geometry(Some(132), Some(43)).unwrap(), (132, 43));
         for value in [0_u32, 10_001, 65_536, u32::MAX] {
-            assert!(
-                pty_dimension("cols", Some(value).unwrap_or(80)).is_err(),
-                "creation accepted {value}"
-            );
+            assert!(pty_geometry(Some(value), None).is_err(), "creation accepted {value} columns");
+            assert!(pty_geometry(None, Some(value)).is_err(), "creation accepted {value} rows");
         }
     }
 
@@ -1980,6 +2123,113 @@ mod connect_lock_tests {
         let keys = vault_keys(&state).await.expect("unlocked");
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].label, "work laptop");
+    }
+}
+
+#[cfg(test)]
+mod key_store_off_lock_tests {
+    use super::*;
+    use crate::state::VaultSession;
+    use crate::vault_epoch::BlockingEpochStore;
+    use russh::keys::ssh_key;
+    use std::future::Future;
+    use std::sync::atomic::Ordering;
+    use tauri::Manager;
+
+    async fn unlock(state: &AppState) {
+        let (binding_id, master) = {
+            let mut vault = state.vault.lock().await;
+            let master = vault.initialize("passphrase").await.expect("initialize");
+            (vault.binding_id().expect("binding").to_owned(), master)
+        };
+        state
+            .vault_session
+            .unlock_if_current(
+                &state.auth_generation,
+                state.auth_generation.current(),
+                VaultSession::new(
+                    zeroize::Zeroizing::new("passphrase".to_string()),
+                    master,
+                    binding_id,
+                ),
+            )
+            .await;
+    }
+
+    /// The credential store can sit on a prompt for as long as the user leaves
+    /// it up. A save must not keep the vault while it waits, or every key
+    /// operation, connect and reset queues behind the dialog.
+    #[tokio::test]
+    async fn a_save_releases_the_vault_before_recording_its_epoch() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        let (store, mut parked, release) = BlockingEpochStore::new();
+        Arc::get_mut(&mut state).expect("sole owner").epoch_store = store.clone();
+        unlock(&state).await;
+        app.manage(state);
+
+        store.armed.store(true, Ordering::SeqCst);
+        let generating = generate_key(app.state(), "k".into());
+        tokio::pin!(generating);
+        tokio::select! {
+            _ = parked.recv() => {}
+            result = &mut generating => panic!("never reached the credential store: {result:?}"),
+        }
+        let vault_free = app.state::<Arc<AppState>>().vault.try_lock().is_ok();
+        store.armed.store(false, Ordering::SeqCst);
+        release.send(()).expect("release");
+        generating.await.expect("generate");
+
+        assert!(
+            vault_free,
+            "the vault stayed locked while the credential store was blocked"
+        );
+    }
+
+    /// Removing a key's own passphrase runs its KDF, which must not run on the
+    /// async worker polling the command: every other task on that worker would
+    /// wait for it. Polled once, the command has to hand the KDF off and return
+    /// before the key is decrypted and stored.
+    #[tokio::test]
+    async fn importing_a_protected_key_hands_its_kdf_to_the_blocking_pool() {
+        let app = tauri::test::mock_app();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state = AppState::init(app.handle(), dir.path().to_path_buf()).expect("state");
+        unlock(&state).await;
+        app.manage(state);
+        let (plain, _) = generate_ed25519().expect("generate");
+        // `ssh-keygen`'s default protection: aes256-ctr under 16 bcrypt rounds.
+        let kdf = ssh_key::Kdf::Bcrypt {
+            salt: vec![7; 16],
+            rounds: 16,
+        };
+        let protected = ssh_key::PrivateKey::from_openssh(&*plain)
+            .expect("read")
+            .encrypt_with(ssh_key::Cipher::Aes256Ctr, kdf, 0, "key passphrase")
+            .expect("encrypt")
+            .to_openssh(ssh_key::LineEnding::LF)
+            .expect("serialize")
+            .to_string();
+
+        let mut importing = std::pin::pin!(import_key(
+            app.state(),
+            "k".into(),
+            protected,
+            Some("key passphrase".into())
+        ));
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(importing.as_mut().poll(&mut cx).is_pending());
+        let decrypted_inline = match app.state::<Arc<AppState>>().vault.try_lock() {
+            Ok(vault) => !vault.keys_meta().is_empty(),
+            Err(_) => true,
+        };
+        importing.await.expect("import");
+
+        assert!(
+            !decrypted_inline,
+            "the first poll ran the KDF on the async worker"
+        );
     }
 }
 

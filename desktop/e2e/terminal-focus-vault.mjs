@@ -20,7 +20,7 @@ const inspect = page => page.evaluate(() => ({
   focused: document.activeElement?.closest(".terminal-pane")?.getAttribute("data-host-id") ?? null,
   focusLabel: document.activeElement?.getAttribute("aria-label") ?? null,
   focusTag: document.activeElement?.tagName,
-  paletteValue: document.querySelector('input[placeholder="Search commands..."]')?.value,
+  paletteValue: document.querySelector('input[role="combobox"]')?.value,
   attempts: window.__reviewTest?.attempts,
   writes: window.__terminalTest.writes,
   connects: window.__terminalTest.connects,
@@ -128,7 +128,7 @@ async function startPending(page, type = "ssh") {
 async function openPalette(page) {
   if (page.viewportSize().width < 768) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await page.getByRole("button", { name: "Search commands", exact: true }).click();
-  const input = page.getByPlaceholder("Search commands...");
+  const input = page.getByRole("combobox", { name: "Search commands and hosts" });
   await input.fill("Go to ");
   return input;
 }
@@ -240,8 +240,17 @@ try {
     await page.getByText("Atlas Production", { exact: true }).filter({ visible: true }).first().dblclick();
     const input = page.getByLabel("Master passphrase", { exact: true });
     await input.fill("fixture-");
-    // A global new-tab shortcut must not redirect subsequent passphrase typing.
+    // The new-tab shortcut does nothing under the prompt: a modal owns the keyboard.
     await page.keyboard.press("Control+n");
+    await page.waitForTimeout(300);
+    assert.equal(await page.evaluate(() => window.__terminalTest.connects.filter(item => item.host === "local").length), 0,
+      "The new-tab shortcut opens nothing beneath the unlock prompt");
+    // A local shell that something else opens beneath the prompt, such as
+    // restoring a workspace, must not redirect subsequent passphrase typing.
+    await page.evaluate(async () => {
+      const { useTabsStore } = await import("/src/stores/tabs.ts");
+      useTabsStore().newTab();
+    });
     await page.waitForFunction(() => window.__terminalTest.connects.some(item => item.host === "local"));
     await page.waitForFunction(() => Array.from(document.querySelectorAll('.terminal-pane')).some(el =>
       !el.dataset.hostId && el.dataset.connected === "true"));

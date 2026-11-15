@@ -53,6 +53,7 @@
     "allow-create-local-terminal",
     "allow-session-write",
     "allow-session-resize",
+    "allow-session-output-ack",
     "allow-close-session",
     "allow-list-sessions",
     "allow-sftp-connect",
