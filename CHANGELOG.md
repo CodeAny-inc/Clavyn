@@ -51,7 +51,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stub and the capability refused the native dialog — so deleting a vault
   key, host, identity, known host, workspace or remote file took a single
   click, and an SFTP transfer overwrote an existing file silently.
-  Destructive confirmations now render in the page. (#172)
+  Destructive confirmations now render in the page, deleting a key warns
+  that it is permanent, and removing a known host masks the address.
+  (#172)
+- **Dialogs manage keyboard focus.** Opening a dialog focuses its first
+  field, Tab is trapped inside, Escape closes it and returns focus to the
+  opener, and a click on the backdrop no longer throws away a filled-in
+  form. (#181)
+- **App-wide shortcuts no longer act on the page behind an open modal** —
+  Ctrl+N cannot open a tab under the unlock prompt and Ctrl+, cannot
+  unmount a filled form; the chord is claimed so the webview's own binding
+  does not fire either. (#196)
 - **Terminal output can no longer grow memory without bound.** A producer
   faster than the webview — a fast server or a local `cat` — grew the IPC
   queue until the app ran out of memory. Every session now has a 2 MiB
